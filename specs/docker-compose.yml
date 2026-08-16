@@ -10,7 +10,8 @@ services:
       POSTGRES_PASSWORD: riven_dev_password
       POSTGRES_DB: riven
     ports:
-      - "5432:5432"
+      # Host 5433 avoids colliding with a local Postgres install on the default 5432.
+      - "5433:5432"
     volumes:
       - riven_postgres_data:/var/lib/postgresql/data
     healthcheck:
