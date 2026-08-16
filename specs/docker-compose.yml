@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: riven_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: riven
+      POSTGRES_PASSWORD: riven_dev_password
+      POSTGRES_DB: riven
+    ports:
+      - "5432:5432"
+    volumes:
+      - riven_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U riven -d riven"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: riven_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - riven_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.9
+    container_name: riven_meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: riven_dev_master_key
+      MEILI_ENV: development
+    ports:
+      - "7700:7700"
+    volumes:
+      - riven_meili_data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  riven_postgres_data:
+  riven_redis_data:
+  riven_meili_data:
