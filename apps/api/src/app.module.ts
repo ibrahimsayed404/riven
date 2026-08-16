@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { PrismaModule } from './infra/prisma/prisma.module';
 import { validateEnv } from './infra/config/env.validation';
+import { AuthModule } from './modules/auth/auth.module';
 
 @Controller('health')
 class HealthController {
@@ -21,6 +22,7 @@ class HealthController {
       validate: validateEnv,
     }),
     PrismaModule,
+    AuthModule,
   ],
   controllers: [HealthController],
 })
