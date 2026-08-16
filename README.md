@@ -19,7 +19,7 @@ riven/
 
 - Node.js 20+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable` recommended)
-- Docker (for local Postgres, Redis, Meilisearch — see `specs/docker-compose.yml`)
+- Docker (for local Postgres, Redis, Meilisearch — see `docker-compose.yml`)
 
 ## Getting started
 
