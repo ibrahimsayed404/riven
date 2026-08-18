@@ -15,6 +15,20 @@ export class AuthRepository {
     return this.prisma.user.findUnique({ where: { id } });
   }
 
+  findAuthenticatedUserById(
+    id: string,
+  ): Promise<Pick<User, 'id' | 'email' | 'name' | 'role'> | null> {
+    return this.prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+      },
+    });
+  }
+
   createUser(data: Prisma.UserCreateInput): Promise<User> {
     return this.prisma.user.create({ data });
   }
