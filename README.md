@@ -43,6 +43,10 @@ Copy `.env.example` to `.env` before running services locally.
 
 Read `specs/STARTING_PROMPT.md` first, then the module specs in `specs/` before building features.
 
+## Development process
+
+This project follows a strict small-step, evidence-based workflow. See [WORKFLOW.md](./WORKFLOW.md) for the full process.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for commit conventions, branch naming, and workflow expectations.

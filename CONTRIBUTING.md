@@ -2,6 +2,8 @@
 
 This document defines how we work in this monorepo — even when working solo. Consistency here keeps history scannable and makes changelogs and reviews straightforward later.
 
+> **Before writing any code, read [WORKFLOW.md](./WORKFLOW.md)** — it documents the step-by-step development cycle we follow for every task.
+
 ## Branch strategy
 
 - **Default branch:** `main`
