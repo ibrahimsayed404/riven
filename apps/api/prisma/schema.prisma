@@ -1,3 +1,19 @@
+// ============================================================================
+// Riven — Prisma Schema (v1)
+// PostgreSQL + PostGIS
+//
+// Notes on PostGIS:
+// - Prisma has no native geography type, so location columns use
+//   `Unsupported("geography(Point, 4326)")`. Prisma Client will NOT let you
+//   query/write these directly — do that via `$queryRaw` / `$executeRaw`
+//   in the repository layer (e.g. bazaars.repository.ts), never in services.
+// - GIST spatial indexes are NOT created by `prisma migrate dev` for
+//   Unsupported columns. After each migration that touches a location
+//   column, hand-add the index in that migration's generated SQL file:
+//     CREATE INDEX bazaar_location_gist ON "Bazaar" USING GIST (location);
+//   This file's inline comments mark every column that needs one.
+// ============================================================================
+
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
@@ -9,6 +25,10 @@ datasource db {
   extensions = [postgis]
 }
 
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
 enum Role {
   SHOPPER
   VENDOR
@@ -16,20 +36,137 @@ enum Role {
   ADMIN
 }
 
+enum ScheduleType {
+  ONE_OFF
+  RECURRING
+}
+
+enum BazaarStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+  COMPLETED
+}
+
+enum ApplicationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+enum EventType {
+  TALK
+  MEETUP
+  SCREENING
+  MARKET
+}
+
+enum FollowableType {
+  VENDOR
+  BAZAAR
+}
+
+enum FavorableType {
+  VENDOR
+  BAZAAR
+  EVENT
+}
+
+enum RatingTargetType {
+  VENDOR
+  BAZAAR
+  EVENT
+}
+
+enum NotificationType {
+  BAZAAR_NEARBY
+  FOLLOWED_VENDOR_NEW_BAZAAR
+  EVENT_REMINDER
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum PayerType {
+  VENDOR
+  ORGANIZER
+}
+
+enum PaymentPurpose {
+  SUBSCRIPTION
+  BAZAAR_FEE
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum VendorType {
+  BAZAAR_ONLY
+  MARKETPLACE
+  BOTH
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+// ----------------------------------------------------------------------------
+// Identity
+// ----------------------------------------------------------------------------
+
 model User {
-  id           String   @id @default(uuid())
+  id           String                                 @id @default(uuid())
   name         String
-  email        String   @unique
+  email        String                                 @unique
+  phone        String?                                @unique
   passwordHash String
   role         Role
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  // GIST index required: CREATE INDEX user_location_gist ON "User" USING GIST (location);
+  location     Unsupported("geography(Point, 4326)")?
+  interests    String[]                               @default([])
 
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  vendor        Vendor?
+  organizer     Organizer?
+  follows       Follow[]
+  favorites     Favorite[]
+  ratings       Rating[]
+  notifications Notification[]
   refreshTokens RefreshToken[]
+  cart          Cart?
+  orderGroups   OrderGroup[]
+  orders        Order[]
 
+  @@index([role])
   @@map("users")
 }
 
+// A row per issued refresh token, not just one column on User — this lets a
+// user be logged in on multiple devices (phone + web) and lets you revoke
+// one session without killing every session. Token itself is never stored
+// raw: only its hash, so a leaked DB dump doesn't hand out live sessions.
 model RefreshToken {
   id        String    @id @default(uuid())
   userId    String
@@ -43,3 +180,429 @@ model RefreshToken {
   @@index([revokedAt])
   @@map("refresh_tokens")
 }
+
+model Vendor {
+  id      String @id @default(uuid())
+  ownerId String @unique
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  name               String
+  category           String
+  description        String?
+  logo               String?
+  coverMedia         String[]                               @default([])
+  hasFixedLocation   Boolean                                @default(false)
+  // GIST index required: CREATE INDEX vendor_home_location_gist ON "Vendor" USING GIST ("homeLocation");
+  homeLocation       Unsupported("geography(Point, 4326)")?
+  verified           Boolean                                @default(false)
+  subscriptionStatus SubscriptionStatus                     @default(TRIALING)
+
+  vendorType     VendorType @default(BAZAAR_ONLY)
+  brandStory     String?
+  logoUrl        String?
+  bannerUrl      String?
+  returnPolicy   String?
+  shippingPolicy String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  products      Product[]
+  orders        Order[]
+  boothListings BoothListing[]
+  subscription  Subscription?
+
+  @@index([category])
+  @@index([verified])
+  @@map("vendors")
+}
+
+model Category {
+  id       String     @id @default(uuid())
+  name     String
+  slug     String     @unique
+  parentId String?
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+
+  products Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id       String @id @default(uuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  title       String
+  description String
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  basePrice   Decimal  @db.Money
+  images      String[]
+
+  approvalStatus ApprovalStatus @default(PENDING)
+  isActive       Boolean        @default(true)
+
+  variants   ProductVariant[]
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([vendorId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+model ProductVariant {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  sku           String   @unique
+  size          String?
+  color         String?
+  priceOverride Decimal? @db.Money // null = use Product.basePrice
+  stockQuantity Int      @default(0)
+
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@map("product_variants")
+}
+
+model Organizer {
+  id      String @id @default(uuid())
+  ownerId String @unique
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  name     String
+  verified Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  bazaars Bazaar[]
+  events  Event[]
+
+  @@map("organizers")
+}
+
+// ----------------------------------------------------------------------------
+// Bazaars, booths, events
+// ----------------------------------------------------------------------------
+
+model Bazaar {
+  id          String    @id @default(uuid())
+  organizerId String
+  // Restrict: don't allow deleting an organizer with active bazaars —
+  // force explicit handling (cancel/transfer bazaars first).
+  organizer   Organizer @relation(fields: [organizerId], references: [id], onDelete: Restrict)
+
+  name           String
+  description    String?
+  coverMedia     String[]                              @default([])
+  // GIST index required: CREATE INDEX bazaar_location_gist ON "Bazaar" USING GIST (location);
+  location       Unsupported("geography(Point, 4326)")
+  scheduleType   ScheduleType
+  recurrenceRule String? // e.g. iCal RRULE string, required if scheduleType = RECURRING
+  startDate      DateTime
+  endDate        DateTime?
+  status         BazaarStatus                          @default(DRAFT)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  boothListings BoothListing[]
+  boothLayout   BoothLayout?
+  events        Event[]
+
+  @@index([status])
+  @@index([organizerId])
+  @@map("bazaars")
+}
+
+model BoothLayout {
+  id         String @id @default(uuid())
+  bazaarId   String @unique
+  bazaar     Bazaar @relation(fields: [bazaarId], references: [id], onDelete: Cascade)
+  gridConfig Json // { rows, cols, cellSize, background? } — isometric render config
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  booths Booth[]
+
+  @@map("booth_layouts")
+}
+
+model Booth {
+  id        String      @id @default(uuid())
+  layoutId  String
+  layout    BoothLayout @relation(fields: [layoutId], references: [id], onDelete: Cascade)
+  label     String // e.g. "A-12"
+  positionX Int
+  positionY Int
+  width     Int
+  height    Int
+
+  boothListingId String?       @unique
+  boothListing   BoothListing? @relation(fields: [boothListingId], references: [id], onDelete: SetNull)
+
+  @@unique([layoutId, label])
+  @@index([layoutId])
+  @@map("booths")
+}
+
+model BoothListing {
+  id                String            @id @default(uuid())
+  bazaarId          String
+  bazaar            Bazaar            @relation(fields: [bazaarId], references: [id], onDelete: Cascade)
+  vendorId          String
+  vendor            Vendor            @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  applicationStatus ApplicationStatus @default(PENDING)
+  appliedAt         DateTime          @default(now())
+  decidedAt         DateTime?
+
+  booth Booth?
+
+  // A vendor can't apply to the same bazaar twice — DB-enforced, not app-level,
+  // so concurrent requests can't race past an application-status check.
+  @@unique([bazaarId, vendorId])
+  @@index([bazaarId, applicationStatus])
+  @@index([vendorId])
+  @@map("booth_listings")
+}
+
+model Event {
+  id          String    @id @default(uuid())
+  bazaarId    String?
+  bazaar      Bazaar?   @relation(fields: [bazaarId], references: [id], onDelete: Cascade)
+  organizerId String
+  organizer   Organizer @relation(fields: [organizerId], references: [id], onDelete: Restrict)
+
+  title      String
+  type       EventType
+  // GIST index required: CREATE INDEX event_location_gist ON "Event" USING GIST (location);
+  location   Unsupported("geography(Point, 4326)")
+  startsAt   DateTime
+  endsAt     DateTime?
+  coverMedia String[]                              @default([])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([organizerId])
+  @@index([bazaarId])
+  @@index([startsAt])
+  @@map("events")
+}
+
+// ----------------------------------------------------------------------------
+// Social: follow / favorite / rating
+// Polymorphic target (followableType/Id etc.) — integrity enforced in the
+// service layer, not a DB foreign key, by design (per architecture doc).
+// ----------------------------------------------------------------------------
+
+model Follow {
+  id             String         @id @default(uuid())
+  userId         String
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Polymorphic target — intentionally NOT a DB foreign key (followableId can
+  // point at Vendor or Bazaar). Integrity is enforced in follows.service.ts:
+  // verify the target exists before insert. See backend-architecture.md §1.
+  followableType FollowableType
+  followableId   String
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, followableType, followableId])
+  @@index([followableType, followableId])
+  @@map("follows")
+}
+
+model Favorite {
+  id            String        @id @default(uuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  favorableType FavorableType
+  favorableId   String
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, favorableType, favorableId])
+  @@index([favorableType, favorableId])
+  @@map("favorites")
+}
+
+model Rating {
+  id         String           @id @default(uuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetType RatingTargetType
+  targetId   String
+  score      Int // 1-5, enforce range via CHECK constraint below
+  comment    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, targetType, targetId]) // one rating per user per target
+  @@index([targetType, targetId])
+  @@map("ratings")
+}
+
+// ----------------------------------------------------------------------------
+// Notifications
+// ----------------------------------------------------------------------------
+
+model Notification {
+  id             String           @id @default(uuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           NotificationType
+  idempotencyKey String?          @unique
+  payload        Json
+  readAt         DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ----------------------------------------------------------------------------
+// Payments
+// ----------------------------------------------------------------------------
+
+model Subscription {
+  id               String             @id @default(uuid())
+  vendorId         String             @unique
+  vendor           Vendor             @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  plan             String
+  status           SubscriptionStatus @default(TRIALING)
+  paymobRef        String?
+  currentPeriodEnd DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("subscriptions")
+}
+
+model Payment {
+  id        String         @id @default(uuid())
+  payerType PayerType
+  payerId   String
+  amount    Decimal        @db.Decimal(10, 2)
+  purpose   PaymentPurpose
+  paymobRef String?        @unique
+  status    PaymentStatus  @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([payerType, payerId])
+  @@index([status])
+  @@map("payments")
+}
+
+// ----------------------------------------------------------------------------
+// Marketplace (Cart & Orders)
+// ----------------------------------------------------------------------------
+
+model Cart {
+  id        String     @id @default(uuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id])
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+
+  @@map("carts")
+}
+
+model CartItem {
+  id        String         @id @default(uuid())
+  cartId    String
+  cart      Cart           @relation(fields: [cartId], references: [id])
+  productId String
+  product   Product        @relation(fields: [productId], references: [id])
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  quantity  Int            @default(1)
+
+  @@unique([cartId, variantId])
+  @@index([cartId])
+  @@map("cart_items")
+}
+
+// Groups sub-orders created from a single checkout action (multi-vendor cart)
+model OrderGroup {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  orders         Order[]
+  paymobIntentId String?
+  createdAt      DateTime @default(now())
+
+  @@map("order_groups")
+}
+
+// One Order per vendor per checkout
+model Order {
+  id           String     @id @default(uuid())
+  orderGroupId String
+  orderGroup   OrderGroup @relation(fields: [orderGroupId], references: [id])
+  vendorId     String
+  vendor       Vendor     @relation(fields: [vendorId], references: [id])
+  userId       String
+  user         User       @relation(fields: [userId], references: [id])
+
+  status   OrderStatus @default(PENDING)
+  subtotal Decimal     @db.Money
+  items    OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([vendorId, status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        String         @id @default(uuid())
+  orderId   String
+  order     Order          @relation(fields: [orderId], references: [id])
+  productId String
+  product   Product        @relation(fields: [productId], references: [id])
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+
+  // Snapshot at purchase time — never read from Product/Variant after order creation
+  titleSnapshot String
+  priceSnapshot Decimal @db.Money
+  quantity      Int
+
+  @@map("order_items")
+}
+
+// ----------------------------------------------------------------------------
+// Post-migration raw SQL to hand-add (not generated by Prisma):
+//
+//   CREATE INDEX user_location_gist       ON "users"   USING GIST (location);
+//   CREATE INDEX vendor_home_location_gist ON "vendors" USING GIST ("homeLocation");
+//   CREATE INDEX bazaar_location_gist     ON "bazaars" USING GIST (location);
+//   CREATE INDEX event_location_gist      ON "events"  USING GIST (location);
+//
+//   ALTER TABLE "ratings" ADD CONSTRAINT rating_score_range
+//     CHECK (score >= 1 AND score <= 5);
+// ----------------------------------------------------------------------------
