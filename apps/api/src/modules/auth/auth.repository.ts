@@ -33,6 +33,22 @@ export class AuthRepository {
     return this.prisma.user.create({ data });
   }
 
+  createVendorUser(
+    userData: Prisma.UserCreateInput,
+    vendorData: Omit<Prisma.VendorUncheckedCreateInput, 'ownerId'>,
+  ): Promise<User> {
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({ data: userData });
+      await tx.vendor.create({
+        data: {
+          ...vendorData,
+          ownerId: user.id,
+        },
+      });
+      return user;
+    });
+  }
+
   createRefreshToken(data: Prisma.RefreshTokenUncheckedCreateInput): Promise<RefreshToken> {
     return this.prisma.refreshToken.create({ data });
   }

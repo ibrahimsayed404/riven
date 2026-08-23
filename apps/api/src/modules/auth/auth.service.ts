@@ -3,12 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { compare, hash } from 'bcrypt';
 import { createHash, randomBytes } from 'node:crypto';
+import { Role } from '@prisma/client';
 
 import { RegisterDto } from './dto/register.dto';
 import { AuthRepository } from './auth.repository';
 import { LoginDto } from './dto/login.dto';
 import { LogoutDto } from './dto/logout.dto';
 import { RefreshDto } from './dto/refresh.dto';
+import { RegisterVendorDto } from './dto/register-vendor.dto';
 
 const PASSWORD_SALT_ROUNDS = 12;
 
@@ -63,6 +65,52 @@ export class AuthService {
       name: user.name,
       role: user.role,
       createdAt: user.createdAt,
+    };
+  }
+
+  async registerVendor(registerVendorDto: RegisterVendorDto): Promise<LoginResponse> {
+    const existingUser = await this.authRepository.findUserByEmail(registerVendorDto.email);
+
+    if (existingUser) {
+      throw new ConflictException({
+        code: 'EMAIL_ALREADY_EXISTS',
+        message: 'A user with this email already exists.',
+      });
+    }
+
+    const passwordHash = await hash(registerVendorDto.password, PASSWORD_SALT_ROUNDS);
+    
+    const user = await this.authRepository.createVendorUser(
+      {
+        email: registerVendorDto.email,
+        name: registerVendorDto.name,
+        passwordHash,
+        role: Role.VENDOR,
+      },
+      {
+        name: registerVendorDto.businessName,
+        category: registerVendorDto.category,
+        vendorType: registerVendorDto.vendorType,
+        description: registerVendorDto.description,
+        // verified defaults to false
+      }
+    );
+
+    const accessToken = await this.jwtService.signAsync({
+      sub: user.id,
+      role: user.role,
+    });
+    const refreshToken = await this.createRefreshToken(user.id);
+
+    return {
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+      },
     };
   }
 
