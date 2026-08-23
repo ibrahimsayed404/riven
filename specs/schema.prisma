@@ -15,7 +15,8 @@
 // ============================================================================
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
@@ -107,6 +108,27 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum VendorType {
+  BAZAAR_ONLY
+  MARKETPLACE
+  BOTH
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
 // ----------------------------------------------------------------------------
 // Identity
 // ----------------------------------------------------------------------------
@@ -133,6 +155,9 @@ model User {
   ratings       Rating[]
   notifications Notification[]
   refreshTokens RefreshToken[]
+  cart          Cart?
+  orderGroups   OrderGroup[]
+  orders        Order[]
 
   @@index([role])
   @@map("users")
@@ -171,11 +196,19 @@ model Vendor {
   verified         Boolean  @default(false)
   subscriptionStatus SubscriptionStatus @default(TRIALING)
 
+  vendorType       VendorType @default(BAZAAR_ONLY)
+  brandStory       String?
+  logoUrl          String?
+  bannerUrl        String?
+  returnPolicy     String?
+  shippingPolicy   String?
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
   products      Product[]
+  orders        Order[]
   boothListings BoothListing[]
   subscription  Subscription?
 
@@ -184,21 +217,62 @@ model Vendor {
   @@map("vendors")
 }
 
-model Product {
-  id          String  @id @default(uuid())
-  vendorId    String
-  vendor      Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+model Category {
+  id          String     @id @default(uuid())
   name        String
-  price       Decimal @db.Decimal(10, 2)
-  images      String[] @default([])
-  description String?
+  slug        String     @unique
+  parentId    String?
+  parent      Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children    Category[] @relation("CategoryHierarchy")
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  products    Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id              String   @id @default(uuid())
+  vendorId        String
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+
+  title           String
+  description     String
+  categoryId      String
+  category        Category @relation(fields: [categoryId], references: [id])
+  basePrice       Decimal  @db.Money
+  images          String[]
+
+  approvalStatus  ApprovalStatus @default(PENDING)
+  isActive        Boolean  @default(true)
+
+  variants        ProductVariant[]
+  cartItems       CartItem[]
+  orderItems      OrderItem[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
 
   @@index([vendorId])
+  @@index([categoryId])
   @@map("products")
+}
+
+model ProductVariant {
+  id              String   @id @default(uuid())
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+
+  sku             String   @unique
+  size            String?
+  color           String?
+  priceOverride   Decimal? @db.Money   // null = use Product.basePrice
+  stockQuantity   Int      @default(0)
+
+  cartItems       CartItem[]
+  orderItems      OrderItem[]
+
+  @@map("product_variants")
 }
 
 model Organizer {
@@ -438,6 +512,86 @@ model Payment {
   @@index([payerType, payerId])
   @@index([status])
   @@map("payments")
+}
+
+// ----------------------------------------------------------------------------
+// Marketplace (Cart & Orders)
+// ----------------------------------------------------------------------------
+
+model Cart {
+  id          String     @id @default(uuid())
+  userId      String     @unique
+  user        User       @relation(fields: [userId], references: [id])
+  items       CartItem[]
+  updatedAt   DateTime   @updatedAt
+
+  @@map("carts")
+}
+
+model CartItem {
+  id          String   @id @default(uuid())
+  cartId      String
+  cart        Cart     @relation(fields: [cartId], references: [id])
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  variantId   String
+  variant     ProductVariant @relation(fields: [variantId], references: [id])
+  quantity    Int      @default(1)
+
+  @@index([cartId])
+  @@unique([cartId, variantId])
+  @@map("cart_items")
+}
+
+// Groups sub-orders created from a single checkout action (multi-vendor cart)
+model OrderGroup {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  orders          Order[]
+  paymobIntentId  String?
+  createdAt       DateTime @default(now())
+
+  @@map("order_groups")
+}
+
+// One Order per vendor per checkout
+model Order {
+  id              String   @id @default(uuid())
+  orderGroupId    String
+  orderGroup      OrderGroup @relation(fields: [orderGroupId], references: [id])
+  vendorId        String
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+
+  status          OrderStatus @default(PENDING)
+  subtotal        Decimal  @db.Money
+  items           OrderItem[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+  @@index([vendorId, status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id              String   @id @default(uuid())
+  orderId         String
+  order           Order    @relation(fields: [orderId], references: [id])
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+  variantId       String
+  variant         ProductVariant @relation(fields: [variantId], references: [id])
+
+  // Snapshot at purchase time — never read from Product/Variant after order creation
+  titleSnapshot   String
+  priceSnapshot   Decimal  @db.Money
+  quantity        Int
+
+  @@map("order_items")
 }
 
 // ----------------------------------------------------------------------------
