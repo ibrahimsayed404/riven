@@ -6,6 +6,12 @@ import { PrismaModule } from './infra/prisma/prisma.module';
 import { validateEnv } from './infra/config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
+import { VendorsModule } from './modules/vendors/vendors.module';
+import { ProductsModule } from './modules/products/products.module';
+
+import { CartModule } from './modules/cart/cart.module';
+import { CheckoutModule } from './modules/checkout/checkout.module';
+import { OrdersModule } from './modules/orders/orders.module';
 
 @Controller('health')
 class HealthController {
@@ -25,6 +31,11 @@ class HealthController {
     PrismaModule,
     AuthModule,
     UsersModule,
+    VendorsModule,
+    ProductsModule,
+    CartModule,
+    CheckoutModule,
+    OrdersModule,
   ],
   controllers: [HealthController],
 })

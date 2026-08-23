@@ -1,164 +1,76 @@
-# Riven — Vendor & Product Catalog Module Specification
+# Vendor Module Spec
 
-## 1. Overview & Scope
-The Vendor module governs:
-- **Vendor Profiles**: Initial profile onboarding (`POST /vendors`), profile updates (`PATCH /vendors/me`), soft-deletion (`DELETE /vendors/me`), and public discovery views (`GET /vendors/:id`, `GET /vendors`).
-- **Product Catalog**: Landing-page catalog management (`POST /vendors/me/products`, `PATCH /vendors/me/products/:id`, `DELETE /vendors/me/products/:id`, `GET /vendors/:id/products`).
-- Note: Per `riven-spec.md §1 & §4`, products are discovery/showcase items only — **not purchasable in-app**, no cart/checkout.
+**Status:** Draft for review
+**Scope:** Direct vendor registration, vendor profile/storefront management, and product catalog management (CRUD for Products + ProductVariants) — modeled on how Talabat/Instashop bundle store setup and catalog management into one vendor-facing surface.
+**Depends on:** `User`, `Vendor`, `Product`, `ProductVariant`, `Category` models (already migrated). Auth module (JWT, guards, password hashing patterns).
+**Out of scope (this pass):** Booth/Bazaar-specific vendor flows (separate module), Cart/Checkout/Orders (separate module), Subscription/billing enforcement (flagged as open item), image upload for product photos (same S3 blocker as avatar upload — deferred).
 
 ---
 
-## 2. Data Model & Relationships
+## 1. Vendor Registration (Direct)
 
+Unlike Shopper registration (email/password only), Vendor registration creates a `User` (role=VENDOR) AND a `Vendor` profile in a single transaction — no separate "apply to become a vendor" step, matching the direct-signup decision.
+
+**Endpoint:** `POST /auth/register/vendor` (separate from existing `POST /auth/register`, which stays Shopper-only — keeps the "no multi-role accounts" rule enforced structurally: you pick your path at signup, not after)
+
+**Request body:**
 ```
-User (Role: VENDOR)
-  │ (1:1)
-  ▼
-Vendor
-  ├── id (UUID)
-  ├── ownerId (UUID, Unique -> User.id, onDelete: Cascade)
-  ├── name (String)
-  ├── category (String, indexed)
-  ├── description (String, nullable)
-  ├── logo (String, nullable)
-  ├── coverMedia (String[])
-  ├── hasFixedLocation (Boolean, default: false)
-  ├── homeLocation (PostGIS Point, 4326, nullable, GIST indexed)
-  ├── verified (Boolean, default: false, indexed)
-  ├── subscriptionStatus (Enum: TRIALING, ACTIVE, PAST_DUE, CANCELED)
-  ├── createdAt / updatedAt / deletedAt (DateTime, nullable)
-  │
-  ├── Product[] (1:N, onDelete: Cascade)
-  │     ├── id (UUID)
-  │     ├── vendorId (UUID -> Vendor.id)
-  │     ├── name (String)
-  │     ├── price (Decimal 10,2)
-  │     ├── images (String[])
-  │     ├── description (String, nullable)
-  │     └── createdAt / updatedAt / deletedAt (DateTime, nullable)
-  │
-  └── BoothListing[] (1:N join with Bazaar for applications)
+{
+  email, password, ownerName,        // → User fields (name = ownerName)
+  businessName, category,            // → Vendor required fields
+  vendorType,                        // BAZAAR_ONLY | MARKETPLACE | BOTH
+  description?                       // optional at signup, editable later
+}
 ```
 
----
+**Behavior:**
+- Wrapped in a Prisma `$transaction`: create `User` (role=VENDOR, bcrypt-hashed password, same pattern as existing Auth registration) + create `Vendor` (ownerId = new user's id, verified=false, subscriptionStatus=TRIALING per schema default). If either insert fails, both roll back — no orphaned User-without-Vendor or vice versa.
+- Reuses the existing enumeration-proof error pattern from Auth for the email-already-exists case (same generic error message as Shopper registration, don't leak whether the collision is email-only or full account).
+- New vendor is NOT auto-verified (`verified: false`). Whether unverified vendors can immediately list products is an open item — see Section 5.
+- Returns the same token pair shape as regular login (access + refresh), since after registering, the vendor should be logged in immediately — matches typical Talabat/Instashop vendor onboarding (register → land in dashboard, not register → wait → separately log in).
 
-## 3. State Transitions, Lifecycle & Business Rules
+## 2. Vendor Profile Management
 
-### 3.1 Subscription Status & Discovery Visibility Rule
-- **Subscription Lifecycle**: `TRIALING` (initial 14-day free trial upon profile creation) → `ACTIVE` (active paying subscriber via Paymob) → `PAST_DUE` (failed renewal with 3-day grace period) → `CANCELED` (unpaid / revoked).
-- **Scheduled Transition Dependency**: Note that the automatic `PAST_DUE → CANCELED` transition after the 3-day grace period requires a scheduled recurring job on BullMQ/Redis (`specs/riven-spec.md §11`), which will be implemented in the Background Workers / Queue milestone.
-- **Explicit Visibility Rule**:
-  - `TRIALING` and `ACTIVE`: Full visibility on all public discovery endpoints (`GET /vendors`, `GET /vendors/:id`, product listings, search).
-  - `PAST_DUE`: Visible for a 3-day grace period, but with warning banner displayed on their vendor portal.
-  - `CANCELED`: **Hidden from public discovery feeds (`GET /vendors`) and map view**. Public direct lookups (`GET /vendors/:id`) return a `403 Forbidden` (`VENDOR_SUBSCRIPTION_INACTIVE`).
-  - **Self-Access Exemption**: The `VENDOR_SUBSCRIPTION_INACTIVE` restriction applies **only to public discovery lookups**. A vendor accessing their own profile (`GET /vendors/me`, `PATCH /vendors/me`, `POST /vendors/me/products`) is **exempt** from this gate so they can always log in, manage their catalog, and reactivate/renew their subscription.
+**Endpoints:**
+- `GET /vendors/me` — own vendor profile (requires `@Roles(Role.VENDOR)`)
+- `PATCH /vendors/me` — update `businessName`, `category`, `description`, `logo`, `coverMedia`, storefront fields (`brandStory`, `logoUrl`, `bannerUrl`, `returnPolicy`, `shippingPolicy`), `hasFixedLocation`/`homeLocation` (same lat/lng → PostGIS pattern as Users module's location endpoint — reuse that raw SQL approach, don't reinvent it)
+- `GET /vendors/:id` — PUBLIC endpoint, shopper-facing storefront view. Only returns vendors where `verified: true` and `deletedAt: null` — unverified/deleted vendors 404 for public viewers (don't leak existence).
 
-### 3.2 Soft Deletion, Re-Registration & Reactivation
-- **Soft Deletion (`DELETE /vendors/me`)**: Sets `deletedAt = NOW()`.
-- **Re-Registration Behavior (`POST /vendors`)**:
-  - `User.id` (where `role = VENDOR`) can only ever have one Vendor profile row.
-  - If a user calls `POST /vendors` and an active row exists (`deletedAt === null`), throw `409 Conflict` (`VENDOR_PROFILE_ALREADY_EXISTS`).
-  - If a user calls `POST /vendors` and a soft-deleted row exists (`deletedAt !== null`), the system **restores and reactivates** the existing row: resets `deletedAt = null`, updates the profile fields with the new payload, and sets `subscriptionStatus = TRIALING` (or preserves previous billing record).
+**Guardrails:**
+- `verified`, `subscriptionStatus`, `ownerId` are never editable via `PATCH /vendors/me` — admin-only fields, rejected via the same `forbidNonWhitelisted` pattern used in the Users module (don't decorate them in the DTO, the global pipe rejects them automatically).
+- `vendorType` change (e.g. BAZAAR_ONLY → BOTH) is allowed via this endpoint — no approval gate on this specific field, since it doesn't affect trust/safety, just what section of the app they appear in.
 
-### 3.3 Integrity Guard: Vendor Soft-Deletion vs. Accepted Booth Listings
-- **Rule**: A vendor is **blocked from soft-deleting their profile** (`DELETE /vendors/me`) if they hold any `ACCEPTED` `BoothListing` in an upcoming or active bazaar (i.e. where the bazaar's `endDate >= NOW()` or status is `PUBLISHED`/`DRAFT`).
-  - Throws `400 Bad Request` (`CANNOT_DELETE_VENDOR_WITH_ACTIVE_LISTINGS`).
-- **If no accepted listings exist**: Soft-deleting the profile cancels any `PENDING` `BoothListing` applications by transitioning them to `REJECTED` and soft-deletes associated products.
+## 3. Product Catalog Management
 
-### 3.4 Location Toggle
-- If `hasFixedLocation === true`: `homeLocation` (latitude & longitude) is mandatory. The vendor is indexed with PostGIS GIST and appears permanently on the main map.
-- If `hasFixedLocation === false`: `homeLocation` is set to null. The vendor only appears on maps at the locations of active bazaars where they hold an accepted booth.
+Vendor-scoped — a vendor can only manage their own products (`vendorId` derived from the authenticated vendor's user, never trusted from the request body).
 
----
+**Endpoints:**
+- `GET /vendors/me/products` — paginated list of own products, all statuses (PENDING/APPROVED/REJECTED, including inactive) — this is the vendor's own dashboard view, unfiltered.
+- `POST /vendors/me/products` — create product. Starts `approvalStatus: PENDING` always — vendor cannot self-approve (enforced by not exposing `approvalStatus` as a settable DTO field, same forbidNonWhitelisted pattern). **Requires `vendor.verified === true`** — reject with 403 if the calling vendor is not yet verified. This blocks catalog-building entirely until admin verification, per decision.
+- `GET /vendors/me/products/:id` — single product detail (own only — 404 if `vendorId` doesn't match caller, not 403, to avoid confirming the ID exists).
+- `PATCH /vendors/me/products/:id` — update `title`, `description`, `categoryId`, `basePrice`, `images`, `isActive`. **Any edit resets `approvalStatus` to `PENDING`** (and clears `rejectionReason` if previously rejected) — an approved product that gets edited must go back through admin review before it's publicly visible again. This applies even to trivial edits (e.g. toggling `isActive`) — implement uniformly, don't special-case which fields trigger re-review, to keep the rule simple and predictable for vendors.
+- `DELETE /vendors/me/products/:id` — soft-delete (`deletedAt`), not hard delete (matches schema, preserves order history integrity per the fashion marketplace addendum's snapshot design).
+- `POST /vendors/me/products/:id/variants` — add a variant (sku, size, color, priceOverride, stockQuantity)
+- `PATCH /vendors/me/products/:id/variants/:variantId` — update a variant (e.g. restock — bump `stockQuantity`)
+- `DELETE /vendors/me/products/:id/variants/:variantId` — remove a variant
 
-## 4. Product Catalog Rules
+**Public product browsing** (Shopper-facing, separate from vendor dashboard):
+- `GET /products` — public, filterable by `categoryId`/`vendorId`, only returns `approvalStatus: APPROVED`, `isActive: true`, `deletedAt: null`, and — critically — only products belonging to a `verified: true` vendor (join filter). An approved product from an unverified vendor should not be publicly browsable — flagged as a deliberate compounding of the two approval gates, confirm this is the intended behavior (see Section 5).
+- `GET /products/:id` — public single product detail, same visibility filters.
 
-### 4.1 Live Catalog vs. Snapshot
-- Products belong to the `Vendor` aggregate.
-- Vendors may add, edit, or soft-delete products at any time, including when they have pending or accepted bazaar applications.
-- Organizers review live brand profiles rather than frozen inventory snapshots.
+## 4. Admin Product Approval
 
-### 4.2 Product Soft-Deletion
-- Product deletion performs a soft delete (`deletedAt = NOW()`).
-- Direct queries (`GET /vendors/:id/products`, `GET /vendors/:id`) only return active products (`where: { deletedAt: null }`).
+Not building a full admin dashboard in this pass, but the minimum needed to unblock the above:
 
----
+- `PATCH /admin/products/:id/approve` — `@Roles(Role.ADMIN)`, sets `approvalStatus: APPROVED`
+- `PATCH /admin/products/:id/reject` — `@Roles(Role.ADMIN)`, sets `approvalStatus: REJECTED`, requires `reason` string in body, persisted to `Product.rejectionReason` (new field — see Section 6, schema addition required before implementation).
 
-## 5. Endpoints & API Contract
+Admin vendor verification (`PATCH /admin/vendors/:id/verify`) is also needed here since Section 3's public product visibility depends on it — including it in this pass rather than leaving vendors permanently unable to go public.
 
-### `POST /vendors`
-- **Auth**: `Role.VENDOR`
-- **Behavior**: Creates profile or reactivates an existing soft-deleted profile.
-- **Body**:
-  ```json
-  {
-    "name": "string (required, 1-100 chars)",
-    "category": "string (required)",
-    "description": "string (optional)",
-    "logo": "string URL (optional)",
-    "coverMedia": ["string URL"],
-    "hasFixedLocation": "boolean (default false)",
-    "homeLocation": {
-      "latitude": "number (-90 to 90)",
-      "longitude": "number (-180 to 180)"
-    }
-  }
-  ```
-- **Errors**:
-  - `400 Bad Request` — `INVALID_LOCATION_PAYLOAD` (missing coordinates when `hasFixedLocation: true`)
-  - `409 Conflict` — `VENDOR_PROFILE_ALREADY_EXISTS` (active profile already exists)
+## 5. Open Items For Discussion Before Implementation
 
-### `PATCH /vendors/me`
-- **Auth**: `Role.VENDOR`
-- **Body**: Partial vendor fields.
-- **Errors**:
-  - `404 Not Found` — `VENDOR_NOT_FOUND`
+1. **Subscription/billing gate** — schema has `subscriptionStatus` (TRIALING/ACTIVE/PAST_DUE/CANCELED) but this spec doesn't enforce anything based on it (e.g. blocking product creation if `PAST_DUE`). Out of scope until Payments module exists — flagging so it's not forgotten, not silently decided either way.
 
-### `DELETE /vendors/me`
-- **Auth**: `Role.VENDOR`
-- **Errors**:
-  - `400 Bad Request` — `CANNOT_DELETE_VENDOR_WITH_ACTIVE_LISTINGS` (holds accepted booth in active/upcoming bazaar)
-  - `404 Not Found` — `VENDOR_NOT_FOUND`
+## 6. Required Schema Addition (Before Implementation)
 
-### `GET /vendors/:id`
-- **Auth**: Public
-- **Errors**:
-  - `404 Not Found` — `VENDOR_NOT_FOUND` (soft-deleted or non-existent)
-  - `403 Forbidden` — `VENDOR_SUBSCRIPTION_INACTIVE` (subscription status is `CANCELED`)
-
-### `GET /vendors`
-- **Auth**: Public
-- **Query Params**: `?category=&near=lat,lng&radius=`
-- **Filter**: Only returns vendors where `deletedAt IS NULL` AND `subscriptionStatus IN ('TRIALING', 'ACTIVE', 'PAST_DUE')`.
-
-### `POST /vendors/me/products`
-- **Auth**: `Role.VENDOR`
-- **Body**: `{ name, price, images?, description? }`
-- **Errors**:
-  - `404 Not Found` — `VENDOR_NOT_FOUND`
-
-### `PATCH /vendors/me/products/:id`
-- **Auth**: `Role.VENDOR`
-- **Body**: Partial product fields.
-- **Errors**:
-  - `404 Not Found` — `PRODUCT_NOT_FOUND`
-
-### `DELETE /vendors/me/products/:id`
-- **Auth**: `Role.VENDOR`
-- **Behavior**: Sets `deletedAt = NOW()`.
-- **Errors**:
-  - `404 Not Found` — `PRODUCT_NOT_FOUND`
-
----
-
-## 6. Error Codes
-
-| Code | HTTP Status | Description |
-|---|---|---|
-| `VENDOR_NOT_FOUND` | 404 | Vendor profile does not exist or is soft-deleted |
-| `VENDOR_PROFILE_ALREADY_EXISTS` | 409 | User already has an active vendor profile |
-| `VENDOR_SUBSCRIPTION_INACTIVE` | 403 | Brand profile is hidden because subscription is CANCELED |
-| `CANNOT_DELETE_VENDOR_WITH_ACTIVE_LISTINGS` | 400 | Cannot soft-delete vendor holding accepted booth assignments |
-| `PRODUCT_NOT_FOUND` | 404 | Product does not exist, is soft-deleted, or belongs to another vendor |
-| `INVALID_LOCATION_PAYLOAD` | 400 | `homeLocation` coordinates required when `hasFixedLocation` is true |
-| `FORBIDDEN_ROLE` | 403 | User does not have VENDOR role |
+`Product.rejectionReason String?` — needs a small Prisma migration, following the same pattern as the Users module's `phone`/`deletedAt` additions. This should be done as its own small scoped step before the main module implementation, same as prior schema-change steps in this project.

@@ -7,7 +7,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 export class ProductsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  private get visibilityFilter(): Prisma.ProductWhereInput {
+  public get visibilityFilter(): Prisma.ProductWhereInput {
     return {
       isActive: true,
       approvalStatus: 'APPROVED',

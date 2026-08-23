@@ -7,8 +7,11 @@ type RequestWithUser = {
 };
 
 export const CurrentUser = createParamDecorator(
-  (_data: unknown, context: ExecutionContext): AuthenticatedUser | undefined => {
+  (data: keyof AuthenticatedUser | undefined, context: ExecutionContext) => {
     const request = context.switchToHttp().getRequest<RequestWithUser>();
-    return request.user;
+    if (!request.user) {
+      return null;
+    }
+    return data ? request.user[data] : request.user;
   },
 );
