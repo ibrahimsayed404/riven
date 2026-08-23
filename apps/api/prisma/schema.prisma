@@ -244,6 +244,7 @@ model Product {
   images      String[]
 
   approvalStatus ApprovalStatus @default(PENDING)
+  rejectionReason String?
   isActive       Boolean        @default(true)
 
   variants   ProductVariant[]
