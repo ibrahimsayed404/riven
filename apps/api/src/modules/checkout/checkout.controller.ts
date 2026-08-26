@@ -1,4 +1,4 @@
-import { Controller, Post, UseGuards } from '@nestjs/common';
+import { Controller, Post, UseGuards, Param } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -15,5 +15,13 @@ export class CheckoutController {
   @Post()
   checkout(@CurrentUser('id') userId: string) {
     return this.checkoutService.checkoutCart(userId);
+  }
+
+  @Post(':orderGroupId/retry-payment')
+  retryPayment(
+    @CurrentUser('id') userId: string,
+    @Param('orderGroupId') orderGroupId: string,
+  ) {
+    return this.checkoutService.retryPaymentSetup(userId, orderGroupId);
   }
 }

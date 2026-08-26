@@ -10,11 +10,14 @@ export class OutOfStockError extends Error {
   }
 }
 
+import { PaymobService } from '../../infra/paymob/paymob.service';
+
 @Injectable()
 export class CheckoutService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly productsRepo: ProductsRepository,
+    private readonly paymobService: PaymobService,
   ) {}
 
   async checkoutCart(userId: string) {
@@ -53,6 +56,8 @@ export class CheckoutService {
         throw error;
       }
     }
+    
+    throw new InternalServerErrorException('Checkout failed');
   }
 
   private async executeCheckoutTransaction(userId: string) {
@@ -189,7 +194,70 @@ export class CheckoutService {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
     });
 
-    // 8. (Stage 1 Stub) Return OrderGroup without Paymob call
-    return result;
+    // 8. Attempt Paymob intention creation
+    const totalAmount = result.orders.reduce((sum, order) => sum + Number(order.subtotal), 0);
+    
+    try {
+      const paymobResult = await this.paymobService.createIntention(totalAmount, result.id);
+      
+      // Update OrderGroup with intention ID
+      await this.prisma.orderGroup.update({
+        where: { id: result.id },
+        data: { paymobIntentId: paymobResult.intentId.toString() },
+      });
+
+      return {
+        ...result,
+        paymobIntentId: paymobResult.intentId.toString(),
+        clientUrl: paymobResult.clientUrl,
+        paymentSetupFailed: false,
+      };
+    } catch (error) {
+      console.error('Paymob intent creation failed after successful checkout:', error);
+      // Return order group but signal that payment setup failed
+      return {
+        ...result,
+        paymentSetupFailed: true,
+      };
+    }
+  }
+
+  async retryPaymentSetup(userId: string, orderGroupId: string) {
+    const orderGroup = await this.prisma.orderGroup.findUnique({
+      where: { id: orderGroupId },
+      include: { orders: true },
+    });
+
+    if (!orderGroup) {
+      throw new BadRequestException('Order group not found');
+    }
+
+    if (orderGroup.userId !== userId) {
+      throw new BadRequestException('Order group does not belong to this user');
+    }
+
+    if (orderGroup.paymobIntentId) {
+      throw new BadRequestException('Payment intention already exists for this order group');
+    }
+
+    // Ensure orders are still PENDING
+    const allPending = orderGroup.orders.every(o => o.status === 'PENDING');
+    if (!allPending) {
+      throw new BadRequestException('Cannot retry payment for orders that are not PENDING');
+    }
+
+    const totalAmount = orderGroup.orders.reduce((sum, order) => sum + Number(order.subtotal), 0);
+    
+    const paymobResult = await this.paymobService.createIntention(totalAmount, orderGroup.id);
+    
+    await this.prisma.orderGroup.update({
+      where: { id: orderGroup.id },
+      data: { paymobIntentId: paymobResult.intentId.toString() },
+    });
+
+    return {
+      paymobIntentId: paymobResult.intentId.toString(),
+      clientUrl: paymobResult.clientUrl,
+    };
   }
 }

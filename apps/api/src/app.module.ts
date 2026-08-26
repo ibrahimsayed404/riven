@@ -12,6 +12,7 @@ import { ProductsModule } from './modules/products/products.module';
 import { CartModule } from './modules/cart/cart.module';
 import { CheckoutModule } from './modules/checkout/checkout.module';
 import { OrdersModule } from './modules/orders/orders.module';
+import { PaymobModule } from './infra/paymob/paymob.module';
 
 @Controller('health')
 class HealthController {
@@ -36,6 +37,7 @@ class HealthController {
     CartModule,
     CheckoutModule,
     OrdersModule,
+    PaymobModule,
   ],
   controllers: [HealthController],
 })
