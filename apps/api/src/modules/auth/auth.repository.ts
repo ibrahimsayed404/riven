@@ -49,6 +49,22 @@ export class AuthRepository {
     });
   }
 
+  createOrganizerUser(
+    userData: Prisma.UserCreateInput,
+    organizerData: Omit<Prisma.OrganizerUncheckedCreateInput, 'ownerId'>,
+  ): Promise<User> {
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({ data: userData });
+      await tx.organizer.create({
+        data: {
+          ...organizerData,
+          ownerId: user.id,
+        },
+      });
+      return user;
+    });
+  }
+
   createRefreshToken(data: Prisma.RefreshTokenUncheckedCreateInput): Promise<RefreshToken> {
     return this.prisma.refreshToken.create({ data });
   }

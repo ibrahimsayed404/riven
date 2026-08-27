@@ -11,6 +11,7 @@ import { LoginDto } from './dto/login.dto';
 import { LogoutDto } from './dto/logout.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { RegisterVendorDto } from './dto/register-vendor.dto';
+import { RegisterOrganizerDto } from './dto/register-organizer.dto';
 
 const PASSWORD_SALT_ROUNDS = 12;
 
@@ -93,6 +94,49 @@ export class AuthService {
         vendorType: registerVendorDto.vendorType,
         description: registerVendorDto.description,
         // verified defaults to false
+      }
+    );
+
+    const accessToken = await this.jwtService.signAsync({
+      sub: user.id,
+      role: user.role,
+    });
+    const refreshToken = await this.createRefreshToken(user.id);
+
+    return {
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+      },
+    };
+  }
+
+  async registerOrganizer(registerOrganizerDto: RegisterOrganizerDto): Promise<LoginResponse> {
+    const existingUser = await this.authRepository.findUserByEmail(registerOrganizerDto.email);
+
+    if (existingUser) {
+      throw new ConflictException({
+        code: 'EMAIL_ALREADY_EXISTS',
+        message: 'A user with this email already exists.',
+      });
+    }
+
+    const passwordHash = await hash(registerOrganizerDto.password, PASSWORD_SALT_ROUNDS);
+    
+    const user = await this.authRepository.createOrganizerUser(
+      {
+        email: registerOrganizerDto.email,
+        name: registerOrganizerDto.name,
+        passwordHash,
+        role: Role.ORGANIZER,
+      },
+      {
+        name: registerOrganizerDto.organizationName,
+        // verified defaults to false in schema
       }
     );
 

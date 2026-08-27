@@ -7,6 +7,7 @@ import { LogoutDto } from './dto/logout.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RegisterVendorDto } from './dto/register-vendor.dto';
+import { RegisterOrganizerDto } from './dto/register-organizer.dto';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
@@ -22,6 +23,11 @@ export class AuthController {
   @Post('register/vendor')
   registerVendor(@Body() registerVendorDto: RegisterVendorDto) {
     return this.authService.registerVendor(registerVendorDto);
+  }
+
+  @Post('register/organizer')
+  registerOrganizer(@Body() registerOrganizerDto: RegisterOrganizerDto) {
+    return this.authService.registerOrganizer(registerOrganizerDto);
   }
 
   @Post('login')

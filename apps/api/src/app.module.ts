@@ -13,6 +13,8 @@ import { CartModule } from './modules/cart/cart.module';
 import { CheckoutModule } from './modules/checkout/checkout.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PaymobModule } from './infra/paymob/paymob.module';
+import { QueueModule } from './infra/queue/queue.module';
+import { BazaarsModule } from './modules/bazaars/bazaars.module';
 
 @Controller('health')
 class HealthController {
@@ -38,6 +40,8 @@ class HealthController {
     CheckoutModule,
     OrdersModule,
     PaymobModule,
+    QueueModule,
+    BazaarsModule,
   ],
   controllers: [HealthController],
 })
