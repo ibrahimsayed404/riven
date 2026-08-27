@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
-import { BoothsRepository } from './booths.repository';
+import { BoothsRepository, PublicBooth } from './booths.repository';
 import { BazaarsService } from '../bazaars/bazaars.service';
 import { Prisma, ApplicationStatus } from '@prisma/client';
 
@@ -164,7 +164,7 @@ export class BoothsService {
     }
 
     // Map the shape
-    const booths = layout.booths.map((booth) => {
+    const booths = layout.booths.map((booth: PublicBooth) => {
       let vendorInfo = null;
       if (booth.boothListing && booth.boothListing.vendor) {
         vendorInfo = {

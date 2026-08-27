@@ -15,6 +15,7 @@ import { OrdersModule } from './modules/orders/orders.module';
 import { PaymobModule } from './infra/paymob/paymob.module';
 import { QueueModule } from './infra/queue/queue.module';
 import { BazaarsModule } from './modules/bazaars/bazaars.module';
+import { BoothsModule } from './modules/booths/booths.module';
 
 @Controller('health')
 class HealthController {
@@ -42,6 +43,7 @@ class HealthController {
     PaymobModule,
     QueueModule,
     BazaarsModule,
+    BoothsModule,
   ],
   controllers: [HealthController],
 })
