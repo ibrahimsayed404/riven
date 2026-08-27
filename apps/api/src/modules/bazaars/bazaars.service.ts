@@ -161,4 +161,18 @@ export class BazaarsService {
 
     return this.bazaarsRepository.updateApplicationStatus(application.id, status);
   }
+
+  // --- Internal Passthrough for Other Modules ---
+  
+  async findById(id: string): Promise<BazaarWithLocation | null> {
+    return this.bazaarsRepository.findById(id);
+  }
+
+  async findPublicById(id: string): Promise<BazaarPublicDetail | null> {
+    return this.bazaarsRepository.findPublicById(id);
+  }
+
+  async findApplicationById(id: string) {
+    return this.bazaarsRepository.findApplicationById(id);
+  }
 }

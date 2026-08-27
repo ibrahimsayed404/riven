@@ -34,6 +34,11 @@ describe('VendorsModule (e2e)', () => {
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     await prisma.vendor.deleteMany();
+    await prisma.boothListing.deleteMany();
+    await prisma.booth.deleteMany();
+    await prisma.boothLayout.deleteMany();
+    await prisma.bazaar.deleteMany();
+    await prisma.organizer.deleteMany();
     await prisma.user.deleteMany();
 
     // Create an admin user for admin actions
@@ -79,6 +84,11 @@ describe('VendorsModule (e2e)', () => {
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     await prisma.vendor.deleteMany();
+    await prisma.boothListing.deleteMany();
+    await prisma.booth.deleteMany();
+    await prisma.boothLayout.deleteMany();
+    await prisma.bazaar.deleteMany();
+    await prisma.organizer.deleteMany();
     await prisma.user.deleteMany();
     await app.close();
   });
