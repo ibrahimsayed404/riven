@@ -12,6 +12,10 @@ export type BazaarPublicDetail = BazaarWithLocation & {
   acceptedVendors: { vendorId: string; businessName: string; logo: string | null }[];
 };
 
+export type BazaarWithDistance = BazaarWithLocation & {
+  distanceMeters: number | null;
+};
+
 @Injectable()
 export class BazaarsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -177,6 +181,101 @@ export class BazaarsRepository {
         location: lat !== null && lng !== null ? { lat, lng } : null,
       })),
       total,
+    };
+  }
+
+  /**
+   * Distance-sorted feed of published bazaars, backing GET /discovery/bazaars.
+   *
+   * Keyset paginated rather than offset: there is no COUNT query, and the
+   * caller detects "more pages" from the extra row this fetches (LIMIT n + 1).
+   */
+  async findNearby(
+    filters: {
+      lat?: number;
+      lng?: number;
+      radiusKm: number;
+      scheduleType?: ScheduleType;
+      upcomingOnly: boolean;
+    },
+    limit: number,
+    cursor?: { sortValue: number | Date; id: string },
+  ): Promise<{ data: BazaarWithDistance[]; hasMore: boolean }> {
+    // The DTO guarantees lat/lng arrive together, so testing one is enough.
+    // Built once and reused in SELECT / ST_DWithin / ORDER BY so the
+    // lng-then-lat argument order cannot drift between them.
+    const origin =
+      filters.lat !== undefined && filters.lng !== undefined
+        ? Prisma.sql`ST_SetSRID(ST_MakePoint(${filters.lng}, ${filters.lat}), 4326)::geography`
+        : null;
+
+    const distanceExpr = origin
+      ? Prisma.sql`ST_Distance("location", ${origin})`
+      : Prisma.sql`NULL::double precision`;
+
+    const conditions = [
+      Prisma.sql`"status" = 'PUBLISHED'::"BazaarStatus"`,
+      Prisma.sql`"deletedAt" IS NULL`,
+    ];
+
+    if (filters.scheduleType) {
+      conditions.push(Prisma.sql`"scheduleType" = ${filters.scheduleType}::"ScheduleType"`);
+    }
+
+    if (origin) {
+      conditions.push(Prisma.sql`ST_DWithin("location", ${origin}, ${filters.radiusKm * 1000})`);
+    }
+
+    // RECURRING bazaars have no dependable end date until RRULE expansion exists,
+    // and transitionPastOneOffBazaars deliberately never completes them — so they
+    // stay visible regardless of how long ago their first occurrence started.
+    if (filters.upcomingOnly) {
+      conditions.push(Prisma.sql`(
+        "scheduleType" = 'RECURRING'::"ScheduleType"
+        OR ("endDate" IS NOT NULL AND "endDate" >= NOW())
+        OR ("endDate" IS NULL AND "startDate" >= NOW() - INTERVAL '1 day')
+      )`);
+    }
+
+    if (cursor) {
+      conditions.push(
+        origin
+          ? Prisma.sql`(${distanceExpr}, "id") > (${cursor.sortValue}::double precision, ${cursor.id})`
+          : Prisma.sql`("startDate", "id") > (${cursor.sortValue}, ${cursor.id})`,
+      );
+    }
+
+    const whereClause = Prisma.sql`${Prisma.join(conditions, ' AND ')}`;
+    const orderBy = origin
+      ? Prisma.sql`${distanceExpr} ASC, "id" ASC`
+      : Prisma.sql`"startDate" ASC, "id" ASC`;
+
+    const rows = await this.prisma.$queryRaw<
+      (Bazaar & { lat: number | null; lng: number | null; distanceMeters: number | null })[]
+    >`
+      SELECT
+        "id", "organizerId", "name", "description", "coverMedia",
+        "scheduleType", "recurrenceRule", "startDate", "endDate", "status",
+        "createdAt", "updatedAt", "deletedAt",
+        ST_Y("location"::geometry) AS "lat",
+        ST_X("location"::geometry) AS "lng",
+        ${distanceExpr} AS "distanceMeters"
+      FROM "bazaars"
+      WHERE ${whereClause}
+      ORDER BY ${orderBy}
+      LIMIT ${limit + 1}
+    `;
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    return {
+      data: page.map(({ lat, lng, distanceMeters, ...rest }) => ({
+        ...rest,
+        location: lat !== null && lng !== null ? { lat, lng } : null,
+        distanceMeters,
+      })),
+      hasMore,
     };
   }
 

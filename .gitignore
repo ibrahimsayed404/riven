@@ -60,3 +60,7 @@ Desktop.ini
 # Misc
 *.tsbuildinfo
 .cache/
+
+# AI
+.claude/
+CLAUDE.md

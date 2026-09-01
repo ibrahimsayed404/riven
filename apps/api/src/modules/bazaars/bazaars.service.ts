@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ApplicationStatus, BazaarStatus, Bazaar, Prisma, ScheduleType } from '@prisma/client';
 
-import { BazaarsRepository, BazaarWithLocation, BazaarPublicDetail } from './bazaars.repository';
+import { BazaarsRepository, BazaarWithLocation, BazaarPublicDetail, BazaarWithDistance } from './bazaars.repository';
 import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
 
@@ -88,6 +88,24 @@ export class BazaarsService {
 
   async getPublicBazaars(page: number, limit: number, filters: { lat?: number; lng?: number; radiusKm?: number; scheduleType?: ScheduleType }) {
     return this.bazaarsRepository.findPublicPaginated(page, limit, filters);
+  }
+
+  /**
+   * Thin passthrough for the discovery module. It exists so DiscoveryService
+   * never touches BazaarsRepository directly — the bazaars module owns that table.
+   */
+  async findNearby(
+    filters: {
+      lat?: number;
+      lng?: number;
+      radiusKm: number;
+      scheduleType?: ScheduleType;
+      upcomingOnly: boolean;
+    },
+    limit: number,
+    cursor?: { sortValue: number | Date; id: string },
+  ): Promise<{ data: BazaarWithDistance[]; hasMore: boolean }> {
+    return this.bazaarsRepository.findNearby(filters, limit, cursor);
   }
 
   async getPublicBazaarById(id: string): Promise<BazaarPublicDetail> {
