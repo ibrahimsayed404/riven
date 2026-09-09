@@ -124,11 +124,11 @@ describe('DiscoveryModule (e2e)', () => {
       startDate: future(1),
       endDate: future(2),
     });
-    // Alexandria — comfortably outside the 25 km default radius
-    ids.alexandria = await seedBazaar({
-      name: 'Alexandria Bazaar',
-      lat: 31.2001,
-      lng: 29.9187,
+    // Tanta — ~85 km away, comfortably outside the 25 km default radius but within 150 km
+    ids.tanta = await seedBazaar({
+      name: 'Tanta Bazaar',
+      lat: 30.7865,
+      lng: 31.0004,
       startDate: future(1),
       endDate: future(2),
     });
@@ -206,14 +206,14 @@ describe('DiscoveryModule (e2e)', () => {
       const res = await discover(`?lat=${ORIGIN.lat}&lng=${ORIGIN.lng}&radiusKm=25`);
 
       const returned = res.body.data.map((b: { id: string }) => b.id);
-      expect(returned).not.toContain(ids.alexandria);
+      expect(returned).not.toContain(ids.tanta);
     });
 
     it('includes a distant bazaar once the radius is widened', async () => {
       const res = await discover(`?lat=${ORIGIN.lat}&lng=${ORIGIN.lng}&radiusKm=150`);
 
       const returned = res.body.data.map((b: { id: string }) => b.id);
-      expect(returned).toContain(ids.alexandria);
+      expect(returned).toContain(ids.tanta);
     });
   });
 

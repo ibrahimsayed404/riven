@@ -1,5 +1,4 @@
 import { Controller, Get, Module } from '@nestjs/common';
-import { Controller, Get, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { join } from 'node:path';
 
