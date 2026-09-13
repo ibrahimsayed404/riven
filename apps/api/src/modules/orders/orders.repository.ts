@@ -70,4 +70,31 @@ export class OrdersRepository {
       data: { status },
     });
   }
+
+  async hasDeliveredVendorOrder(userId: string, orderId: string, vendorId: string): Promise<boolean> {
+    const count = await this.prisma.order.count({
+      where: {
+        id: orderId,
+        userId,
+        status: OrderStatus.DELIVERED,
+        vendorId,
+      },
+    });
+    return count > 0;
+  }
+
+  async hasDeliveredProductOrder(userId: string, orderId: string, productId: string): Promise<boolean> {
+    const count = await this.prisma.orderItem.count({
+      where: {
+        orderId,
+        productId,
+        order: {
+          userId,
+          status: OrderStatus.DELIVERED,
+        },
+      },
+    });
+    return count > 0;
+  }
 }
+

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, RatingTargetType } from '@prisma/client';
 import { OrdersRepository } from './orders.repository';
 
 // Valid forward transitions
@@ -84,5 +84,20 @@ export class OrdersService {
     this.validateTransition(order.status, newStatus);
 
     return this.ordersRepository.updateOrderStatus(orderId, newStatus);
+  }
+
+  async verifyDeliveredPurchase(
+    userId: string,
+    orderId: string,
+    targetType: RatingTargetType,
+    targetId: string,
+  ): Promise<boolean> {
+    if (targetType === RatingTargetType.VENDOR) {
+      return this.ordersRepository.hasDeliveredVendorOrder(userId, orderId, targetId);
+    }
+    if (targetType === RatingTargetType.PRODUCT) {
+      return this.ordersRepository.hasDeliveredProductOrder(userId, orderId, targetId);
+    }
+    return false;
   }
 }

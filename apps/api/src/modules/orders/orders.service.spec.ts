@@ -15,6 +15,8 @@ describe('OrdersService', () => {
       updateOrderStatus: jest.fn(),
       findShopperOrders: jest.fn(),
       findVendorOrders: jest.fn(),
+      hasDeliveredVendorOrder: jest.fn(),
+      hasDeliveredProductOrder: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -85,6 +87,55 @@ describe('OrdersService', () => {
 
       const res = await service.confirmDelivery('user-1', '1');
       expect(res.status).toBe(OrderStatus.DELIVERED);
+    });
+  });
+
+  describe('verifyDeliveredPurchase', () => {
+    it('calls hasDeliveredVendorOrder for VENDOR targetType', async () => {
+      repository.hasDeliveredVendorOrder.mockResolvedValue(true);
+
+      const result = await service.verifyDeliveredPurchase(
+        'user-1',
+        'order-1',
+        'VENDOR' as any,
+        'vendor-1',
+      );
+
+      expect(result).toBe(true);
+      expect(repository.hasDeliveredVendorOrder).toHaveBeenCalledWith(
+        'user-1',
+        'order-1',
+        'vendor-1',
+      );
+    });
+
+    it('calls hasDeliveredProductOrder for PRODUCT targetType', async () => {
+      repository.hasDeliveredProductOrder.mockResolvedValue(true);
+
+      const result = await service.verifyDeliveredPurchase(
+        'user-1',
+        'order-1',
+        'PRODUCT' as any,
+        'prod-1',
+      );
+
+      expect(result).toBe(true);
+      expect(repository.hasDeliveredProductOrder).toHaveBeenCalledWith(
+        'user-1',
+        'order-1',
+        'prod-1',
+      );
+    });
+
+    it('returns false for unsupported target types', async () => {
+      const result = await service.verifyDeliveredPurchase(
+        'user-1',
+        'order-1',
+        'BAZAAR' as any,
+        'bazaar-1',
+      );
+
+      expect(result).toBe(false);
     });
   });
 });
