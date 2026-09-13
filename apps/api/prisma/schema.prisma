@@ -70,12 +70,14 @@ enum FavorableType {
   VENDOR
   BAZAAR
   EVENT
+  PRODUCT
 }
 
 enum RatingTargetType {
   VENDOR
   BAZAAR
   EVENT
+  PRODUCT
 }
 
 enum NotificationType {
@@ -452,12 +454,15 @@ model Rating {
   targetId   String
   score      Int // 1-5, enforce range via CHECK constraint below
   comment    String?
+  orderId    String
+  order      Order            @relation(fields: [orderId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([userId, targetType, targetId]) // one rating per user per target
   @@index([targetType, targetId])
+  @@index([orderId])
   @@map("ratings")
 }
 
@@ -570,6 +575,7 @@ model Order {
   status   OrderStatus @default(PENDING)
   subtotal Decimal     @db.Money
   items    OrderItem[]
+  ratings  Rating[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

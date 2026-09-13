@@ -1,11 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, INestApplication, ValidationPipe } from '@nestjs/common';
-import * as request from 'supertest';
+import { JwtService } from '@nestjs/jwt';
+import { BazaarStatus, FavorableType, Role, ScheduleType } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { BazaarStatus, Role, ScheduleType } from '@prisma/client';
+import * as request from 'supertest';
 
-import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AppModule } from '../../app.module';
+import { PrismaService } from '../../infra/prisma/prisma.service';
 
 // Tahrir Square. Every fixture below is offset north of this point so the
 // expected ordering is a straight function of latitude.
@@ -18,7 +19,10 @@ const future = (days: number) => new Date(Date.now() + days * DAY);
 describe('DiscoveryModule (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  let jwtService: JwtService;
   let organizerId: string;
+  let shopperId: string;
+  let shopperToken: string;
 
   const ids: Record<string, string> = {};
 
@@ -80,12 +84,25 @@ describe('DiscoveryModule (e2e)', () => {
     await app.init();
 
     prisma = app.get(PrismaService);
+    jwtService = app.get(JwtService);
 
+    await prisma.favorite.deleteMany();
     await prisma.boothListing.deleteMany();
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
     await prisma.vendor.deleteMany();
     await prisma.user.deleteMany();
+
+    const shopper = await prisma.user.create({
+      data: {
+        email: 'discovery-shopper@example.com',
+        passwordHash: 'hash',
+        name: 'Discovery Shopper',
+        role: Role.SHOPPER,
+      },
+    });
+    shopperId = shopper.id;
+    shopperToken = await jwtService.signAsync({ sub: shopperId, role: Role.SHOPPER });
 
     const owner = await prisma.user.create({
       data: {
@@ -107,6 +124,14 @@ describe('DiscoveryModule (e2e)', () => {
       lng: ORIGIN.lng,
       startDate: future(3),
       endDate: future(4),
+    });
+
+    await prisma.favorite.create({
+      data: {
+        userId: shopperId,
+        favorableType: FavorableType.BAZAAR,
+        favorableId: ids.near,
+      },
     });
     // ~5.1 km
     ids.mid = await seedBazaar({
@@ -170,6 +195,7 @@ describe('DiscoveryModule (e2e)', () => {
   });
 
   afterAll(async () => {
+    await prisma.favorite.deleteMany();
     await prisma.boothListing.deleteMany();
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
@@ -178,8 +204,13 @@ describe('DiscoveryModule (e2e)', () => {
     await app.close();
   });
 
-  const discover = (query: string) =>
-    request(app.getHttpServer()).get(`/discovery/bazaars${query}`);
+  const discover = (query: string, token?: string) => {
+    const req = request(app.getHttpServer()).get(`/discovery/bazaars${query}`);
+    if (token) {
+      req.set('Authorization', `Bearer ${token}`);
+    }
+    return req;
+  };
 
   describe('distance ordering', () => {
     it('returns published bazaars nearest first', async () => {
@@ -331,6 +362,30 @@ describe('DiscoveryModule (e2e)', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('INVALID_CURSOR');
+    });
+  });
+
+  describe('isFavorite resolution', () => {
+    it('returns isFavorite: true for an authenticated request on a favorited bazaar and false for unfavorited', async () => {
+      const res = await discover(`?lat=${ORIGIN.lat}&lng=${ORIGIN.lng}`, shopperToken);
+      expect(res.status).toBe(200);
+
+      const nearBazaar = res.body.data.find((b: { id: string }) => b.id === ids.near);
+      const otherBazaar = res.body.data.find((b: { id: string }) => b.id === ids.mid);
+
+      expect(nearBazaar).toBeDefined();
+      expect(nearBazaar.isFavorite).toBe(true);
+      expect(otherBazaar).toBeDefined();
+      expect(otherBazaar.isFavorite).toBe(false);
+    });
+
+    it('returns isFavorite: false for all bazaars on an anonymous request', async () => {
+      const res = await discover(`?lat=${ORIGIN.lat}&lng=${ORIGIN.lng}`);
+      expect(res.status).toBe(200);
+
+      const nearBazaar = res.body.data.find((b: { id: string }) => b.id === ids.near);
+      expect(nearBazaar).toBeDefined();
+      expect(nearBazaar.isFavorite).toBe(false);
     });
   });
 });

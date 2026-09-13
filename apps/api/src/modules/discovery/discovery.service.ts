@@ -1,7 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { ScheduleType } from '@prisma/client';
+import { FavorableType, ScheduleType } from '@prisma/client';
 
 import { BazaarsService } from '../bazaars/bazaars.service';
+import { SocialService } from '../social/social.service';
 import { DiscoverBazaarsQueryDto } from './dto/discover-bazaars-query.dto';
 
 /**
@@ -29,10 +30,14 @@ type Cursor = { sortValue: number | Date; id: string };
 
 @Injectable()
 export class DiscoveryService {
-  constructor(private readonly bazaarsService: BazaarsService) {}
+  constructor(
+    private readonly bazaarsService: BazaarsService,
+    private readonly socialService: SocialService,
+  ) {}
 
   async discoverBazaars(
     query: DiscoverBazaarsQueryDto,
+    userId?: string | null,
   ): Promise<{ data: DiscoveredBazaar[]; nextCursor: string | null }> {
     // The DTO supplies these defaults, but re-defaulting keeps the service
     // callable from tests without constructing a validated DTO instance.
@@ -55,6 +60,15 @@ export class DiscoveryService {
       cursor,
     );
 
+    let favoriteIds = new Set<string>();
+    if (userId && data.length > 0) {
+      favoriteIds = await this.socialService.batchCheckFavorites(
+        userId,
+        FavorableType.BAZAAR,
+        data.map((bazaar) => bazaar.id),
+      );
+    }
+
     const bazaars: DiscoveredBazaar[] = data.map((bazaar) => ({
       id: bazaar.id,
       organizerId: bazaar.organizerId,
@@ -71,8 +85,7 @@ export class DiscoveryService {
         bazaar.distanceMeters === null
           ? null
           : Number((bazaar.distanceMeters / 1000).toFixed(2)),
-      // Stubbed until the Social/Follow module lands (discovery-module-spec.md 3.1).
-      isFavorite: false,
+      isFavorite: favoriteIds.has(bazaar.id),
     }));
 
     let nextCursor: string | null = null;

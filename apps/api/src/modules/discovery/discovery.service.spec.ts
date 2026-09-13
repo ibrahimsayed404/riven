@@ -4,10 +4,12 @@ import { BazaarStatus, ScheduleType } from '@prisma/client';
 
 import { DiscoveryService } from './discovery.service';
 import { BazaarsService } from '../bazaars/bazaars.service';
+import { SocialService } from '../social/social.service';
 
 describe('DiscoveryService', () => {
   let service: DiscoveryService;
   let bazaarsService: jest.Mocked<BazaarsService>;
+  let socialService: jest.Mocked<SocialService>;
 
   const mockRow = {
     id: 'bazaar-1',
@@ -37,11 +39,18 @@ describe('DiscoveryService', () => {
             findNearby: jest.fn(),
           },
         },
+        {
+          provide: SocialService,
+          useValue: {
+            batchCheckFavorites: jest.fn().mockResolvedValue(new Set()),
+          },
+        },
       ],
     }).compile();
 
     service = module.get<DiscoveryService>(DiscoveryService);
     bazaarsService = module.get(BazaarsService);
+    socialService = module.get(SocialService);
   });
 
   describe('filter defaults', () => {
@@ -105,7 +114,7 @@ describe('DiscoveryService', () => {
       expect(result.data[0].distanceKm).toBeNull();
     });
 
-    it('stubs isFavorite until the social module lands', async () => {
+    it('defaults isFavorite to false when unauthenticated', async () => {
       bazaarsService.findNearby.mockResolvedValue({ data: [mockRow], hasMore: false });
 
       const result = await service.discoverBazaars({});
@@ -209,6 +218,36 @@ describe('DiscoveryService', () => {
       await expect(service.discoverBazaars({ cursor: '!!!' })).rejects.toMatchObject({
         response: { code: 'INVALID_CURSOR' },
       });
+    });
+  });
+
+  describe('isFavorite resolution', () => {
+    it('leaves isFavorite false for all bazaars when no userId is provided', async () => {
+      bazaarsService.findNearby.mockResolvedValue({
+        data: [mockRow as any],
+        hasMore: false,
+      });
+
+      const res = await service.discoverBazaars({});
+      expect(res.data[0].isFavorite).toBe(false);
+      expect(socialService.batchCheckFavorites).not.toHaveBeenCalled();
+    });
+
+    it('resolves isFavorite correctly when userId is provided', async () => {
+      bazaarsService.findNearby.mockResolvedValue({
+        data: [mockRow as any, { ...mockRow, id: 'bazaar-2' } as any],
+        hasMore: false,
+      });
+      socialService.batchCheckFavorites.mockResolvedValue(new Set(['bazaar-1']));
+
+      const res = await service.discoverBazaars({}, 'user-1');
+      expect(socialService.batchCheckFavorites).toHaveBeenCalledWith(
+        'user-1',
+        'BAZAAR',
+        ['bazaar-1', 'bazaar-2'],
+      );
+      expect(res.data[0].isFavorite).toBe(true);
+      expect(res.data[1].isFavorite).toBe(false);
     });
   });
 });

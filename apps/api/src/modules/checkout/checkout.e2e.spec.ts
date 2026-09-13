@@ -30,6 +30,9 @@ describe('Checkout and Orders (e2e)', () => {
     jwtService = app.get<JwtService>(JwtService);
 
     // Clean up
+    await prisma.rating.deleteMany();
+    await prisma.favorite.deleteMany();
+    await prisma.follow.deleteMany();
     await prisma.orderItem.deleteMany();
     await prisma.order.deleteMany();
     await prisma.orderGroup.deleteMany();
@@ -37,6 +40,10 @@ describe('Checkout and Orders (e2e)', () => {
     await prisma.cart.deleteMany();
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
+    await prisma.boothListing.deleteMany();
+    await prisma.booth.deleteMany();
+    await prisma.bazaar.deleteMany();
+    await prisma.organizer.deleteMany();
     await prisma.vendor.deleteMany();
     await prisma.user.deleteMany();
     await prisma.category.deleteMany();
@@ -103,6 +110,9 @@ describe('Checkout and Orders (e2e)', () => {
   });
 
   afterAll(async () => {
+    await prisma.rating.deleteMany();
+    await prisma.favorite.deleteMany();
+    await prisma.follow.deleteMany();
     await prisma.orderItem.deleteMany();
     await prisma.order.deleteMany();
     await prisma.orderGroup.deleteMany();
@@ -110,6 +120,10 @@ describe('Checkout and Orders (e2e)', () => {
     await prisma.cart.deleteMany();
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
+    await prisma.boothListing.deleteMany();
+    await prisma.booth.deleteMany();
+    await prisma.bazaar.deleteMany();
+    await prisma.organizer.deleteMany();
     await prisma.vendor.deleteMany();
     await prisma.user.deleteMany();
     await prisma.category.deleteMany();

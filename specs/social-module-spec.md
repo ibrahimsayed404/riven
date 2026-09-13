@@ -1,302 +1,146 @@
-# Social Module Specification — Follow, Favorite & Rating
+# Social Module — Spec
 
-**Status**: SPECIFICATION FOR REVIEW (REVISED)  
-**Module**: Social Interaction (`apps/api/src/modules/social` or `follows`, `favorites`, `ratings`)  
-**References**: `riven-spec.md` §3, §4, §7, §13 (Step 7); `riven-backend-architecture.md` §1, §2, §3; `specs/schema.prisma`
+## Scope
+One new `social` module covering three features:
+1. **Favorites** — Shoppers can favorite/unfavorite: Bazaars, Products, Vendors (follow).
+2. **Ratings** — Shoppers can rate (1–5 + optional text review): Vendors and Products.
+3. Wire `DiscoveryService.discoverBazaars`'s stubbed `isFavorite: false` to real data.
 
----
+Out of scope for this pass: notifications on new followers/ratings (belongs to the
+Notifications module later), rating moderation/reporting, vendor replies to reviews.
 
-## 1. Overview & Objectives
+## Module boundaries (follow the existing pattern)
+- New `apps/api/src/modules/social/` module. Owns its own tables — does NOT reach
+  into Vendors/Products/Bazaars repositories directly for writes.
+- Needs read access to Orders to verify purchase — call through `OrdersService`
+  (exported method), never query the Order/OrderItem tables directly from Social.
+- `DiscoveryModule` will import `SocialModule` (or its exported service) the same
+  way it imports `BazaarsModule` today — thin passthrough, no direct repo access.
+- All endpoints require `JwtAuthGuard` + Shopper role, except read-only aggregate
+  endpoints (e.g. "get a vendor's average rating") which can be public.
 
-The Social module implements lightweight community engagement for Riven:
-1. **Follow**: Ongoing entity relationship for notification fan-out (e.g. alerts when a followed vendor joins a bazaar, or an organizer announces updates).
-2. **Favorite**: Bookmark / save for later curation (e.g. saved vendors, bazaars, and events for personal wishlists/itineraries).
-3. **Rating**: 1–5 score review system with optional text comment, providing social proof and dynamic average rating calculations across discovery feeds.
-
----
-
-## 2. Data Model & Schema Verification
-
-### 2.1 Actual Content of `specs/schema.prisma`
-
-The exact schema definitions for `Follow`, `Favorite`, `Rating`, and their target enums in [schema.prisma](file:///d:/Dev/Projects/Riven/specs/schema.prisma#L63-L79):
+## Data model (Prisma — new models, review field names against actual schema first)
 
 ```prisma
-enum FollowableType {
-  VENDOR
+enum FavoriteTargetType {
   BAZAAR
+  PRODUCT
+  VENDOR
 }
 
-enum FavorableType {
-  VENDOR
-  BAZAAR
-  EVENT
+model Favorite {
+  id         String             @id @default(uuid())
+  userId     String
+  targetType FavoriteTargetType
+  targetId   String
+  createdAt  DateTime           @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, targetType, targetId])
+  @@index([targetType, targetId])
 }
 
 enum RatingTargetType {
   VENDOR
-  BAZAAR
-  EVENT
-}
-
-model Follow {
-  id             String         @id @default(uuid())
-  userId         String
-  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  // Polymorphic target — intentionally NOT a DB foreign key (followableId can
-  // point at Vendor or Bazaar). Integrity is enforced in follows.service.ts:
-  // verify the target exists before insert. See backend-architecture.md §1.
-  followableType FollowableType
-  followableId   String
-
-  createdAt DateTime @default(now())
-
-  @@unique([userId, followableType, followableId])
-  @@index([followableType, followableId])
-  @@map("follows")
-}
-
-model Favorite {
-  id            String        @id @default(uuid())
-  userId        String
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  favorableType FavorableType
-  favorableId   String
-
-  createdAt DateTime @default(now())
-
-  @@unique([userId, favorableType, favorableId])
-  @@index([favorableType, favorableId])
-  @@map("favorites")
+  PRODUCT
 }
 
 model Rating {
   id         String           @id @default(uuid())
   userId     String
-  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   targetType RatingTargetType
   targetId   String
-  score      Int              // 1-5, enforce range via CHECK constraint below
-  comment    String?
+  score      Int              // 1-5, enforced at DB (check constraint) + DTO
+  review     String?
+  orderId    String           // the verified order that unlocked this rating
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id])
 
-  @@unique([userId, targetType, targetId]) // one rating per user per target
+  @@unique([userId, targetType, targetId]) // one rating per user per target; edit via update, not re-create
   @@index([targetType, targetId])
-  @@map("ratings")
 }
 ```
 
-### 2.2 Confirmation of `EVENT` Entity & Target Asymmetry
+Add a raw-SQL migration step (like the existing GiST-index pattern) for the
+`score BETWEEN 1 AND 5` check constraint, since Prisma can't express it declaratively.
 
-- **`Event` Model Exists**: The `Event` model is indeed defined in `schema.prisma` (lines 309–332), representing talks, meetups, screenings, or standalone market sub-events hosted by an `Organizer` (optionally tied to a `Bazaar`).
-- **Why `FollowableType` excludes `EVENT` (Intentional Asymmetry)**:
-  - **`Follow`** represents a subscription to an ongoing creator/producer entity that has future activity streams (`VENDOR` or `BAZAAR`). Following an organizer/bazaar or vendor generates push notifications when new bazaars or booth listings are posted.
-  - **`EVENT`** is a discrete point-in-time happening (e.g. a specific 2-hour talk). A user does not "follow" a single session; they **`Favorite`** it to bookmark/save it on their schedule and receive an `EVENT_REMINDER` notification (§8 of `riven-spec.md`).
-  - **`Rating`** supports `EVENT` so attendees can rate specific workshops or talks after they conclude.
+**Confirm before implementing:** exact existing model/field names for `Order`,
+`OrderItem`, `Vendor`, `Product`, `User` — pull these from `schema.prisma` rather
+than assuming. If `Order` doesn't have a direct `vendorId`/`productId` link (e.g.
+it's only on `OrderItem`), the "verified purchase" check needs to join through
+`OrderItem`.
 
----
+## Verified-purchase rule (rating gate)
+A user may rate a Vendor or Product only if they have at least one Order:
+- containing an OrderItem from that Vendor/Product, AND
+- in a completed/fulfilled state (not PENDING/CANCELLED — confirm exact enum
+  value from OrderStatus, e.g. `DELIVERED` or `COMPLETED`).
 
-## 3. Endpoints & API Contract
+If no qualifying order exists → `403 Forbidden` with a clear error code
+(`NOT_VERIFIED_PURCHASE`), not a silent empty result.
 
-### 3.1 Follows Endpoints
+Rating is `@@unique([userId, targetType, targetId])` — a second rate attempt
+should **update** the existing rating (PATCH semantics), not throw a conflict,
+so shoppers can revise their review.
 
-#### `POST /social/follows`
-- **Auth**: Authenticated (`SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`)
-- **Body**:
-  ```json
-  {
-    "type": "VENDOR" | "BAZAAR",
-    "targetId": "string (UUID)"
-  }
-  ```
-- **Behavior**: Idempotent upsert (if already following, returns 200 with existing record).
-- **Errors**:
-  - `404 Not Found` — `TARGET_NOT_FOUND` (invalid target or target soft-deleted)
-  - `400 Bad Request` — `CANNOT_FOLLOW_SELF` (vendor/organizer attempting to follow their own profile)
+## Endpoints
 
-#### `DELETE /social/follows`
-- **Auth**: Authenticated
-- **Query Params**: `?type=VENDOR|BAZAAR&targetId=UUID`
-- **Behavior**: Removes the follow relation. Idempotent (succeeds even if relation didn't exist).
-- **Response**: `200 { "unfollowed": true }`.
+### Favorites
+- `POST /social/favorites` — body: `{ targetType, targetId }`. Idempotent
+  (favoriting an already-favorited item returns 200, not 409).
+- `DELETE /social/favorites` — body: `{ targetType, targetId }`. Idempotent
+  (unfavoriting something not favorited returns 200, not 404).
+- `GET /social/favorites?targetType=BAZAAR&cursor=...&limit=...` — the user's
+  own favorites, keyset paginated (same cursor pattern as `discoverBazaars`).
 
-#### `GET /social/follows`
-- **Auth**: Authenticated (lists current user's follows)
-- **Query Params**: `?type=VENDOR|BAZAAR&limit=20&cursor=...`
-- **Response**: List of followed entities with metadata (`id`, `name`, `logo`/`coverMedia`, `type`, `createdAt`).
+### Ratings
+- `POST /social/ratings` — body: `{ targetType, targetId, score, review? }`.
+  Enforces verified-purchase gate. Upserts (see above).
+- `GET /social/ratings/summary?targetType=VENDOR&targetId=...` — public,
+  returns `{ average: number, count: number }`. This is what Vendor/Product
+  detail pages will call — keep it cheap (aggregate query, no N+1).
+- `GET /social/ratings?targetType=PRODUCT&targetId=...&cursor=...&limit=...` —
+  public, paginated list of reviews for a target (for a reviews section).
 
----
+## Wiring isFavorite into Discovery
+In `DiscoveryService.discoverBazaars`, replace the hardcoded `isFavorite: false`
+with a real lookup:
+- Only do this lookup when the request is authenticated (anonymous shoppers get
+  `isFavorite: false` without a query — don't force auth on a currently-public
+  endpoint just for this).
+- **Must not introduce N+1**: batch-check favorite status for all bazaar IDs in
+  the current page with a single `findMany` (`targetType: BAZAAR, targetId: { in: [...] }`),
+  not one query per bazaar.
+- This means `PublicDiscoveryController` needs an *optional* auth context (user
+  may or may not be logged in). Confirm how the existing auth guard pattern
+  handles optional auth in this codebase (there may already be an
+  `OptionalJwtAuthGuard` — check before writing a new one).
 
-### 3.2 Favorites Endpoints
+## Testing (match existing suite conventions)
+- Unit tests (`social.service.spec.ts`): verified-purchase gate (pass/fail
+  cases), upsert-not-conflict behavior, idempotent favorite/unfavorite.
+- E2E (`social.e2e.spec.ts`): seed a real Order via raw SQL or existing
+  checkout flow test helpers, confirm rating is rejected without one, confirm
+  it succeeds with one, confirm average/count aggregate is correct, confirm
+  favorites round-trip and paginate.
+- E2E addition to `discovery.e2e.spec.ts` (or new test in it): confirm
+  `isFavorite: true` shows up correctly for an authenticated request with an
+  existing favorite, and `false` for anonymous requests.
 
-#### `POST /social/favorites`
-- **Auth**: Authenticated
-- **Body**:
-  ```json
-  {
-    "type": "VENDOR" | "BAZAAR" | "EVENT",
-    "targetId": "string (UUID)"
-  }
-  ```
-- **Behavior**: Idempotent upsert (if already favorited, returns 200 with existing record).
-- **Errors**:
-  - `404 Not Found` — `TARGET_NOT_FOUND` (invalid or soft-deleted)
-
-#### `DELETE /social/favorites`
-- **Auth**: Authenticated
-- **Query Params**: `?type=VENDOR|BAZAAR|EVENT&targetId=UUID`
-- **Behavior**: Removes the favorite bookmark. Idempotent.
-- **Response**: `200 { "unfavorited": true }`.
-
-#### `GET /social/favorites`
-- **Auth**: Authenticated
-- **Query Params**: `?type=VENDOR|BAZAAR|EVENT&limit=20&cursor=...`
-- **Response**: List of user's favorited items grouped or filtered by type.
-
----
-
-### 3.3 Ratings & Reviews Endpoints
-
-#### `POST /social/ratings`
-- **Auth**: Authenticated
-- **Body**:
-  ```json
-  {
-    "targetType": "VENDOR" | "BAZAAR" | "EVENT",
-    "targetId": "string (UUID)",
-    "score": 1 | 2 | 3 | 4 | 5,
-    "comment": "string (optional, max 1000 chars)"
-  }
-  ```
-- **Contract Rule (Strict 409 CONFLICT on duplicate)**:
-  - If a rating already exists for `(userId, targetType, targetId)`, `POST` **rejects with `409 Conflict` (`RATING_ALREADY_EXISTS`)**.
-  - **Rationale**: Enforcing 409 separates initial review creation from subsequent modification. The client must explicitly use `PATCH /social/ratings/:id` for edits. This avoids accidental overwrites, preserves intent, and aligns with RESTful semantics across the Riven API.
-- **Errors**:
-  - `400 Bad Request` — `INVALID_RATING_SCORE` (score not an integer in 1..5)
-  - `400 Bad Request` — `CANNOT_RATE_SELF` (vendor rating own profile, organizer rating own bazaar/event)
-  - `404 Not Found` — `TARGET_NOT_FOUND`
-  - `409 Conflict` — `RATING_ALREADY_EXISTS` (rating already exists for this target)
-
-#### `PATCH /social/ratings/:id`
-- **Auth**: Authenticated (owner of the rating)
-- **Body**: `{ "score"?: number, "comment"?: string | null }`
-- **Behavior**: Updates the score and/or comment and updates `updatedAt = NOW()`.
-- **Errors**:
-  - `400 Bad Request` — `INVALID_RATING_SCORE`
-  - `404 Not Found` — `RATING_NOT_FOUND`
-  - `403 Forbidden` — `NOT_RATING_OWNER`
-
-#### `DELETE /social/ratings/:id`
-- **Auth**: Authenticated (owner of the rating or ADMIN)
-- **Behavior**: Hard deletes the single rating record.
-- **Response**: `200 { "deleted": true }`.
-- **Errors**:
-  - `404 Not Found` — `RATING_NOT_FOUND`
-  - `403 Forbidden` — `NOT_RATING_OWNER`
-
-#### `GET /social/ratings` (Public)
-- **Auth**: Public
-- **Query Params**: `?targetType=VENDOR|BAZAAR|EVENT&targetId=UUID&limit=20&cursor=...`
-- **Response**:
-  ```json
-  {
-    "summary": {
-      "averageScore": 4.7,
-      "totalReviews": 38,
-      "scoreDistribution": { "1": 0, "2": 1, "3": 2, "4": 10, "5": 25 }
-    },
-    "items": [
-      {
-        "id": "uuid",
-        "userId": "uuid",
-        "userName": "Farah A.",
-        "score": 5,
-        "comment": "Loved the handmade pottery!",
-        "createdAt": "2026-08-14T20:00:00.000Z",
-        "updatedAt": "2026-08-14T20:00:00.000Z"
-      }
-    ],
-    "pagination": { "hasMore": false, "nextCursor": null }
-  }
-  ```
-
----
-
-## 4. Validation & Business Rules
-
-1. **Rating Eligibility (Open Discovery vs. Purchase Gate)**:
-   - In Riven v1, discovery is un-gated (no in-app cart/checkout; bazaar entry is largely unticketed). Shoppers can rate any active vendor, bazaar, or event without needing a purchase receipt.
-   - Spam/abuse mitigation:
-     - Strict 1-rating-per-user-per-target enforced via database unique constraint (`@@unique([userId, targetType, targetId])`).
-     - Self-rating is strictly blocked (`CANNOT_RATE_SELF`).
-2. **Target Deletion Policy**:
-   - Soft-deleting a target (`deletedAt !== null`) blocks new follows, favorites, and ratings (`TARGET_NOT_FOUND`).
-   - Existing ratings remain stored in the DB for historical record-keeping, but are excluded from active discovery aggregations.
-
----
-
-## 5. Auth Module Work: Optional Authentication Guard
-
-### 5.1 Current State Analysis
-- `JwtAuthGuard` in `apps/api/src/modules/auth/guards/jwt-auth.guard.ts` currently extends `AuthGuard('jwt')` and unconditionally throws `UnauthorizedException` if `err || !user`.
-- It does **not** support optional/anonymous auth.
-
-### 5.2 Explicit Auth Work: `OptionalJwtAuthGuard`
-To support endpoints that work for both anonymous visitors and authenticated users (like Discovery feeds), we will add an explicit `OptionalJwtAuthGuard`:
-
-1. **Implementation (`apps/api/src/modules/auth/guards/optional-jwt-auth.guard.ts`)**:
-   ```typescript
-   import { Injectable, ExecutionContext } from '@nestjs/common';
-   import { AuthGuard } from '@nestjs/passport';
-
-   @Injectable()
-   export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
-     // Override handleRequest so missing token or bad token does NOT throw 401
-     handleRequest<TUser = any>(_err: any, user: any, _info: any, _context: ExecutionContext): TUser | null {
-       return user || null;
-     }
-   }
-   ```
-2. **Decorator & Controller Usage**:
-   ```typescript
-   @UseGuards(OptionalJwtAuthGuard)
-   @Get('vendors')
-   async discoverVendors(
-     @Query() dto: DiscoverVendorsDto,
-     @CurrentUser('userId') userId?: string,
-   ) { ... }
-   ```
-   - If a valid `Bearer <token>` is present in the `Authorization` header, `req.user` (and `@CurrentUser('userId')`) is populated.
-   - If the header is missing, expired, or invalid, `req.user` is `null` / `undefined`, and the request proceeds anonymously without error.
-
----
-
-## 6. Retrofit into Discovery Module
-
-1. **`GET /discovery/bazaars` and `GET /discovery/vendors`**:
-   - Decorated with `@UseGuards(OptionalJwtAuthGuard)`.
-   - Pass optional `userId` to `DiscoveryService` and `DiscoveryRepository`.
-2. **Repository SQL Retrofit**:
-   - When `userId` is provided:
-     - `LEFT JOIN favorites fav ON fav."favorableType" = 'BAZAAR' AND fav."favorableId" = b."id" AND fav."userId" = ${userId}` (and analogous for vendors).
-     - `COALESCE(fav."id" IS NOT NULL, false) AS "isFavorite"`.
-   - When `userId` is not provided:
-     - `false AS "isFavorite"` directly without extra joins.
-3. **Live Ratings**:
-   - Discovery repository's existing `LEFT JOIN LATERAL` against `"ratings"` will naturally aggregate real user scores from `POST /social/ratings`.
-
----
-
-## 7. Error Codes
-
-| Code | HTTP Status | Description |
-|---|---|---|
-| `TARGET_NOT_FOUND` | 404 | Follow/favorite/rating target does not exist or is soft-deleted |
-| `CANNOT_FOLLOW_SELF` | 400 | User cannot follow their own vendor profile or bazaar |
-| `CANNOT_RATE_SELF` | 400 | User cannot rate their own vendor profile or organized event/bazaar |
-| `INVALID_RATING_SCORE` | 400 | Rating score must be an integer between 1 and 5 |
-| `RATING_NOT_FOUND` | 404 | Rating does not exist |
-| `RATING_ALREADY_EXISTS` | 409 | User has already submitted a rating for this target |
-| `NOT_RATING_OWNER` | 403 | User does not have permission to modify this rating |
+## Known pitfalls to avoid (per project history)
+- Raw SQL PostGIS casts: N/A here, no geo columns.
+- **Owner ID leaks**: `GET /social/ratings` is public — make sure it returns
+  reviewer display name/handle if that's the design, not raw `userId` unless
+  intentional and confirmed.
+- **N+1 in admin/list views**: the isFavorite batch-check above; also the
+  ratings summary must not loop per-item.
+- **DI wiring**: Social must not import Vendors/Products repositories directly;
+  go through their exported services.
+- Rate-limit consideration: `POST /social/ratings` and `/favorites` are
+  write endpoints — confirm they sit behind whatever global rate-limiting
+  exists (silent rate-limit returns must throw 429, not fail silently, per
+  existing pattern).
