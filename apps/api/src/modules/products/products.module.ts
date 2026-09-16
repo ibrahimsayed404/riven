@@ -7,6 +7,6 @@ import { AdminProductsController } from './admin-products.controller';
 @Module({
   controllers: [ProductsController, AdminProductsController],
   providers: [ProductsService, ProductsRepository],
-  exports: [ProductsRepository],
+  exports: [ProductsService, ProductsRepository],
 })
 export class ProductsModule {}

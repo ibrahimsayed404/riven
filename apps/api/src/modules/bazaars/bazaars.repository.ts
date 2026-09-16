@@ -16,6 +16,9 @@ export type BazaarWithDistance = BazaarWithLocation & {
   distanceMeters: number | null;
 };
 
+/** A batch of ids for keyset iteration (reindex). */
+export type IdPage = { ids: string[]; nextCursor: string | null };
+
 @Injectable()
 export class BazaarsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -309,8 +312,12 @@ export class BazaarsRepository {
     return this.findById(id) as Promise<BazaarWithLocation>;
   }
 
-  async transitionPastOneOffBazaars(): Promise<number> {
-    const result = await this.prisma.$executeRaw`
+  /**
+   * Returns the ids it completed (not just a count) so the caller can drop
+   * them from the search index — a COMPLETED bazaar is no longer public.
+   */
+  async transitionPastOneOffBazaars(): Promise<string[]> {
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
       UPDATE "bazaars"
       SET "status" = 'COMPLETED'::"BazaarStatus"
       WHERE "scheduleType" = 'ONE_OFF'::"ScheduleType"
@@ -320,8 +327,23 @@ export class BazaarsRepository {
           OR
           ("endDate" IS NULL AND "startDate" < NOW())
         )
+      RETURNING "id"
     `;
-    return result;
+    return rows.map((row) => row.id);
+  }
+
+  /** Publicly visible bazaar ids, keyset-paged, for reindexing. */
+  async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
+    const where: Prisma.BazaarWhereInput = { status: BazaarStatus.PUBLISHED, deletedAt: null };
+    const rows = await this.prisma.bazaar.findMany({
+      where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: take + 1,
+    });
+    const hasMore = rows.length > take;
+    const ids = rows.slice(0, take).map((row) => row.id);
+    return { ids, nextCursor: hasMore ? ids[ids.length - 1] : null };
   }
 
   // --- BoothListing (Applications) ---

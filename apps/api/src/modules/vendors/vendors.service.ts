@@ -1,7 +1,9 @@
 import { Injectable, NotFoundException, HttpException, HttpStatus, ForbiddenException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
-import { VendorsRepository } from './vendors.repository';
+import { VendorsRepository, IdPage } from './vendors.repository';
+import { SearchIndexQueue } from '../../infra/search/search-index.queue';
+import { VendorSearchDocument } from '../../infra/search/search-documents';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
 import { UpdateVendorLocationDto } from './dto/update-vendor-location.dto';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -15,7 +17,10 @@ const LOCATION_UPDATE_COOLDOWN_MS = 60 * 1000;
 export class VendorsService {
   private locationUpdateTimestamps = new Map<string, number>();
 
-  constructor(private readonly vendorsRepository: VendorsRepository) {}
+  constructor(
+    private readonly vendorsRepository: VendorsRepository,
+    private readonly searchIndexQueue: SearchIndexQueue,
+  ) {}
 
   async getMyProfile(ownerId: string) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
@@ -47,6 +52,8 @@ export class VendorsService {
       hasFixedLocation: updateDto.hasFixedLocation,
     });
 
+    await this.searchIndexQueue.enqueue({ type: 'VENDOR', id: vendor.id });
+
     const location = await this.vendorsRepository.findVendorLocation(vendor.id);
     return { ...updated, location };
   }
@@ -75,6 +82,7 @@ export class VendorsService {
 
     await this.vendorsRepository.updateLocation(vendor.id, locationDto.lat, locationDto.lng);
     this.locationUpdateTimestamps.set(vendor.id, now);
+    await this.searchIndexQueue.enqueue({ type: 'VENDOR', id: vendor.id });
   }
 
   async getVendorById(id: string) {
@@ -95,7 +103,43 @@ export class VendorsService {
     if (!vendor) {
       throw new NotFoundException('Vendor not found');
     }
-    return this.vendorsRepository.update(id, { verified: true });
+    const updated = await this.vendorsRepository.update(id, { verified: true });
+    // Verification flips the visibility of every product of this vendor without
+    // touching a product row. Exactly two jobs regardless of catalog size: the
+    // vendor itself, and a fan-out job that pages the products in batches.
+    await this.searchIndexQueue.enqueueMany([
+      { type: 'VENDOR', id },
+      { type: 'VENDOR_PRODUCTS', vendorId: id },
+    ]);
+    return updated;
+  }
+
+  // --- Search index support (read-only; the single authority on vendor eligibility) ---
+
+  /** The vendor's search document, or null when unverified / soft-deleted. */
+  async getSearchDocument(id: string): Promise<VendorSearchDocument | null> {
+    const vendor = await this.vendorsRepository.findForSearch(id);
+    if (!vendor) return null;
+
+    const location = await this.vendorsRepository.findVendorLocation(id);
+
+    return {
+      id: vendor.id,
+      name: vendor.name,
+      category: vendor.category,
+      description: vendor.description,
+      brandStory: vendor.brandStory,
+      logoUrl: vendor.logoUrl,
+      bannerUrl: vendor.bannerUrl,
+      vendorType: vendor.vendorType,
+      hasFixedLocation: vendor.hasFixedLocation,
+      // Omit (not null) when absent so _geoRadius excludes the vendor cleanly.
+      ...(location ? { _geo: location } : {}),
+    };
+  }
+
+  listPublicVendorIds(cursor: string | null, take: number): Promise<IdPage> {
+    return this.vendorsRepository.listPublicIds(cursor, take);
   }
 
   // --- Product Methods ---
@@ -117,7 +161,7 @@ export class VendorsService {
       throw new ForbiddenException('Vendor must be verified to create products');
     }
     
-    return this.vendorsRepository.createProduct(vendor.id, {
+    const product = await this.vendorsRepository.createProduct(vendor.id, {
       title: createDto.title,
       description: createDto.description,
       categoryId: createDto.categoryId,
@@ -126,6 +170,10 @@ export class VendorsService {
       isActive: createDto.isActive ?? true,
       approvalStatus: 'PENDING',
     });
+    // A new product is PENDING, so this resolves to "not eligible" → no-op on the
+    // index. Enqueued anyway: eligibility is decided in one place, not here.
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: product.id });
+    return product;
   }
 
   async getMyProduct(ownerId: string, productId: string) {
@@ -144,16 +192,21 @@ export class VendorsService {
     // getMyProduct ensures it exists and belongs to the vendor
     await this.getMyProduct(ownerId, productId);
     
-    return this.vendorsRepository.updateProduct(productId, {
+    const updated = await this.vendorsRepository.updateProduct(productId, {
       ...updateDto,
       approvalStatus: 'PENDING',
       rejectionReason: null,
     });
+    // Reset to PENDING means the sync job *removes* it from the index until re-approved.
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
+    return updated;
   }
 
   async deleteProduct(ownerId: string, productId: string) {
     await this.getMyProduct(ownerId, productId);
-    return this.vendorsRepository.softDeleteProduct(productId);
+    const deleted = await this.vendorsRepository.softDeleteProduct(productId);
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
+    return deleted;
   }
 
   // --- Product Variant Methods ---
@@ -161,7 +214,10 @@ export class VendorsService {
   async createProductVariant(ownerId: string, productId: string, createVariantDto: CreateProductVariantDto) {
     await this.getMyProduct(ownerId, productId);
     try {
-      return await this.vendorsRepository.createProductVariant(productId, createVariantDto);
+      const variant = await this.vendorsRepository.createProductVariant(productId, createVariantDto);
+      // minPrice/maxPrice/sizes/colors derive from variants → re-index the parent.
+      await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
+      return variant;
     } catch (error: any) {
       if (error.code === 'P2002' && error.meta?.target?.includes('sku')) {
         throw new ConflictException('SKU must be unique');
@@ -177,7 +233,9 @@ export class VendorsService {
       throw new NotFoundException('Variant not found');
     }
     try {
-      return await this.vendorsRepository.updateProductVariant(variantId, updateVariantDto);
+      const variant = await this.vendorsRepository.updateProductVariant(variantId, updateVariantDto);
+      await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
+      return variant;
     } catch (error: any) {
       if (error.code === 'P2002' && error.meta?.target?.includes('sku')) {
         throw new ConflictException('SKU must be unique');
@@ -192,6 +250,8 @@ export class VendorsService {
     if (!variantExists) {
       throw new NotFoundException('Variant not found');
     }
-    return this.vendorsRepository.deleteProductVariant(variantId);
+    const variant = await this.vendorsRepository.deleteProductVariant(variantId);
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
+    return variant;
   }
 }

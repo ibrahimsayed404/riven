@@ -5,6 +5,9 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
   MEILISEARCH_HOST: z.string().url(),
   MEILISEARCH_API_KEY: z.string().min(1),
+  // Index uid prefix, so dev/test/prod (and e2e runs) never share an index.
+  // Defaults to `riven_${NODE_ENV}_` in SearchIndexRegistry when unset.
+  MEILISEARCH_INDEX_PREFIX: z.string().regex(/^[a-zA-Z0-9_-]*$/).optional(),
   JWT_SECRET: z.string().min(32),
   JWT_ACCESS_TOKEN_TTL: z.string().min(1),
   JWT_REFRESH_TOKEN_TTL: z.string().min(1),
