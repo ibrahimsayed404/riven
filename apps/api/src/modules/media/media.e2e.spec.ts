@@ -40,6 +40,7 @@ describe('MediaModule (e2e)', () => {
     prisma = app.get(PrismaService);
     const jwtService = app.get(JwtService);
 
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany({ where: { email: { startsWith: 'media-' } } });
 
     const vendor = await prisma.user.create({
@@ -58,6 +59,7 @@ describe('MediaModule (e2e)', () => {
   });
 
   afterAll(async () => {
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany({ where: { email: { startsWith: 'media-' } } });
     await app.close();
   });

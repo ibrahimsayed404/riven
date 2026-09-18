@@ -131,6 +131,26 @@ enum OrderStatus {
   CANCELLED
 }
 
+// One value per auditable admin action. A new admin write is audited only if
+// a value is added here AND the service calls AuditService.record().
+enum AdminAction {
+  VENDOR_VERIFIED
+  VENDOR_REJECTED
+  ORGANIZER_VERIFIED
+  ORGANIZER_REJECTED
+  PRODUCT_APPROVED
+  PRODUCT_REJECTED
+  USER_DEACTIVATED
+  USER_REACTIVATED
+}
+
+enum AdminTargetType {
+  VENDOR
+  ORGANIZER
+  PRODUCT
+  USER
+}
+
 // ----------------------------------------------------------------------------
 // Identity
 // ----------------------------------------------------------------------------
@@ -157,6 +177,7 @@ model User {
   ratings       Rating[]
   notifications Notification[]
   refreshTokens RefreshToken[]
+  auditLogs     AdminAuditLog[]
   cart          Cart?
   orderGroups   OrderGroup[]
   orders        Order[]
@@ -197,6 +218,8 @@ model Vendor {
   // GIST index required: CREATE INDEX vendor_home_location_gist ON "Vendor" USING GIST ("homeLocation");
   homeLocation       Unsupported("geography(Point, 4326)")?
   verified           Boolean                                @default(false)
+  // Current rejection state only — null when pending or verified. History lives in AdminAuditLog.
+  rejectionReason    String?
   subscriptionStatus SubscriptionStatus                     @default(TRIALING)
 
   vendorType     VendorType @default(BAZAAR_ONLY)
@@ -285,7 +308,9 @@ model Organizer {
   owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   name     String
-  verified Boolean @default(false)
+  verified        Boolean @default(false)
+  // Current rejection state only — null when pending or verified. History lives in AdminAuditLog.
+  rejectionReason String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -483,6 +508,31 @@ model Notification {
 
   @@index([userId, readAt])
   @@map("notifications")
+}
+
+// ----------------------------------------------------------------------------
+// Admin audit log
+// ----------------------------------------------------------------------------
+
+// Append-only record of moderation actions. Written best-effort after the
+// domain write commits (see specs/admin-module-spec.md §5). No FK on targetId:
+// it points at four different tables; the acting service checks existence.
+model AdminAuditLog {
+  id         String          @id @default(uuid())
+  actorId    String
+  // Restrict: an audit row must outlive its actor. Users are soft-deleted in
+  // production, so this only bites hard-deletes in e2e cleanup.
+  actor      User            @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  action     AdminAction
+  targetType AdminTargetType
+  targetId   String
+  reason     String?
+  createdAt  DateTime        @default(now())
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("admin_audit_logs")
 }
 
 // ----------------------------------------------------------------------------
