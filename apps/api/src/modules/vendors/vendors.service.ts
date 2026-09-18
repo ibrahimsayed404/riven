@@ -1,8 +1,9 @@
 import { Injectable, NotFoundException, HttpException, HttpStatus, ForbiddenException, ConflictException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AdminAction, AdminTargetType, Prisma } from '@prisma/client';
 
-import { VendorsRepository, IdPage } from './vendors.repository';
+import { VendorsRepository, IdPage, VendorModerationStatus } from './vendors.repository';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
+import { AuditService } from '../audit/audit.service';
 import { VendorSearchDocument } from '../../infra/search/search-documents';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
 import { UpdateVendorLocationDto } from './dto/update-vendor-location.dto';
@@ -20,6 +21,7 @@ export class VendorsService {
   constructor(
     private readonly vendorsRepository: VendorsRepository,
     private readonly searchIndexQueue: SearchIndexQueue,
+    private readonly auditService: AuditService,
   ) {}
 
   async getMyProfile(ownerId: string) {
@@ -98,20 +100,83 @@ export class VendorsService {
     return { ...publicVendor, location };
   }
 
-  async verifyVendor(id: string) {
-    const vendor = await this.vendorsRepository.findById(id);
-    if (!vendor) {
-      throw new NotFoundException('Vendor not found');
+  // --- Admin moderation (specs/admin-module-spec.md §3, §4.1) ---
+
+  async listForAdmin(params: {
+    status?: VendorModerationStatus;
+    search?: string;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.vendorsRepository.findManyForAdmin(params);
+    return {
+      data,
+      meta: {
+        total,
+        page: params.page,
+        limit: params.limit,
+        totalPages: Math.ceil(total / params.limit),
+      },
+    };
+  }
+
+  countPendingForAdmin(): Promise<number> {
+    return this.vendorsRepository.countPendingForAdmin();
+  }
+
+  verifyVendor(adminId: string, id: string) {
+    return this.moderateVendor(adminId, id, { verified: true, rejectionReason: null }, AdminAction.VENDOR_VERIFIED);
+  }
+
+  /** Works on a pending vendor (reject) and on a verified one (revoke). */
+  rejectVendor(adminId: string, id: string, reason: string) {
+    return this.moderateVendor(adminId, id, { verified: false, rejectionReason: reason }, AdminAction.VENDOR_REJECTED);
+  }
+
+  /**
+   * One transition function for verify and reject. Idempotent: when the target
+   * state equals the current one nothing is written, audited or enqueued.
+   * Audit is recorded after the write, best-effort — see AuditService.record.
+   */
+  private async moderateVendor(
+    adminId: string,
+    id: string,
+    target: { verified: boolean; rejectionReason: string | null },
+    action: AdminAction,
+  ) {
+    const current = await this.vendorsRepository.findModerationState(id);
+    if (!current || current.deletedAt) {
+      throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
     }
-    const updated = await this.vendorsRepository.update(id, { verified: true });
-    // Verification flips the visibility of every product of this vendor without
-    // touching a product row. Exactly two jobs regardless of catalog size: the
-    // vendor itself, and a fan-out job that pages the products in batches.
-    await this.searchIndexQueue.enqueueMany([
-      { type: 'VENDOR', id },
-      { type: 'VENDOR_PRODUCTS', vendorId: id },
-    ]);
-    return updated;
+
+    const unchanged =
+      current.verified === target.verified && current.rejectionReason === target.rejectionReason;
+    if (unchanged) {
+      return { id: current.id, verified: current.verified, rejectionReason: current.rejectionReason };
+    }
+
+    const updated = await this.vendorsRepository.update(id, target);
+
+    if (current.verified !== target.verified) {
+      // Flipping `verified` changes the visibility of every product of this vendor
+      // without touching a product row. Exactly two jobs regardless of catalog
+      // size: the vendor itself, and a fan-out job that pages the products.
+      // A reason-only change leaves visibility alone, so nothing to enqueue.
+      await this.searchIndexQueue.enqueueMany([
+        { type: 'VENDOR', id },
+        { type: 'VENDOR_PRODUCTS', vendorId: id },
+      ]);
+    }
+
+    await this.auditService.record({
+      actorId: adminId,
+      action,
+      targetType: AdminTargetType.VENDOR,
+      targetId: id,
+      reason: target.rejectionReason,
+    });
+
+    return { id: updated.id, verified: updated.verified, rejectionReason: updated.rejectionReason };
   }
 
   // --- Search index support (read-only; the single authority on vendor eligibility) ---

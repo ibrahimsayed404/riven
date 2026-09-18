@@ -34,6 +34,7 @@ describe('BazaarsModule (e2e)', () => {
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
     await prisma.vendor.deleteMany();
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
 
     // Create Admin
@@ -72,6 +73,7 @@ describe('BazaarsModule (e2e)', () => {
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
     await prisma.vendor.deleteMany();
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
     await app.close();
   });
@@ -90,12 +92,51 @@ describe('BazaarsModule (e2e)', () => {
     expect(res.status).toBe(403);
   });
 
+  it('1b. Admin queue lists the organizer as pending; reject + re-verify round-trip with audit rows', async () => {
+    const pending = await request(app.getHttpServer())
+      .get('/admin/organizers?status=pending')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    const row = pending.body.data.find((o: any) => o.id === organizerId);
+    expect(row).toBeDefined();
+    expect(row.owner.email).toBe('org1@example.com');
+
+    const rejected = await request(app.getHttpServer())
+      .patch(`/admin/organizers/${organizerId}/reject`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'Need proof of venue booking' })
+      .expect(200);
+    expect(rejected.body).toEqual({ id: organizerId, verified: false, rejectionReason: 'Need proof of venue booking' });
+
+    const me = await request(app.getHttpServer())
+      .get('/organizers/me')
+      .set('Authorization', `Bearer ${organizerToken}`)
+      .expect(200);
+    expect(me.body.rejectionReason).toBe('Need proof of venue booking');
+
+    // Same reason again: 200, no second audit row.
+    await request(app.getHttpServer())
+      .patch(`/admin/organizers/${organizerId}/reject`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'Need proof of venue booking' })
+      .expect(200);
+
+    const audit = await prisma.adminAuditLog.findMany({ where: { targetId: organizerId } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ action: 'ORGANIZER_REJECTED', targetType: 'ORGANIZER', reason: 'Need proof of venue booking' });
+  });
+
   it('2. Admin verifies Organizer', async () => {
     const res = await request(app.getHttpServer())
       .patch(`/admin/organizers/${organizerId}/verify`)
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(res.body.verified).toBe(true);
+    expect(res.body.rejectionReason).toBeNull();
+
+    const audit = await prisma.adminAuditLog.findMany({ where: { targetId: organizerId }, orderBy: { createdAt: 'desc' } });
+    expect(audit).toHaveLength(2);
+    expect(audit[0].action).toBe('ORGANIZER_VERIFIED');
   });
 
   it('3. Verified Organizer creates a Bazaar', async () => {

@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { AdminAction, AdminTargetType, ApprovalStatus } from '@prisma/client';
 import { ProductsRepository, IdPage } from './products.repository';
+import { AuditService } from '../audit/audit.service';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { ProductSearchDocument, toPriceNumber } from '../../infra/search/search-documents';
@@ -9,6 +11,7 @@ export class ProductsService {
   constructor(
     private readonly productsRepository: ProductsRepository,
     private readonly searchIndexQueue: SearchIndexQueue,
+    private readonly auditService: AuditService,
   ) {}
 
   async listProducts(query: ListProductsQueryDto) {
@@ -32,22 +35,76 @@ export class ProductsService {
     return product;
   }
 
-  async approveProduct(id: string) {
-    const updated = await this.productsRepository.updateAdminStatus(id, {
-      approvalStatus: 'APPROVED',
-      rejectionReason: null,
-    });
-    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
-    return updated;
+  // --- Admin moderation (specs/admin-module-spec.md §4.3) ---
+
+  async listForAdmin(params: {
+    approvalStatus?: ApprovalStatus;
+    vendorId?: string;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.productsRepository.findManyForAdmin(params);
+    return {
+      data,
+      meta: {
+        total,
+        page: params.page,
+        limit: params.limit,
+        totalPages: Math.ceil(total / params.limit),
+      },
+    };
   }
 
-  async rejectProduct(id: string, reason: string) {
-    const updated = await this.productsRepository.updateAdminStatus(id, {
-      approvalStatus: 'REJECTED',
-      rejectionReason: reason,
+  countPendingForAdmin(): Promise<number> {
+    return this.productsRepository.countPendingForAdmin();
+  }
+
+  approveProduct(adminId: string, id: string) {
+    return this.moderateProduct(adminId, id, { approvalStatus: 'APPROVED', rejectionReason: null }, AdminAction.PRODUCT_APPROVED);
+  }
+
+  rejectProduct(adminId: string, id: string, reason: string) {
+    return this.moderateProduct(adminId, id, { approvalStatus: 'REJECTED', rejectionReason: reason }, AdminAction.PRODUCT_REJECTED);
+  }
+
+  /**
+   * One transition function for approve and reject. Idempotent: when the
+   * target state equals the current one nothing is written, audited or
+   * enqueued. Soft-deleted products 404 — they are not moderatable.
+   */
+  private async moderateProduct(
+    adminId: string,
+    id: string,
+    target: { approvalStatus: ApprovalStatus; rejectionReason: string | null },
+    action: AdminAction,
+  ) {
+    const current = await this.productsRepository.findModerationState(id);
+    if (!current || current.deletedAt) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+
+    const unchanged =
+      current.approvalStatus === target.approvalStatus && current.rejectionReason === target.rejectionReason;
+    if (unchanged) {
+      return { id: current.id, approvalStatus: current.approvalStatus, rejectionReason: current.rejectionReason };
+    }
+
+    const updated = await this.productsRepository.updateAdminStatus(id, target);
+
+    if (current.approvalStatus !== target.approvalStatus) {
+      // Only an approval-status change moves the product in or out of the index.
+      await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
+    }
+
+    await this.auditService.record({
+      actorId: adminId,
+      action,
+      targetType: AdminTargetType.PRODUCT,
+      targetId: id,
+      reason: target.rejectionReason,
     });
-    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
-    return updated;
+
+    return { id: updated.id, approvalStatus: updated.approvalStatus, rejectionReason: updated.rejectionReason };
   }
 
   // --- Search index support (read-only; the single authority on product eligibility) ---

@@ -232,4 +232,9 @@ export class BazaarsService {
   async findApplicationById(id: string) {
     return this.bazaarsRepository.findApplicationById(id);
   }
+
+  /** Admin overview: bazaars per status, one query. */
+  countByStatus(): Promise<{ status: BazaarStatus; count: number }[]> {
+    return this.bazaarsRepository.groupByStatus();
+  }
 }

@@ -20,6 +20,7 @@ describe('BazaarsService', () => {
     name: 'Org Owner',
     organizationName: 'Test Org',
     verified: true,
+    rejectionReason: null,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

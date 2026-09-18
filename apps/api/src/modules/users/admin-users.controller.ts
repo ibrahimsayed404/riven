@@ -51,7 +51,10 @@ export class AdminUsersController {
 
   @Patch(':id/reactivate')
   @HttpCode(HttpStatus.NO_CONTENT)
-  reactivateUser(@Param('id') id: string) {
-    return this.usersService.reactivateUser(id);
+  reactivateUser(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.usersService.reactivateUser(admin.id, id);
   }
 }

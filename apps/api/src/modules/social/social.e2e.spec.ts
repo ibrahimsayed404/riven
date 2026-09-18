@@ -51,6 +51,7 @@ describe('SocialModule (e2e)', () => {
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
     await prisma.vendor.deleteMany();
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
   }
 

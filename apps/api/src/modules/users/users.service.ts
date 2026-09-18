@@ -7,8 +7,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { compare } from 'bcrypt';
-import { Role } from '@prisma/client';
+import { AdminAction, AdminTargetType, Role } from '@prisma/client';
 
+import { AuditService } from '../audit/audit.service';
 import { UsersRepository } from './users.repository';
 import { UserProfileResponse } from './dto/user-profile-response.dto';
 
@@ -25,7 +26,10 @@ export class UsersService {
    */
   private readonly locationUpdateTimestamps = new Map<string, number>();
 
-  constructor(private readonly usersRepository: UsersRepository) {}
+  constructor(
+    private readonly usersRepository: UsersRepository,
+    private readonly auditService: AuditService,
+  ) {}
 
   async getProfile(userId: string): Promise<UserProfileResponse> {
     const user = await this.usersRepository.findById(userId);
@@ -171,14 +175,26 @@ export class UsersService {
       });
     }
 
+    // Already deactivated: 204 no-op, no audit row (specs/admin-module-spec.md §4.4).
+    if (user.deletedAt) {
+      return;
+    }
+
     // Known gap: this does NOT auto-revoke the target user's refresh tokens.
     // A deactivated user could still use an existing valid access token
     // until it expires (15m TTL). Full session-kill on deactivate can be
     // a fast-follow if needed.
     await this.usersRepository.softDelete(targetId);
+
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.USER_DEACTIVATED,
+      targetType: AdminTargetType.USER,
+      targetId,
+    });
   }
 
-  async reactivateUser(targetId: string): Promise<void> {
+  async reactivateUser(adminId: string, targetId: string): Promise<void> {
     const user = await this.usersRepository.findById(targetId);
 
     if (!user) {
@@ -188,6 +204,23 @@ export class UsersService {
       });
     }
 
+    // Already active: 204 no-op, no audit row.
+    if (!user.deletedAt) {
+      return;
+    }
+
     await this.usersRepository.reactivate(targetId);
+
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.USER_REACTIVATED,
+      targetType: AdminTargetType.USER,
+      targetId,
+    });
+  }
+
+  /** Admin overview: active users per role, one query. */
+  countByRole(): Promise<{ role: Role; count: number }[]> {
+    return this.usersRepository.groupByRole();
   }
 }
