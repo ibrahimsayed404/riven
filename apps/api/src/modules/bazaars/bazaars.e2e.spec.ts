@@ -144,6 +144,30 @@ describe('BazaarsModule (e2e)', () => {
     expect(res.body.applicationStatus).toBe(ApplicationStatus.PENDING);
   });
 
+  it('7b. Vendor application list embeds the bazaar with its location', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/vendors/me/bazaar-applications')
+      .set('Authorization', `Bearer ${vendorToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+
+    const [row] = res.body.data;
+    expect(row.bazaarId).toBe(bazaarId);
+    expect(row.applicationStatus).toBe(ApplicationStatus.PENDING);
+    expect(row.bazaar).toEqual(
+      expect.objectContaining({
+        id: bazaarId,
+        name: 'My Cool Bazaar',
+        status: BazaarStatus.PUBLISHED,
+        coverMedia: [],
+        location: { lat: 30.0444, lng: 31.2357 },
+      }),
+    );
+    expect(typeof row.bazaar.startDate).toBe('string');
+    // Only the summary fields — the organizer's internals stay out.
+    expect(row.bazaar).not.toHaveProperty('organizerId');
+  });
+
   it('8. Vendor cannot apply twice', async () => {
     const res = await request(app.getHttpServer())
       .post(`/bazaars/${bazaarId}/apply`)

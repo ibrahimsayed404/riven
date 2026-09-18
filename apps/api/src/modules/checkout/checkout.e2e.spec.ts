@@ -174,6 +174,39 @@ describe('Checkout and Orders (e2e)', () => {
       expect(cart!.items.length).toBe(0);
     });
 
+    it('vendor order list and detail carry the shopper contact; shopper views do not', async () => {
+      const contact = {
+        id: shopperId,
+        name: 'Shopper Check',
+        email: 'shopper.checkout@example.com',
+        phone: null,
+      };
+
+      const list = await request(app.getHttpServer())
+        .get('/vendors/me/orders')
+        .set('Authorization', `Bearer ${vendor1Token}`)
+        .expect(200);
+      expect(list.body.total).toBe(1);
+      expect(list.body.data[0].id).toBe(createdOrderId);
+      expect(list.body.data[0].user).toEqual(contact);
+      expect(list.body.data[0]).not.toHaveProperty('items');
+
+      const detail = await request(app.getHttpServer())
+        .get(`/vendors/me/orders/${createdOrderId}`)
+        .set('Authorization', `Bearer ${vendor1Token}`)
+        .expect(200);
+      expect(detail.body.user).toEqual(contact);
+      expect(detail.body.items).toHaveLength(1);
+      // Only the contact fields — never the hash or anything else off the User row.
+      expect(Object.keys(detail.body.user).sort()).toEqual(['email', 'id', 'name', 'phone']);
+
+      const shopperList = await request(app.getHttpServer())
+        .get('/orders')
+        .set('Authorization', `Bearer ${shopperToken}`)
+        .expect(200);
+      expect(shopperList.body.data[0]).not.toHaveProperty('user');
+    });
+
     it('shopper cannot transition order to invalid state', async () => {
       // Shopper trying to access a vendor route should get 403 Forbidden
       await request(app.getHttpServer())
