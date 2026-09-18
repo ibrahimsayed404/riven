@@ -14,10 +14,12 @@ import { CheckoutModule } from './modules/checkout/checkout.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { PaymobModule } from './infra/paymob/paymob.module';
 import { QueueModule } from './infra/queue/queue.module';
+import { SearchInfraModule } from './infra/search/search-infra.module';
 import { BazaarsModule } from './modules/bazaars/bazaars.module';
 import { BoothsModule } from './modules/booths/booths.module';
 import { DiscoveryModule } from './modules/discovery/discovery.module';
 import { SocialModule } from './modules/social/social.module';
+import { SearchModule } from './modules/search/search.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { MediaModule } from './modules/media/media.module';
 
@@ -46,10 +48,12 @@ class HealthController {
     OrdersModule,
     PaymobModule,
     QueueModule,
+    SearchInfraModule,
     BazaarsModule,
     BoothsModule,
     DiscoveryModule,
     SocialModule,
+    SearchModule,
     CategoriesModule,
     MediaModule,
   ],

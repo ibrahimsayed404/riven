@@ -24,6 +24,24 @@ const vendorProfileSelect = {
 
 export type VendorProfile = Prisma.VendorGetPayload<{ select: typeof vendorProfileSelect }>;
 
+// Only what the search index is allowed to see — see VendorSearchDocument.
+const vendorForSearchSelect = {
+  id: true,
+  name: true,
+  category: true,
+  description: true,
+  brandStory: true,
+  logoUrl: true,
+  bannerUrl: true,
+  vendorType: true,
+  hasFixedLocation: true,
+} satisfies Prisma.VendorSelect;
+
+export type VendorForSearch = Prisma.VendorGetPayload<{ select: typeof vendorForSearchSelect }>;
+
+/** A batch of ids for keyset iteration (reindex). */
+export type IdPage = { ids: string[]; nextCursor: string | null };
+
 @Injectable()
 export class VendorsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -68,6 +86,27 @@ export class VendorsRepository {
     `;
 
     return result.length > 0 ? { lat: result[0].lat, lng: result[0].lng } : null;
+  }
+
+  /** Public-visibility read for the search index: verified and not soft-deleted, else null. */
+  findForSearch(id: string): Promise<VendorForSearch | null> {
+    return this.prisma.vendor.findFirst({
+      where: { id, verified: true, deletedAt: null },
+      select: vendorForSearchSelect,
+    });
+  }
+
+  async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
+    const where: Prisma.VendorWhereInput = { verified: true, deletedAt: null };
+    const rows = await this.prisma.vendor.findMany({
+      where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: take + 1,
+    });
+    const hasMore = rows.length > take;
+    const ids = rows.slice(0, take).map((row) => row.id);
+    return { ids, nextCursor: hasMore ? ids[ids.length - 1] : null };
   }
 
   // --- Product Methods ---

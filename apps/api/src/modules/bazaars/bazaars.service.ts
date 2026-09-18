@@ -1,9 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ApplicationStatus, BazaarStatus, Bazaar, Prisma, ScheduleType } from '@prisma/client';
 
-import { BazaarsRepository, BazaarWithLocation, BazaarPublicDetail, BazaarWithDistance } from './bazaars.repository';
+import { BazaarsRepository, BazaarWithLocation, BazaarPublicDetail, BazaarWithDistance, IdPage } from './bazaars.repository';
 import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
+import { SearchIndexQueue } from '../../infra/search/search-index.queue';
+import { BazaarSearchDocument, toUnixSeconds } from '../../infra/search/search-documents';
 
 @Injectable()
 export class BazaarsService {
@@ -11,6 +13,7 @@ export class BazaarsService {
     private readonly bazaarsRepository: BazaarsRepository,
     private readonly organizersService: OrganizersService,
     private readonly vendorsService: VendorsService,
+    private readonly searchIndexQueue: SearchIndexQueue,
   ) {}
 
   async createBazaar(
@@ -63,7 +66,9 @@ export class BazaarsService {
       }
     }
 
-    return this.bazaarsRepository.update(bazaar.id, data);
+    const updated = await this.bazaarsRepository.update(bazaar.id, data);
+    await this.searchIndexQueue.enqueue({ type: 'BAZAAR', id: bazaar.id });
+    return updated;
   }
 
   async publishBazaar(ownerId: string, id: string): Promise<BazaarWithLocation> {
@@ -73,7 +78,9 @@ export class BazaarsService {
       throw new BadRequestException('Only DRAFT bazaars can be published.');
     }
 
-    return this.bazaarsRepository.updateStatus(id, BazaarStatus.PUBLISHED) as Promise<BazaarWithLocation>;
+    const published = await this.bazaarsRepository.updateStatus(id, BazaarStatus.PUBLISHED);
+    await this.searchIndexQueue.enqueue({ type: 'BAZAAR', id });
+    return published;
   }
 
   async cancelBazaar(ownerId: string, id: string): Promise<BazaarWithLocation> {
@@ -83,7 +90,39 @@ export class BazaarsService {
       throw new BadRequestException('Cannot cancel a COMPLETED bazaar.');
     }
 
-    return this.bazaarsRepository.updateStatus(id, BazaarStatus.CANCELLED) as Promise<BazaarWithLocation>;
+    const cancelled = await this.bazaarsRepository.updateStatus(id, BazaarStatus.CANCELLED);
+    await this.searchIndexQueue.enqueue({ type: 'BAZAAR', id });
+    return cancelled;
+  }
+
+  // --- Search index support (read-only; the single authority on bazaar eligibility) ---
+
+  /** The bazaar's search document, or null unless PUBLISHED and not soft-deleted. */
+  async getSearchDocument(id: string): Promise<BazaarSearchDocument | null> {
+    const bazaar = await this.bazaarsRepository.findById(id);
+    if (!bazaar || bazaar.status !== BazaarStatus.PUBLISHED || bazaar.deletedAt !== null) {
+      return null;
+    }
+    // location is NOT NULL in the schema; a null here means a corrupt row, and a
+    // bazaar with no coordinates is useless to a geo-filtered search anyway.
+    if (!bazaar.location) return null;
+
+    return {
+      id: bazaar.id,
+      organizerId: bazaar.organizerId,
+      name: bazaar.name,
+      description: bazaar.description,
+      coverMedia: bazaar.coverMedia,
+      scheduleType: bazaar.scheduleType,
+      recurrenceRule: bazaar.recurrenceRule,
+      startDate: toUnixSeconds(bazaar.startDate),
+      endDate: bazaar.endDate ? toUnixSeconds(bazaar.endDate) : null,
+      _geo: bazaar.location,
+    };
+  }
+
+  listPublicBazaarIds(cursor: string | null, take: number): Promise<IdPage> {
+    return this.bazaarsRepository.listPublicIds(cursor, take);
   }
 
   async getPublicBazaars(page: number, limit: number, filters: { lat?: number; lng?: number; radiusKm?: number; scheduleType?: ScheduleType }) {

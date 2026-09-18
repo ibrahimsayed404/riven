@@ -3,6 +3,7 @@ import { BazaarsService } from './bazaars.service';
 import { BazaarsRepository } from './bazaars.repository';
 import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
+import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { BazaarStatus, ScheduleType, ApplicationStatus } from '@prisma/client';
 
@@ -11,6 +12,7 @@ describe('BazaarsService', () => {
   let bazaarsRepo: jest.Mocked<BazaarsRepository>;
   let organizersService: jest.Mocked<OrganizersService>;
   let vendorsService: jest.Mocked<VendorsService>;
+  let searchIndexQueue: jest.Mocked<SearchIndexQueue>;
 
   const mockOrganizer = {
     id: 'org-1',
@@ -78,6 +80,10 @@ describe('BazaarsService', () => {
           },
         },
         {
+          provide: SearchIndexQueue,
+          useValue: { enqueue: jest.fn().mockResolvedValue(undefined), enqueueMany: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
           provide: VendorsService,
           useValue: {
             getMyProfile: jest.fn(),
@@ -90,6 +96,7 @@ describe('BazaarsService', () => {
     bazaarsRepo = module.get(BazaarsRepository);
     organizersService = module.get(OrganizersService);
     vendorsService = module.get(VendorsService);
+    searchIndexQueue = module.get(SearchIndexQueue);
   });
 
   describe('createBazaar', () => {
@@ -141,6 +148,56 @@ describe('BazaarsService', () => {
       bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.COMPLETED });
 
       await expect(service.publishBazaar('owner-1', 'bazaar-1')).rejects.toThrow(BadRequestException);
+    });
+
+    it('should enqueue a search sync after publishing', async () => {
+      organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer);
+      bazaarsRepo.findById.mockResolvedValue(mockBazaar);
+      bazaarsRepo.updateStatus.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.PUBLISHED });
+
+      await service.publishBazaar('owner-1', 'bazaar-1');
+
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'BAZAAR', id: 'bazaar-1' });
+    });
+  });
+
+  describe('getSearchDocument', () => {
+    it('returns null unless the bazaar is PUBLISHED and not deleted', async () => {
+      bazaarsRepo.findById.mockResolvedValueOnce({ ...mockBazaar, status: BazaarStatus.DRAFT });
+      await expect(service.getSearchDocument('bazaar-1')).resolves.toBeNull();
+
+      bazaarsRepo.findById.mockResolvedValueOnce({ ...mockBazaar, status: BazaarStatus.PUBLISHED, deletedAt: new Date() });
+      await expect(service.getSearchDocument('bazaar-1')).resolves.toBeNull();
+
+      bazaarsRepo.findById.mockResolvedValueOnce(null);
+      await expect(service.getSearchDocument('bazaar-1')).resolves.toBeNull();
+    });
+
+    it('maps a published bazaar to the allowlisted document with unix-second dates and _geo', async () => {
+      const startDate = new Date('2026-01-01T00:00:00.000Z');
+      bazaarsRepo.findById.mockResolvedValue({
+        ...mockBazaar,
+        status: BazaarStatus.PUBLISHED,
+        startDate,
+        endDate: null,
+        location: { lat: 30.79, lng: 31 },
+      });
+
+      const doc = await service.getSearchDocument('bazaar-1');
+
+      expect(doc).toEqual({
+        id: 'bazaar-1',
+        organizerId: 'org-1',
+        name: 'Test Bazaar',
+        description: null,
+        coverMedia: [],
+        scheduleType: ScheduleType.ONE_OFF,
+        recurrenceRule: null,
+        startDate: 1767225600,
+        endDate: null,
+        _geo: { lat: 30.79, lng: 31 },
+      });
+      expect(doc).not.toHaveProperty('status');
     });
   });
 
