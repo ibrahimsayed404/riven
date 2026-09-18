@@ -2,6 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { Order, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 
+// What a vendor gets to see about the shopper who placed an order: enough to
+// contact them about fulfilment, nothing else. Shopper-facing queries don't
+// include the user at all.
+const SHOPPER_CONTACT_SELECT = { id: true, name: true, email: true, phone: true } as const;
+
 @Injectable()
 export class OrdersRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -47,6 +52,7 @@ export class OrdersRepository {
       skip: (page - 1) * limit,
       take: limit,
       orderBy: { createdAt: 'desc' },
+      include: { user: { select: SHOPPER_CONTACT_SELECT } },
     });
 
     return { data, total };
@@ -60,6 +66,7 @@ export class OrdersRepository {
       },
       include: {
         items: true,
+        user: { select: SHOPPER_CONTACT_SELECT },
       },
     });
   }
