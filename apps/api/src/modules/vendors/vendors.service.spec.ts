@@ -3,11 +3,13 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { VendorsService } from './vendors.service';
 import { VendorsRepository } from './vendors.repository';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
+import { AuditService } from '../audit/audit.service';
 
 describe('VendorsService', () => {
   let service: VendorsService;
   let vendorsRepository: jest.Mocked<VendorsRepository>;
   let searchIndexQueue: jest.Mocked<SearchIndexQueue>;
+  let auditService: jest.Mocked<AuditService>;
 
   beforeEach(async () => {
     const vendorsRepositoryMock = {
@@ -26,6 +28,8 @@ describe('VendorsService', () => {
       deleteProductVariant: jest.fn(),
       findForSearch: jest.fn(),
       listPublicIds: jest.fn(),
+      findModerationState: jest.fn(),
+      findManyForAdmin: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -36,12 +40,14 @@ describe('VendorsService', () => {
           provide: SearchIndexQueue,
           useValue: { enqueue: jest.fn().mockResolvedValue(undefined), enqueueMany: jest.fn().mockResolvedValue(undefined) },
         },
+        { provide: AuditService, useValue: { record: jest.fn().mockResolvedValue(undefined) } },
       ],
     }).compile();
 
     service = module.get<VendorsService>(VendorsService);
     vendorsRepository = module.get(VendorsRepository);
     searchIndexQueue = module.get(SearchIndexQueue);
+    auditService = module.get(AuditService);
   });
 
   it('should be defined', () => {
@@ -115,18 +121,118 @@ describe('VendorsService', () => {
     });
   });
 
-  describe('verifyVendor', () => {
-    it('enqueues exactly two jobs: the vendor and a product fan-out, never per product', async () => {
-      vendorsRepository.findById.mockResolvedValue({ id: 'vendor-1', verified: false } as any);
-      vendorsRepository.update.mockResolvedValue({ id: 'vendor-1', verified: true } as any);
+  // specs/admin-module-spec.md §3 — every row of the transition table.
+  describe('verifyVendor / rejectVendor', () => {
+    const state = (verified: boolean, rejectionReason: string | null, deletedAt: Date | null = null) =>
+      ({ id: 'vendor-1', verified, rejectionReason, deletedAt });
+    const fanOut = [
+      { type: 'VENDOR', id: 'vendor-1' },
+      { type: 'VENDOR_PRODUCTS', vendorId: 'vendor-1' },
+    ];
 
-      await service.verifyVendor('vendor-1');
+    beforeEach(() => {
+      vendorsRepository.update.mockImplementation(async (_id, data: any) => ({ id: 'vendor-1', ...data }) as any);
+    });
 
-      expect(vendorsRepository.update).toHaveBeenCalledWith('vendor-1', { verified: true });
-      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([
-        { type: 'VENDOR', id: 'vendor-1' },
-        { type: 'VENDOR_PRODUCTS', vendorId: 'vendor-1' },
-      ]);
+    it('pending → verify: writes, audits VENDOR_VERIFIED, enqueues exactly two jobs', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(false, null));
+
+      const result = await service.verifyVendor('admin-1', 'vendor-1');
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('vendor-1', { verified: true, rejectionReason: null });
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith(fanOut);
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1', action: 'VENDOR_VERIFIED', targetType: 'VENDOR', targetId: 'vendor-1', reason: null,
+      });
+      expect(result).toEqual({ id: 'vendor-1', verified: true, rejectionReason: null });
+    });
+
+    it('pending → reject: writes the reason, audits VENDOR_REJECTED; verified is unchanged so nothing is enqueued', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(false, null));
+
+      const result = await service.rejectVendor('admin-1', 'vendor-1', 'No business licence');
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('vendor-1', { verified: false, rejectionReason: 'No business licence' });
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+      expect(auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'VENDOR_REJECTED', reason: 'No business licence' }));
+      expect(result.rejectionReason).toBe('No business licence');
+    });
+
+    it('verified → reject (revoke): flips verified, enqueues so products drop from the index', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(true, null));
+
+      await service.rejectVendor('admin-1', 'vendor-1', 'Fraud report');
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('vendor-1', { verified: false, rejectionReason: 'Fraud report' });
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith(fanOut);
+      expect(auditService.record).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejected → verify (re-approval): clears the reason, enqueues, audits', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(false, 'Old reason'));
+
+      const result = await service.verifyVendor('admin-1', 'vendor-1');
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('vendor-1', { verified: true, rejectionReason: null });
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith(fanOut);
+      expect(result).toEqual({ id: 'vendor-1', verified: true, rejectionReason: null });
+    });
+
+    it('verified → verify: no-op — no write, no audit, no enqueue, same response shape', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(true, null));
+
+      const result = await service.verifyVendor('admin-1', 'vendor-1');
+
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ id: 'vendor-1', verified: true, rejectionReason: null });
+    });
+
+    it('rejected → reject with a different reason: replaces the reason and audits, but does NOT enqueue', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(false, 'Old reason'));
+
+      await service.rejectVendor('admin-1', 'vendor-1', 'New reason');
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('vendor-1', { verified: false, rejectionReason: 'New reason' });
+      expect(auditService.record).toHaveBeenCalledWith(expect.objectContaining({ reason: 'New reason' }));
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+    });
+
+    it('rejected → reject with the same reason: no-op', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(false, 'Same'));
+
+      await service.rejectVendor('admin-1', 'vendor-1', 'Same');
+
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+    });
+
+    it('404 with code VENDOR_NOT_FOUND when missing', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(null);
+
+      await expect(service.verifyVendor('admin-1', 'nope')).rejects.toMatchObject({
+        response: { code: 'VENDOR_NOT_FOUND' },
+      });
+    });
+
+    it('404 when soft-deleted — a deleted vendor is not moderatable', async () => {
+      vendorsRepository.findModerationState.mockResolvedValue(state(false, null, new Date()));
+
+      await expect(service.rejectVendor('admin-1', 'vendor-1', 'x')).rejects.toThrow(NotFoundException);
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listForAdmin', () => {
+    it('passes filters through and wraps the page in { data, meta }', async () => {
+      vendorsRepository.findManyForAdmin.mockResolvedValue({ data: [{ id: 'v1' }] as any, total: 21 });
+
+      const result = await service.listForAdmin({ status: 'pending', page: 2, limit: 10 });
+
+      expect(vendorsRepository.findManyForAdmin).toHaveBeenCalledWith({ status: 'pending', page: 2, limit: 10 });
+      expect(result.meta).toEqual({ total: 21, page: 2, limit: 10, totalPages: 3 });
     });
   });
 

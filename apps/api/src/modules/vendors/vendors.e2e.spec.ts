@@ -39,6 +39,7 @@ describe('VendorsModule (e2e)', () => {
     await prisma.boothLayout.deleteMany();
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
 
     // Create an admin user for admin actions
@@ -89,6 +90,7 @@ describe('VendorsModule (e2e)', () => {
     await prisma.boothLayout.deleteMany();
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
+    await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
     await app.close();
   });
@@ -132,11 +134,54 @@ describe('VendorsModule (e2e)', () => {
       .expect(403);
   });
 
-  it('/admin/vendors/:id/verify (PATCH) - admin can verify vendor', () => {
+  it('/admin/vendors?status=pending (GET) - queue lists the unverified vendor with its owner email', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/admin/vendors?status=pending')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+
+    const row = res.body.data.find((v: any) => v.id === vendorId);
+    expect(row).toBeDefined();
+    expect(row.verified).toBe(false);
+    expect(row.rejectionReason).toBeNull();
+    expect(row.owner.email).toBe('vendor1@example.com');
+    expect(res.body.meta.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it('/admin/vendors (GET) - rejects an unknown status value', () => {
     return request(app.getHttpServer())
+      .get('/admin/vendors?status=whatever')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(400);
+  });
+
+  it('/admin/vendors/:id/verify (PATCH) - admin can verify vendor; writes an audit row', async () => {
+    const res = await request(app.getHttpServer())
       .patch(`/admin/vendors/${vendorId}/verify`)
       .set('Authorization', `Bearer ${adminToken}`)
       .expect(200);
+
+    expect(res.body).toEqual({ id: vendorId, verified: true, rejectionReason: null });
+
+    const audit = await prisma.adminAuditLog.findMany({ where: { targetId: vendorId } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ action: 'VENDOR_VERIFIED', targetType: 'VENDOR', reason: null });
+
+    const queue = await request(app.getHttpServer())
+      .get('/admin/vendors?status=pending')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    expect(queue.body.data.some((v: any) => v.id === vendorId)).toBe(false);
+  });
+
+  it('/admin/vendors/:id/verify (PATCH) - repeating verify is a 200 no-op with no second audit row', async () => {
+    await request(app.getHttpServer())
+      .patch(`/admin/vendors/${vendorId}/verify`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+
+    const audit = await prisma.adminAuditLog.count({ where: { targetId: vendorId } });
+    expect(audit).toBe(1);
   });
 
   it('/vendors/me/products (POST) - succeeds for verified vendor', async () => {
@@ -156,15 +201,43 @@ describe('VendorsModule (e2e)', () => {
     expect(res.body.approvalStatus).toBe('PENDING');
   });
 
-  it('/admin/products/:id/reject (PATCH) - admin reject persists reason', async () => {
+  it('/admin/products?approvalStatus=PENDING (GET) - queue lists the new product; public list does not', async () => {
+    const queue = await request(app.getHttpServer())
+      .get('/admin/products?approvalStatus=PENDING')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    const row = queue.body.data.find((p: any) => p.id === productId);
+    expect(row).toBeDefined();
+    expect(row.vendor).toEqual({ id: vendorId, name: 'Vendor One Shop', verified: true });
+
+    const publicList = await request(app.getHttpServer()).get('/products').expect(200);
+    expect(publicList.body.data.some((p: any) => p.id === productId)).toBe(false);
+
+    await request(app.getHttpServer())
+      .get('/admin/products?approvalStatus=MAYBE')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(400);
+  });
+
+  it('/admin/products/:id/reject (PATCH) - admin reject persists reason; audit row written; repeat is a no-op', async () => {
     const res = await request(app.getHttpServer())
       .patch(`/admin/products/${productId}/reject`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ reason: 'Inappropriate content' })
       .expect(200);
-      
+
     expect(res.body.approvalStatus).toBe('REJECTED');
     expect(res.body.rejectionReason).toBe('Inappropriate content');
+
+    await request(app.getHttpServer())
+      .patch(`/admin/products/${productId}/reject`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'Inappropriate content' })
+      .expect(200);
+
+    const audit = await prisma.adminAuditLog.findMany({ where: { targetId: productId } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ action: 'PRODUCT_REJECTED', targetType: 'PRODUCT', reason: 'Inappropriate content' });
 
     const vendorCheck = await request(app.getHttpServer())
       .get(`/vendors/me/products/${productId}`)
@@ -212,5 +285,101 @@ describe('VendorsModule (e2e)', () => {
       .expect(200);
       
     expect(listRes2.body.data.some((p: any) => p.id === productId)).toBe(false);
+  });
+
+  // The previous test left the vendor unverified via a direct DB write, so it is
+  // back in the pending state (verified=false, rejectionReason=null).
+  describe('reject / revoke', () => {
+    it('/admin/vendors/:id/reject (PATCH) - requires a reason', () => {
+      return request(app.getHttpServer())
+        .patch(`/admin/vendors/${vendorId}/reject`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({})
+        .expect(400);
+    });
+
+    it('/admin/vendors/:id/reject (PATCH) - persists the reason, vendor sees it on /vendors/me, audit row written', async () => {
+      const before = await prisma.adminAuditLog.count({ where: { targetId: vendorId } });
+
+      const res = await request(app.getHttpServer())
+        .patch(`/admin/vendors/${vendorId}/reject`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'Missing commercial registration' })
+        .expect(200);
+      expect(res.body).toEqual({ id: vendorId, verified: false, rejectionReason: 'Missing commercial registration' });
+
+      const me = await request(app.getHttpServer())
+        .get('/vendors/me')
+        .set('Authorization', `Bearer ${vendorToken}`)
+        .expect(200);
+      expect(me.body.rejectionReason).toBe('Missing commercial registration');
+
+      const queue = await request(app.getHttpServer())
+        .get('/admin/vendors?status=rejected')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200);
+      expect(queue.body.data.some((v: any) => v.id === vendorId)).toBe(true);
+
+      const after = await prisma.adminAuditLog.findMany({ where: { targetId: vendorId }, orderBy: { createdAt: 'desc' } });
+      expect(after).toHaveLength(before + 1);
+      expect(after[0]).toMatchObject({ action: 'VENDOR_REJECTED', reason: 'Missing commercial registration' });
+    });
+
+    it('/admin/vendors/:id/reject (PATCH) - same reason again is a no-op: no new audit row', async () => {
+      const before = await prisma.adminAuditLog.count({ where: { targetId: vendorId } });
+
+      await request(app.getHttpServer())
+        .patch(`/admin/vendors/${vendorId}/reject`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'Missing commercial registration' })
+        .expect(200);
+
+      expect(await prisma.adminAuditLog.count({ where: { targetId: vendorId } })).toBe(before);
+    });
+
+    it('/admin/vendors/:id/verify (PATCH) - re-approval clears the reason', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/admin/vendors/${vendorId}/verify`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .expect(200);
+      expect(res.body).toEqual({ id: vendorId, verified: true, rejectionReason: null });
+
+      const me = await request(app.getHttpServer())
+        .get('/vendors/me')
+        .set('Authorization', `Bearer ${vendorToken}`)
+        .expect(200);
+      expect(me.body.verified).toBe(true);
+      expect(me.body.rejectionReason).toBeNull();
+    });
+
+    it('/admin/vendors/:id/reject (PATCH) - revoking a verified vendor hides its approved products', async () => {
+      const visibleBefore = await request(app.getHttpServer()).get('/products').expect(200);
+      expect(visibleBefore.body.data.some((p: any) => p.id === productId)).toBe(true);
+
+      await request(app.getHttpServer())
+        .patch(`/admin/vendors/${vendorId}/reject`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'Fraud report' })
+        .expect(200);
+
+      const visibleAfter = await request(app.getHttpServer()).get('/products').expect(200);
+      expect(visibleAfter.body.data.some((p: any) => p.id === productId)).toBe(false);
+    });
+
+    it('/admin/vendors/:id/reject (PATCH) - 404 with VENDOR_NOT_FOUND for an unknown id', async () => {
+      const res = await request(app.getHttpServer())
+        .patch('/admin/vendors/00000000-0000-0000-0000-000000000000/reject')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'x' })
+        .expect(404);
+      expect(res.body.code).toBe('VENDOR_NOT_FOUND');
+    });
+
+    it('/admin/vendors (GET) - vendor role gets 403', () => {
+      return request(app.getHttpServer())
+        .get('/admin/vendors')
+        .set('Authorization', `Bearer ${vendorToken}`)
+        .expect(403);
+    });
   });
 });
