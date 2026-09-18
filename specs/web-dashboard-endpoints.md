@@ -90,7 +90,7 @@ await api.post('/vendors/me/products', { ..., images: [publicUrl] });
   "id": "uuid", "ownerId": "uuid",
   "name": "Nour Textiles", "category": "fashion", "description": null,
   "logo": null, "coverMedia": [], "hasFixedLocation": false,
-  "verified": false, "subscriptionStatus": "TRIALING",
+  "verified": false, "rejectionReason": null, "subscriptionStatus": "TRIALING",
   "vendorType": "BAZAAR_ONLY", "brandStory": null,
   "logoUrl": null, "bannerUrl": null, "returnPolicy": null, "shippingPolicy": null,
   "createdAt": "...", "updatedAt": "...", "deletedAt": null,
@@ -98,7 +98,7 @@ await api.post('/vendors/me/products', { ..., images: [publicUrl] });
 }
 ```
 
-Note the request field is `businessName` but the response field is `name`. `subscriptionStatus`: `TRIALING | ACTIVE | PAST_DUE | CANCELED` (read-only for now — no payments endpoints yet).
+Note the request field is `businessName` but the response field is `name`. `rejectionReason` is non-null only while an admin has rejected (or revoked) the account — show it on the dashboard with a "contact support" path; a later `verify` clears it. `subscriptionStatus`: `TRIALING | ACTIVE | PAST_DUE | CANCELED` (read-only for now — no payments endpoints yet).
 
 ### 3.2 Products
 
@@ -188,7 +188,7 @@ All routes under `/organizers/me`.
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/organizers/me` | — | `{ id, ownerId, name, verified, createdAt, updatedAt, deletedAt }` |
+| GET | `/organizers/me` | — | `{ id, ownerId, name, verified, rejectionReason }`. `rejectionReason` is non-null only while an admin has rejected/revoked the account — surface it in the UI. |
 | PATCH | `/organizers/me` | `{ name? }` | Organizer |
 
 ### 4.2 Bazaars
@@ -244,7 +244,57 @@ Accept/reject is final — there's no un-decide. Confirm in the UI before sendin
 
 ---
 
-## 6. Not built yet — don't design against these as live
+## 6. Admin dashboard (`role: ADMIN`)
+
+Every route requires an `ADMIN` token; other roles get `403`. There is no self-service admin registration — the first admin is created out of band (open item in `specs/admin-module-spec.md`).
+
+### 6.1 Home
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/admin/overview` | `{ pending: { vendors, organizers, products }, users: { SHOPPER, VENDOR, ORGANIZER, ADMIN }, orders: { PENDING, PAID, FULFILLED, SHIPPED, DELIVERED, CANCELLED }, bazaars: { DRAFT, PUBLISHED, CANCELLED, COMPLETED } }`. Every enum key is always present (0 when empty). `pending` = awaiting a first decision; rejected items are not pending. |
+
+### 6.2 Moderation queues and decisions
+
+Vendors and organizers share one state model: `verified: true` → verified; `verified: false, rejectionReason: null` → pending; `verified: false, rejectionReason: "…"` → rejected (or revoked, if it was verified before). Decisions are idempotent: repeating one returns `200` with the same body and writes nothing.
+
+| Method | Path | Query / Body | Returns |
+|---|---|---|---|
+| GET | `/admin/vendors` | `?status=pending\|verified\|rejected&search=&page=&limit=` | `{ data: [{ id, ownerId, name, category, vendorType, verified, rejectionReason, subscriptionStatus, createdAt, owner: { id, name, email } }], meta }` |
+| PATCH | `/admin/vendors/:id/verify` | — | `{ id, verified: true, rejectionReason: null }` |
+| PATCH | `/admin/vendors/:id/reject` | `{ reason }` (1–1000 chars) | `{ id, verified: false, rejectionReason }`. On a verified vendor this is a revoke: their products leave the public catalogue and search. |
+| GET | `/admin/organizers` | same as vendors | `{ data: [{ id, ownerId, name, verified, rejectionReason, createdAt, owner }], meta }` |
+| PATCH | `/admin/organizers/:id/verify` | — | `{ id, verified, rejectionReason }` |
+| PATCH | `/admin/organizers/:id/reject` | `{ reason }` | Revoking does **not** un-publish the organizer's bazaars (open item). |
+| GET | `/admin/products` | `?approvalStatus=PENDING\|APPROVED\|REJECTED&vendorId=&page=&limit=` | `{ data: [{ …product, vendor: { id, name, verified } }], meta }`. Soft-deleted products never appear; `isActive` is not filtered. |
+| PATCH | `/admin/products/:id/approve` | — | `{ id, approvalStatus, rejectionReason }` |
+| PATCH | `/admin/products/:id/reject` | `{ reason }` | `{ id, approvalStatus: 'REJECTED', rejectionReason }` |
+| GET | `/admin/users` | `?role=&search=&includeDeleted=&page=&limit=` | `{ data: [User], meta }` |
+| GET | `/admin/users/:id` | — | User |
+| PATCH | `/admin/users/:id/deactivate` | — | `204`. Soft-delete. `400 CANNOT_DEACTIVATE_SELF` on your own id. Does not revoke existing tokens (open item). |
+| PATCH | `/admin/users/:id/reactivate` | — | `204` |
+
+Errors use stable codes: `VENDOR_NOT_FOUND`, `ORGANIZER_NOT_FOUND`, `PRODUCT_NOT_FOUND`, `USER_NOT_FOUND` (all `404`, also for soft-deleted rows).
+
+### 6.3 Audit log
+
+| Method | Path | Query | Returns |
+|---|---|---|---|
+| GET | `/admin/audit-log` | `?actorId=&targetType=VENDOR\|ORGANIZER\|PRODUCT\|USER&targetId=&action=&page=&limit=` | `{ data: [{ id, action, targetType, targetId, reason, createdAt, actor: { id, name, email } }], meta }`, newest first. |
+
+`action` is one of `VENDOR_VERIFIED, VENDOR_REJECTED, ORGANIZER_VERIFIED, ORGANIZER_REJECTED, PRODUCT_APPROVED, PRODUCT_REJECTED, USER_DEACTIVATED, USER_REACTIVATED`. Only real state changes produce a row; a repeated identical decision does not. Booth-layout edits and search reindexes are **not** audited yet.
+
+### 6.4 Other admin routes (pre-existing)
+
+| Method | Path | Notes |
+|---|---|---|
+| POST/GET/PATCH | `/admin/bazaars/:bazaarId/layout` | Booth grid create/read/update |
+| POST | `/admin/bazaars/:bazaarId/layout/booths` | Add a booth |
+| PATCH/DELETE | `/admin/booths/:id` | Edit / remove a booth |
+| PATCH | `/admin/booths/:id/assign`, `/unassign` | `{ boothListingId }` |
+| POST | `/admin/search/reindex` | `{ types? }` → `202`, work happens on the queue |
+
+## 7. Not built yet — don't design against these as live
 
 - **Booth layout editing.** Grid + booth CRUD and vendor→booth assignment are spec'd (`specs/booth-layout-module-spec.md`) as **admin** routes; organizers have read-only access via the public layout endpoint. Organizer-side editing is an open question.
 - **Payments / subscriptions** (`subscriptionStatus`, bazaar fees) — model exists, no endpoints.
