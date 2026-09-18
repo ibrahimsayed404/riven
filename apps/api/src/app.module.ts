@@ -22,6 +22,8 @@ import { SocialModule } from './modules/social/social.module';
 import { SearchModule } from './modules/search/search.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { MediaModule } from './modules/media/media.module';
+import { AuditModule } from './modules/audit/audit.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Controller('health')
 class HealthController {
@@ -56,6 +58,8 @@ class HealthController {
     SearchModule,
     CategoriesModule,
     MediaModule,
+    AuditModule,
+    AdminModule,
   ],
   controllers: [HealthController],
 })

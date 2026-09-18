@@ -100,4 +100,9 @@ export class OrdersService {
     }
     return false;
   }
+
+  /** Admin overview: orders per status, one query. */
+  countByStatus(): Promise<{ status: OrderStatus; count: number }[]> {
+    return this.ordersRepository.groupByStatus();
+  }
 }

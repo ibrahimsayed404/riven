@@ -482,4 +482,14 @@ export class BazaarsRepository {
       return { data, total };
     });
   }
+
+  /** One GROUP BY, not one count per status. Excludes soft-deleted bazaars. */
+  async groupByStatus(): Promise<{ status: BazaarStatus; count: number }[]> {
+    const rows = await this.prisma.bazaar.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+      where: { deletedAt: null },
+    });
+    return rows.map((row) => ({ status: row.status, count: row._count._all }));
+  }
 }

@@ -103,5 +103,13 @@ export class OrdersRepository {
     });
     return count > 0;
   }
-}
 
+  /** One GROUP BY, not one count per status. Orders have no soft-delete. */
+  async groupByStatus(): Promise<{ status: OrderStatus; count: number }[]> {
+    const rows = await this.prisma.order.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+    });
+    return rows.map((row) => ({ status: row.status, count: row._count._all }));
+  }
+}
