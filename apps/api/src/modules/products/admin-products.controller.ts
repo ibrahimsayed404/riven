@@ -1,10 +1,13 @@
-import { Body, Controller, HttpCode, HttpStatus, Param, Patch, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Query, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { ProductsService } from './products.service';
+import { AdminListProductsQueryDto } from './dto/admin-list-products-query.dto';
 import { RejectProductDto } from './dto/reject-product.dto';
 
 @Controller('admin/products')
@@ -13,17 +16,30 @@ import { RejectProductDto } from './dto/reject-product.dto';
 export class AdminProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
+  /** Moderation queue. `?approvalStatus=PENDING` is the "needs a decision" view. */
+  @Get()
+  listProducts(@Query() query: AdminListProductsQueryDto) {
+    return this.productsService.listForAdmin({
+      approvalStatus: query.approvalStatus,
+      vendorId: query.vendorId,
+      page: query.page ?? 1,
+      limit: query.limit ?? 20,
+    });
+  }
+
   @Patch(':id/approve')
   @HttpCode(HttpStatus.OK)
-  async approveProduct(@Param('id') id: string) {
-    const updated = await this.productsService.approveProduct(id);
-    return { id: updated.id, approvalStatus: updated.approvalStatus, rejectionReason: updated.rejectionReason };
+  approveProduct(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+    return this.productsService.approveProduct(admin.id, id);
   }
 
   @Patch(':id/reject')
   @HttpCode(HttpStatus.OK)
-  async rejectProduct(@Param('id') id: string, @Body() rejectDto: RejectProductDto) {
-    const updated = await this.productsService.rejectProduct(id, rejectDto.reason);
-    return { id: updated.id, approvalStatus: updated.approvalStatus, rejectionReason: updated.rejectionReason };
+  rejectProduct(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() rejectDto: RejectProductDto,
+  ) {
+    return this.productsService.rejectProduct(admin.id, id, rejectDto.reason);
   }
 }
