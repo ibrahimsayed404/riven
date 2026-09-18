@@ -129,4 +129,14 @@ export class UsersRepository {
 
     return { users, total };
   }
+
+  /** One GROUP BY, not one count per role. Active users only. */
+  async groupByRole(): Promise<{ role: Role; count: number }[]> {
+    const rows = await this.prisma.user.groupBy({
+      by: ['role'],
+      _count: { _all: true },
+      where: { deletedAt: null },
+    });
+    return rows.map((row) => ({ role: row.role, count: row._count._all }));
+  }
 }

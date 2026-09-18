@@ -9,6 +9,7 @@ import * as bcrypt from 'bcrypt';
 
 import { UsersService } from './users.service';
 import { UsersRepository } from './users.repository';
+import { AuditService } from '../audit/audit.service';
 
 jest.mock('bcrypt');
 
@@ -45,10 +46,12 @@ function createMockRepository(): jest.Mocked<UsersRepository> {
 describe('UsersService', () => {
   let service: UsersService;
   let repository: jest.Mocked<UsersRepository>;
+  let auditService: jest.Mocked<AuditService>;
 
   beforeEach(() => {
     repository = createMockRepository();
-    service = new UsersService(repository);
+    auditService = { record: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
+    service = new UsersService(repository, auditService);
   });
 
   describe('getProfile', () => {
@@ -161,7 +164,7 @@ describe('UsersService', () => {
       expect(repository.softDelete).not.toHaveBeenCalled();
     });
 
-    it('succeeds for a different user', async () => {
+    it('succeeds for a different user and records USER_DEACTIVATED', async () => {
       repository.findById.mockResolvedValue(mockUser);
       repository.softDelete.mockResolvedValue(mockUser);
 
@@ -169,6 +172,22 @@ describe('UsersService', () => {
         service.deactivateUser('admin-1', 'user-1'),
       ).resolves.toBeUndefined();
       expect(repository.softDelete).toHaveBeenCalledWith('user-1');
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'USER_DEACTIVATED',
+        targetType: 'USER',
+        targetId: 'user-1',
+      });
+    });
+
+    it('is a no-op for an already-deactivated user: no write, no audit', async () => {
+      repository.findById.mockResolvedValue({ ...mockUser, deletedAt: new Date() });
+
+      await expect(
+        service.deactivateUser('admin-1', 'user-1'),
+      ).resolves.toBeUndefined();
+      expect(repository.softDelete).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException for non-existent target user', async () => {
@@ -181,21 +200,35 @@ describe('UsersService', () => {
   });
 
   describe('reactivateUser', () => {
-    it('succeeds for existing user', async () => {
+    it('succeeds for a deactivated user and records USER_REACTIVATED', async () => {
       repository.findById.mockResolvedValue({
         ...mockUser,
         deletedAt: new Date(),
       });
       repository.reactivate.mockResolvedValue(mockUser);
 
-      await expect(service.reactivateUser('user-1')).resolves.toBeUndefined();
+      await expect(service.reactivateUser('admin-1', 'user-1')).resolves.toBeUndefined();
       expect(repository.reactivate).toHaveBeenCalledWith('user-1');
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'USER_REACTIVATED',
+        targetType: 'USER',
+        targetId: 'user-1',
+      });
+    });
+
+    it('is a no-op for an already-active user: no write, no audit', async () => {
+      repository.findById.mockResolvedValue(mockUser);
+
+      await expect(service.reactivateUser('admin-1', 'user-1')).resolves.toBeUndefined();
+      expect(repository.reactivate).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException for non-existent user', async () => {
       repository.findById.mockResolvedValue(null);
 
-      await expect(service.reactivateUser('nonexistent')).rejects.toThrow(
+      await expect(service.reactivateUser('admin-1', 'nonexistent')).rejects.toThrow(
         NotFoundException,
       );
     });

@@ -219,7 +219,7 @@ describe('Users Module (e2e)', () => {
         .patch('/admin/users/user-2/reactivate')
         .expect(204);
 
-      expect(mockUsersService.reactivateUser).toHaveBeenCalledWith('user-2');
+      expect(mockUsersService.reactivateUser).toHaveBeenCalledWith('admin-1', 'user-2');
     });
   });
 
