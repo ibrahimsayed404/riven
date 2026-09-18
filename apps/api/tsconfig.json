@@ -14,5 +14,6 @@
     "strict": true,
     "skipLibCheck": true,
     "strictPropertyInitialization": false
-  }
+  },
+  "include": ["src"]
 }
