@@ -16,6 +16,14 @@ export type BazaarWithDistance = BazaarWithLocation & {
   distanceMeters: number | null;
 };
 
+// What a vendor sees in their own applications list: the listing plus enough
+// of the bazaar to render a row without a second request.
+export type VendorApplication = BoothListing & {
+  bazaar: Pick<Bazaar, 'id' | 'name' | 'coverMedia' | 'startDate' | 'endDate' | 'status'> & {
+    location: { lat: number; lng: number } | null;
+  };
+};
+
 @Injectable()
 export class BazaarsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -362,27 +370,68 @@ export class BazaarsRepository {
     });
   }
 
-  findVendorApplicationsPaginated(
+  async findVendorApplicationsPaginated(
     vendorId: string,
     page: number,
     limit: number,
     applicationStatus?: ApplicationStatus,
-  ): Promise<{ data: BoothListing[]; total: number }> {
+  ): Promise<{ data: VendorApplication[]; total: number }> {
     const where: Prisma.BoothListingWhereInput = { vendorId };
     if (applicationStatus) {
       where.applicationStatus = applicationStatus;
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const { rows, total } = await this.prisma.$transaction(async (tx) => {
       const total = await tx.boothListing.count({ where });
-      const data = await tx.boothListing.findMany({
+      const rows = await tx.boothListing.findMany({
         where,
         skip: (page - 1) * limit,
         take: limit,
         orderBy: { appliedAt: 'desc' },
+        include: {
+          bazaar: {
+            select: {
+              id: true,
+              name: true,
+              coverMedia: true,
+              startDate: true,
+              endDate: true,
+              status: true,
+            },
+          },
+        },
       });
-      return { data, total };
+      return { rows, total };
     });
+
+    // Prisma can't select the geography column, so the page's locations come
+    // from one raw query and are merged here rather than fetched per row.
+    const locations = await this.findLocationsByIds(rows.map((row) => row.bazaarId));
+
+    const data = rows.map(({ bazaar, ...listing }) => ({
+      ...listing,
+      bazaar: { ...bazaar, location: locations.get(bazaar.id) ?? null },
+    }));
+    return { data, total };
+  }
+
+  private async findLocationsByIds(ids: string[]): Promise<Map<string, { lat: number; lng: number }>> {
+    const locations = new Map<string, { lat: number; lng: number }>();
+    if (ids.length === 0) {
+      return locations;
+    }
+
+    const rows = await this.prisma.$queryRaw<{ id: string; lat: number | null; lng: number | null }[]>`
+      SELECT "id", ST_Y("location"::geometry) AS "lat", ST_X("location"::geometry) AS "lng"
+      FROM "bazaars"
+      WHERE "id" IN (${Prisma.join(ids)})
+    `;
+    for (const row of rows) {
+      if (row.lat !== null && row.lng !== null) {
+        locations.set(row.id, { lat: row.lat, lng: row.lng });
+      }
+    }
+    return locations;
   }
 
   findBazaarApplicationsPaginated(
