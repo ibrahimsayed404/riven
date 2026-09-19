@@ -62,7 +62,7 @@ export class AuditRepository {
       const data = await tx.adminAuditLog.findMany({
         where,
         select: auditLogRowSelect,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * limit,
         take: limit,
       });

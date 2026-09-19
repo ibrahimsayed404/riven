@@ -90,8 +90,14 @@ export class BazaarsRepository {
       return null;
     }
 
+    // A revoked or self-deleted vendor is invisible everywhere else; keep the
+    // bazaar page consistent with that.
     const listings = await this.prisma.boothListing.findMany({
-      where: { bazaarId: id, applicationStatus: ApplicationStatus.ACCEPTED },
+      where: {
+        bazaarId: id,
+        applicationStatus: ApplicationStatus.ACCEPTED,
+        vendor: { verified: true, deletedAt: null },
+      },
       include: {
         vendor: {
           select: {
@@ -330,6 +336,10 @@ export class BazaarsRepository {
   /**
    * Returns the ids it completed (not just a count) so the caller can drop
    * them from the search index — a COMPLETED bazaar is no longer public.
+   *
+   * A ONE_OFF bazaar with no endDate is a single-day event: it stays PUBLISHED
+   * for one day after startDate, the same grace window findNearby applies, so
+   * shoppers can still find it while it is running.
    */
   async transitionPastOneOffBazaars(): Promise<string[]> {
     const rows = await this.prisma.$queryRaw<{ id: string }[]>`
@@ -340,7 +350,7 @@ export class BazaarsRepository {
         AND (
           ("endDate" IS NOT NULL AND "endDate" < NOW())
           OR
-          ("endDate" IS NULL AND "startDate" < NOW())
+          ("endDate" IS NULL AND "startDate" < NOW() - INTERVAL '1 day')
         )
       RETURNING "id"
     `;

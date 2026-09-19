@@ -9,6 +9,7 @@ import { BazaarSearchDocument, toUnixSeconds } from '../../infra/search/search-d
 import { DomainEvents } from '../../common/events/domain-events.service';
 import { BazaarPublishedEvent } from './events/bazaar-published.event';
 import { BoothListingAcceptedEvent } from './events/booth-listing-accepted.event';
+import { pageMeta } from '../../common/dto/pagination-query.dto';
 
 @Injectable()
 export class BazaarsService {
@@ -43,7 +44,8 @@ export class BazaarsService {
 
   async getMyBazaars(ownerId: string, page: number, limit: number) {
     const organizer = await this.organizersService.getOrganizerByOwnerId(ownerId);
-    return this.bazaarsRepository.findByOrganizerIdPaginated(organizer.id, page, limit);
+    const { data, total } = await this.bazaarsRepository.findByOrganizerIdPaginated(organizer.id, page, limit);
+    return { data, meta: pageMeta(total, page, limit) };
   }
 
   async getMyBazaarById(ownerId: string, id: string): Promise<BazaarWithLocation> {
@@ -140,7 +142,8 @@ export class BazaarsService {
   }
 
   async getPublicBazaars(page: number, limit: number, filters: { lat?: number; lng?: number; radiusKm?: number; scheduleType?: ScheduleType }) {
-    return this.bazaarsRepository.findPublicPaginated(page, limit, filters);
+    const { data, total } = await this.bazaarsRepository.findPublicPaginated(page, limit, filters);
+    return { data, meta: pageMeta(total, page, limit) };
   }
 
   /**
@@ -215,12 +218,14 @@ export class BazaarsService {
 
   async getVendorApplications(vendorOwnerId: string, page: number, limit: number, status?: ApplicationStatus) {
     const vendor = await this.vendorsService.getMyProfile(vendorOwnerId);
-    return this.bazaarsRepository.findVendorApplicationsPaginated(vendor.id, page, limit, status);
+    const { data, total } = await this.bazaarsRepository.findVendorApplicationsPaginated(vendor.id, page, limit, status);
+    return { data, meta: pageMeta(total, page, limit) };
   }
 
   async getBazaarApplications(ownerId: string, bazaarId: string, page: number, limit: number, status?: ApplicationStatus) {
     const bazaar = await this.getMyBazaarById(ownerId, bazaarId);
-    return this.bazaarsRepository.findBazaarApplicationsPaginated(bazaar.id, page, limit, status);
+    const { data, total } = await this.bazaarsRepository.findBazaarApplicationsPaginated(bazaar.id, page, limit, status);
+    return { data, meta: pageMeta(total, page, limit) };
   }
 
   async decideApplication(ownerId: string, bazaarId: string, applicationId: string, status: 'ACCEPTED' | 'REJECTED') {

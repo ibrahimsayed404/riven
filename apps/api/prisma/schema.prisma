@@ -175,6 +175,10 @@ model User {
   phone        String?                                @unique
   passwordHash String
   role         Role
+  // Admin suspension (PATCH /admin/users/:id/deactivate). Distinct from deletedAt,
+  // which is the owner's own DELETE /users/me — a suspended user gets a clear
+  // ACCOUNT_DEACTIVATED at login, a deleted one looks like it never existed.
+  isActive     Boolean                                @default(true)
   // GIST index required: CREATE INDEX user_location_gist ON "User" USING GIST (location);
   location     Unsupported("geography(Point, 4326)")?
   interests    String[]                               @default([])

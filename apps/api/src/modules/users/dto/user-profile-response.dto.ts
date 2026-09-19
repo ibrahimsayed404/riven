@@ -17,6 +17,8 @@ export type UserProfileResponse = {
   phone: string | null;
   role: Role;
   interests: string[];
+  /** false = suspended by an admin; the owner cannot sign in until reactivated. */
+  isActive: boolean;
   location: UserLocation | null;
   createdAt: Date;
   updatedAt: Date;

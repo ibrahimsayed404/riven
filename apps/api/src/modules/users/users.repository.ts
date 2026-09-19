@@ -16,6 +16,7 @@ const userProfileSelect = {
   phone: true,
   role: true,
   interests: true,
+  isActive: true,
   createdAt: true,
   updatedAt: true,
   deletedAt: true,
@@ -83,10 +84,19 @@ export class UsersRepository {
     });
   }
 
+  /** Admin suspension — the row stays, the owner just cannot sign in. */
+  deactivate(id: string): Promise<UserProfile> {
+    return this.prisma.user.update({
+      where: { id },
+      data: { isActive: false },
+      select: userProfileSelect,
+    });
+  }
+
   reactivate(id: string): Promise<UserProfile> {
     return this.prisma.user.update({
       where: { id },
-      data: { deletedAt: null },
+      data: { isActive: true },
       select: userProfileSelect,
     });
   }
@@ -135,7 +145,7 @@ export class UsersRepository {
     const rows = await this.prisma.user.groupBy({
       by: ['role'],
       _count: { _all: true },
-      where: { deletedAt: null },
+      where: { deletedAt: null, isActive: true },
     });
     return rows.map((row) => ({ role: row.role, count: row._count._all }));
   }
