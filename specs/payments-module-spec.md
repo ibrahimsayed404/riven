@@ -6,7 +6,7 @@ The Payments module is responsible for the financial infrastructure of Riven:
 2. **Vendor Subscriptions**: Recurring subscriptions for vendor storefront landing pages (`POST /payments/vendor-subscription`).
 3. **Paymob Webhook Processing**: Cryptographic HMAC-SHA512 verification, amount consistency validation, atomic idempotency guards, and asynchronous state transitions (`POST /payments/webhook/paymob`).
 
-> **Key Business Rule (riven-spec.md §1 & §2)**: Riven is a discovery platform, not an e-commerce marketplace. **No shopper transactions, no product sales commissions, no in-app checkout for products.**
+> **Scope note:** this spec covers vendor subscriptions and organizer bazaar fees only. Shopper checkout for marketplace products exists separately (`fashion-marketplace-addendum.md`, `cart-checkout-orders-spec.md`) and already has a Paymob webhook at `POST /webhooks/paymob`. The earlier "no in-app checkout for products" rule quoted here is obsolete. Paymob posts every event of a merchant account to one URL, so there is exactly one route — `POST /webhooks/paymob` in `infra/paymob` — behind a `PaymobWebhookDispatcher`. This module must **not** add a second route: implement `PaymobWebhookHandler` (`infra/paymob/paymob-webhook.dispatcher.ts`), register it with the dispatcher in `onModuleInit`, and send Paymob a prefixed `special_reference` (order groups use `og:<id>`; use e.g. `sub:<id>` / `fee:<id>`). The dispatcher verifies the HMAC and filters non-payments once; handlers match only on signed ids and return `'unmatched'` for events that are not theirs (fix.js PLAN-02).
 
 ---
 

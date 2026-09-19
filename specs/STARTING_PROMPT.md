@@ -5,7 +5,7 @@ You are building **Riven**, a discovery platform (not e-commerce) connecting sho
 ## Read first, in this order
 1. `riven-spec.md` — product spec: roles, entities, monetization, MVP build order (§13 is your sequence).
 2. `riven-backend-architecture.md` — non-negotiable engineering standards: modular monolith rules, folder structure, DB safety (onDelete policies, transactions, constraints), error format, validation, testing strategy.
-3. `schema.prisma` — the finalized database schema. Do not modify it without flagging why first.
+3. `apps/api/prisma/schema.prisma` — the live database schema (the copy that used to live in `specs/` is retired; see the note left in its place). Do not modify it without flagging why first.
 4. `specs/auth-module-spec.md` — exact requirements for the first module you build.
 5. `specs/api-contract.md` — request/response shapes for MVP steps 1–4.
 6. `specs/mobile-architecture.md` — RN app structure (for later, not step 1).

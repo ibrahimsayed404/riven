@@ -1,7 +1,7 @@
 # Discovery Module Specification
 
-**Status**: DRAFT  
-**Module**: Discovery Feed & Spatial Search (`apps/api/src/modules/discovery`)  
+**Status**: DRAFT
+**Module**: Discovery Feed & Spatial Search (`apps/api/src/modules/discovery`)
 **References**: `riven-spec.md` §3 (Visitor Experience), `specs/api-contract.md` §Discovery, `specs/vendor-module-spec.md` §4 (Visibility Rules)
 
 ---
@@ -25,7 +25,7 @@ The Discovery module provides public exploration and proximity querying for Baza
     ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography
   ) AS distance_meters
   ```
-- Spatial indexing: Queries utilize the existing `GIST` indexes (`idx_bazaars_location`, `idx_vendors_home_location`).
+- Spatial indexing: Queries utilize the existing `GIST` indexes (`bazaar_location_gist`, `vendor_home_location_gist` — hand-added in the migrations; Prisma cannot see them, so check every new migration for a stray `DROP INDEX`).
 - Radius bounding filter:
   ```sql
   ST_DWithin(

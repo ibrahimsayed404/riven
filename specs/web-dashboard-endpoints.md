@@ -59,7 +59,7 @@ await api.post('/vendors/me/products', { ..., images: [publicUrl] });
 | POST | `/auth/logout` | `{ refreshToken }` | `204` |
 | GET | `/auth/me` | — | `{ id, email, name, role }` |
 
-`vendorType`: `BAZAAR_ONLY | MARKETPLACE | BOTH`. Registration creates the user **and** the vendor/organizer profile in one call, logged in on return. New vendors and organizers start with `verified: false` — an admin flips it. Several actions below are gated on that flag.
+`vendorType`: `BAZAAR_ONLY | MARKETPLACE | BOTH`. `category` is an enum: `FASHION | FOOD | HOME_CRAFTS | BEAUTY | ACCESSORIES | KIDS | ART | OTHER` (was free text). Registration creates the user **and** the vendor/organizer profile in one call, logged in on return. New vendors and organizers start with `verified: false` — an admin flips it. Several actions below are gated on that flag.
 
 ## 2. Account (both roles)
 
@@ -243,6 +243,21 @@ Accept/reject is final — there's no un-decide. Confirm in the UI before sendin
 | GET | `/discovery/bazaars?lat&lng&radiusKm` | Nearby bazaars |
 
 ---
+
+## 5a. Ratings (shopper app; listed here because the gate changed)
+
+`POST /social/ratings` `{ targetType, targetId, score, comment?, orderId? }`:
+- `VENDOR` / `PRODUCT`: `orderId` **required** — a DELIVERED order of this shopper containing the target, else `403 NOT_VERIFIED_PURCHASE` (missing → `400 ORDER_ID_REQUIRED`).
+- `BAZAAR`: no `orderId`; any shopper may rate a bazaar that is `PUBLISHED` or `COMPLETED` (`404 BAZAAR_NOT_FOUND` otherwise).
+- `EVENT`: `404 TARGET_NOT_FOUND` until an events module exists.
+Follows and favorites likewise `404` when the target is not publicly visible.
+
+## 5b. Errors, pagination and rate limits (apply everywhere)
+
+- **Error body** (every non-2xx): `{ code, message, details? }` — flat, no envelope. `code` is stable and meant for branching (`VENDOR_NOT_FOUND`, `INSUFFICIENT_STOCK`, `ORDER_STATE_CHANGED`, …); `message` is for humans; `details` is optional structured context (e.g. `CHECKOUT_ITEM_UNAVAILABLE` carries `details.items[]`). Validation failures are `400 VALIDATION_ERROR` with `message: string[]`.
+- **Lists** return `{ data, meta: { total, page, limit, totalPages } }`. `?page=` ≥ 1, `?limit=` 1–100 (default 20); anything else is a `400`. Enum filters (`?status=`) are validated — an unknown value is a `400`, not a `500`.
+- **Rate limits:** 300 requests/minute per user (per IP when anonymous), 10/minute on login and register, 1/minute on location updates. Over the limit → `429 RATE_LIMITED` with a `Retry-After` header.
+- **CORS:** only origins listed in `CORS_ORIGINS` (defaults to `http://localhost:3000,3001`) may call the API from a browser.
 
 ## 6. Admin dashboard (`role: ADMIN`)
 
