@@ -6,7 +6,7 @@ DO $$
 DECLARE
   dupes text;
 BEGIN
-  SELECT string_agg(lower(trim("email")) || ' (' || cnt || ' accounts)', ', ')
+  SELECT string_agg(e || ' (' || cnt || ' accounts)', ', ')
     INTO dupes
     FROM (
       SELECT lower(trim("email")) AS e, count(*) AS cnt
