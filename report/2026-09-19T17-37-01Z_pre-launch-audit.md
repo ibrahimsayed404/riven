@@ -231,13 +231,13 @@ The primary match (signed `order.id` → `paymobOrderId`) is correct. The fallba
 | P2-05 | `decodeCursor` accepts any string as a date; `new Date('x')` reaches Prisma | `social.service.ts:205` | **Fixed** `8e1222c` |
 | P2-06 | Empty cart faked with `id: ''` and an `as CartWithItems` cast | `cart.service.ts:12-17` | **Skipped** |
 | P2-07 | `getMyProducts` carries TS default args the controller already supplies, plus stray indentation | `vendors.service.ts:213` | **Fixed** `d0c1955` |
-| P2-08 | Four services rebuild the `meta` object inline instead of calling `pageMeta` | `vendors.service.ts:113-121` · `products.service.ts:49-57` · `users.service.ts:133-141` · `audit.service.ts:35-38` | Pending |
+| P2-08 | Four services rebuild the `meta` object inline instead of calling `pageMeta` | `vendors.service.ts:113-121` · `products.service.ts:49-57` · `users.service.ts:133-141` · `audit.service.ts:35-38` | **Fixed** `b14141d` (five sites, not four) |
 | P2-09 | `dto.gridConfig as any` twice, discarding the validated type | `admin-booths.controller.ts:21,31` | **Fixed** `e4d7ba2` |
 | P2-10 | Both non-IP branches of `getTracker` were unreachable — `req.user` (guard order) and `req.ips` (trust proxy) | `user-throttler.guard.ts:17` | **Fixed** by N-01 `e646c12` + P0-01 `3a7ec6b` |
 | P2-11 | `boothListingId` validated as `@IsString()` where every other id is `@IsUUID()` | `assign-booth.dto.ts:4-5` | **Fixed** `adcd8c2` |
 | P2-12 | `UpdateBoothLayoutDto` duplicates `CreateBoothLayoutDto` field for field | `update-booth-layout.dto.ts:1-9` | **Fixed** `55f5d8d` |
 | P2-13 | Layout lives at two unrelated paths: `bazaars/:id/layout` (public) and `admin/bazaars/:id/layout` | `public-booths.controller.ts:4` · `admin-booths.controller.ts:13,19` | Pending |
-| P2-14 | Meilisearch is v1.9 in compose, v1.12 in CI | `docker-compose.yml:47` · `.github/workflows/ci.yml` | Pending |
+| P2-14 | Meilisearch is v1.9 in compose, v1.12 in CI | `docker-compose.yml:47` · `.github/workflows/ci.yml` | **Fixed** `e8122a3` |
 | P2-15 | Every list orders by `createdAt` with no index on it | `schema.prisma` (`products`, `orders`, `vendors`) | Pending |
 
 ## 5. What is already solid
@@ -314,10 +314,11 @@ One fix broke the build mid-session and was corrected before commit: removing th
 | P1-08 | Capping upload size changes the upload contract the clients use. |
 | P1-09 | Product decision: checkout TTL versus Paymob intention lifetime, plus whether `orphan` / `double_payment` log outcomes should alert. **For Ibrahim.** |
 | P1-10 | Blocked on a real Paymob sandbox payload; nothing to verify against locally. |
-| P2-08 | **Five** files, not the four the P2 table says — over the three-file limit for a single fix. |
+| P2-08 | Closed `b14141d`. |
 | P2-10 | Closed: N-01 `e646c12` fixed the `req.user` branch, P0-01 `3a7ec6b` made the `req.ips` branch reachable. |
 | P2-13 | Would move a route path. |
-| P2-14, P2-15 | Environment drift and an index migration. |
+| P2-14 | Closed `e8122a3`. |
+| P2-15 | Index migration — still needs approval and, ideally, EXPLAIN against real data. |
 
 ### For manual review
 
@@ -373,3 +374,40 @@ This also shows why the number must match reality: with exactly one real proxy, 
 ### Not covered by a test
 
 No automated test asserts that `configureApp` applies the setting. Adding one means touching `app.smoke.spec.ts`, which would have made this a four-file change, over the limit you set. The Express behaviour above is verified empirically and the env parsing is verified directly, but the wiring between them rests on review. Worth adding when convenient.
+
+## 10. Fix session addendum — everything resolvable without new information
+
+Worked the remaining list down to the point where every open item needs a decision, an external fact, or a migration. Final checks on the branch: typecheck exit 0 · `check:env` ok · lint **0 errors** (123 warnings, all pre-existing `no-explicit-any`) · **29 suites / 292 tests passing**.
+
+| ID | Commit | What changed |
+|---|---|---|
+| N-02 | `6d199c4` | Booth assignment is an atomic conditional write; a lost race is now a 409 instead of a silent steal |
+| P2-08 | `b14141d` | Five services route their list envelope through `pageMeta`; `AuditLogPage` names `PageMeta` |
+| P0-01 | `359aa8e` | Smoke test asserts `configureApp` applies the trust-proxy setting and that it defaults to `false` |
+| P2-14 | `e8122a3` | Dev Meilisearch pinned to v1.12, the version CI validates against |
+
+### N-02 — a second finding from the deep-dive pass
+
+Not in the original audit. `assignBooth` read the booth, checked `boothListingId` was null, then wrote. Two admins assigning different vendors to the same booth both passed the check; the second write won and the first vendor **silently lost their booth**, with no error raised to anyone. The unique index on `Booth.boothListingId` does not catch this — it only prevents one listing occupying two booths.
+
+`specs/bazaars-module-spec.md` §14 specifies exactly this guard (`updateMany({ where: { id: boothId, boothListingId: null } })`). It was designed and never implemented. The fix follows the same guarded-write pattern as `OrdersRepository.transitionOrderStatus`.
+
+The cross-module application checks deliberately stay outside the write: `BoothListing` belongs to the bazaars module, so pulling them into one transaction here would mean a repository reaching into another module's table, which the architecture rules forbid. The guarded write closes the lost-update window; a concurrent change to the *application's* status remains a narrower, unaddressed race.
+
+### Everything still open, and the single reason each is open
+
+| ID | Blocked on |
+|---|---|
+| **P0-01 (value)** | Infrastructure: what is in front of the process, how many hops are ours, does the outermost overwrite `X-Forwarded-For`. **The code is ready; production is still exposed until the variable is set.** |
+| P1-01 | Infrastructure: instance count, and whether rate limiting should fail open or closed when Redis is down. New dependency. |
+| P1-07 | Product (Ibrahim): search-module-spec Open Item 2 — deprecate `GET /products?search=` or keep both? |
+| P1-08 | Product: should `/media/upload-url` require a *verified* vendor? And client owner: can uploads move from presigned PUT to presigned POST, or should the cap live at the bucket/CDN? |
+| P1-09 | External fact (Paymob intention lifetime) + product: stock-hold window, and what happens to money that lands on a cancelled group. |
+| P1-10 | One real Paymob sandbox payload — intention response plus webhook body and its `hmac`. |
+| P2-13 | Product: is booth layout organizer-owned (as spec'd) or admin-only (as built)? The missing layout lock (`CANNOT_MODIFY_LAYOUT_WITH_ASSIGNED_BOOTHS`, spec §19) is a behaviour change and waits on the same answer. |
+| P2-15 | Migration approval; ideally `EXPLAIN` against real data, which needs a database this machine does not have. |
+| P2-06 | Nothing — closed as intentional (lazy cart creation is a written spec decision). |
+
+### The gate nobody has passed yet
+
+Twenty-four commits on this branch, **none of them exercised against a database**. `prisma migrate deploy` and the whole e2e suite have never run — not in this session, not in the previous one. Unit tests and the HTTP smoke test are the entire safety net so far. The first real run happens in CI, and these commits touch routes two e2e specs cover (`booths.e2e.spec.ts`, `social.e2e.spec.ts`), plus the request-validation tightening in `e22fc61`. Until that is green, treat every "Fixed" above as "fixed and unit-tested", not "verified".
