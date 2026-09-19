@@ -35,7 +35,8 @@ services:
       retries: 10
 
   meilisearch:
-    image: getmeili/meilisearch:v1.9
+    # Pinned to the version CI tests against (.github/workflows/ci.yml).
+    image: getmeili/meilisearch:v1.12
     container_name: riven_meilisearch
     restart: unless-stopped
     environment:
