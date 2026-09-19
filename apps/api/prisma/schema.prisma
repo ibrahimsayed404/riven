@@ -116,6 +116,19 @@ enum VendorType {
   BOTH
 }
 
+// What a vendor sells, for discovery/search filters. Product taxonomy is the
+// separate Category tree; this is the vendor-level label (fix.js SCHEMA-02).
+enum VendorCategory {
+  FASHION
+  FOOD
+  HOME_CRAFTS
+  BEAUTY
+  ACCESSORIES
+  KIDS
+  ART
+  OTHER
+}
+
 enum ApprovalStatus {
   PENDING
   APPROVED
@@ -210,7 +223,7 @@ model Vendor {
   owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   name               String
-  category           String
+  category           VendorCategory                         @default(OTHER)
   description        String?
   logo               String?
   coverMedia         String[]                               @default([])
@@ -248,7 +261,7 @@ model Category {
   name     String
   slug     String     @unique
   parentId String?
-  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children Category[] @relation("CategoryHierarchy")
 
   products Product[]
@@ -259,13 +272,14 @@ model Category {
 model Product {
   id       String @id @default(uuid())
   vendorId String
-  vendor   Vendor @relation(fields: [vendorId], references: [id])
+  // Restrict: a vendor with products is soft-deleted, never removed.
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Restrict)
 
   title       String
   description String
   categoryId  String
-  category    Category @relation(fields: [categoryId], references: [id])
-  basePrice   Decimal  @db.Money
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  basePrice   Decimal  @db.Decimal(12, 2)
   images      String[]
 
   approvalStatus  ApprovalStatus @default(PENDING)
@@ -288,17 +302,21 @@ model Product {
 model ProductVariant {
   id        String  @id @default(uuid())
   productId String
-  product   Product @relation(fields: [productId], references: [id])
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
 
   sku           String   @unique
   size          String?
   color         String?
-  priceOverride Decimal? @db.Money // null = use Product.basePrice
+  priceOverride Decimal? @db.Decimal(12, 2) // null = use Product.basePrice
   stockQuantity Int      @default(0)
+  // Soft-delete: order_items / cart_items reference variants with RESTRICT, so a
+  // hard delete 500s the moment anyone has bought or carted it.
+  deletedAt     DateTime?
 
   cartItems  CartItem[]
   orderItems OrderItem[]
 
+  @@index([productId])
   @@map("product_variants")
 }
 
@@ -479,8 +497,11 @@ model Rating {
   targetId   String
   score      Int // 1-5, enforce range via CHECK constraint below
   comment    String?
-  orderId    String
-  order      Order            @relation(fields: [orderId], references: [id])
+  // Required for VENDOR/PRODUCT (verified delivered purchase); null for BAZAAR,
+  // which any shopper may rate once it is PUBLISHED or COMPLETED (fix.js SPEC-03).
+  orderId    String?
+  // Restrict: order history that a rating points at is never hard-deleted.
+  order      Order?           @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -578,7 +599,7 @@ model Payment {
 model Cart {
   id        String     @id @default(uuid())
   userId    String     @unique
-  user      User       @relation(fields: [userId], references: [id])
+  user      User       @relation(fields: [userId], references: [id], onDelete: Restrict)
   items     CartItem[]
   updatedAt DateTime   @updatedAt
 
@@ -588,11 +609,11 @@ model Cart {
 model CartItem {
   id        String         @id @default(uuid())
   cartId    String
-  cart      Cart           @relation(fields: [cartId], references: [id])
+  cart      Cart           @relation(fields: [cartId], references: [id], onDelete: Restrict)
   productId String
-  product   Product        @relation(fields: [productId], references: [id])
+  product   Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
   variantId String
-  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
   quantity  Int            @default(1)
 
   @@unique([cartId, variantId])
@@ -604,11 +625,21 @@ model CartItem {
 model OrderGroup {
   id             String   @id @default(uuid())
   userId         String
-  user           User     @relation(fields: [userId], references: [id])
+  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict)
   orders         Order[]
   paymobIntentId String?
+  // Set by the webhook. Unique so a replayed or duplicated webhook is a P2002,
+  // not a second PAID transition. paidAmountCents is what Paymob said it took.
+  // Paymob's own order id, returned when the intention is created; it is one
+  // of the fields Paymob signs in the webhook, so it is what we match on.
+  paymobOrderId       String?
+  paymobTransactionId String?   @unique
+  paidAmountCents     Int?
+  paidAt              DateTime?
   createdAt      DateTime @default(now())
 
+  @@index([paymobIntentId])
+  @@index([paymobOrderId])
   @@map("order_groups")
 }
 
@@ -616,14 +647,14 @@ model OrderGroup {
 model Order {
   id           String     @id @default(uuid())
   orderGroupId String
-  orderGroup   OrderGroup @relation(fields: [orderGroupId], references: [id])
+  orderGroup   OrderGroup @relation(fields: [orderGroupId], references: [id], onDelete: Restrict)
   vendorId     String
-  vendor       Vendor     @relation(fields: [vendorId], references: [id])
+  vendor       Vendor     @relation(fields: [vendorId], references: [id], onDelete: Restrict)
   userId       String
-  user         User       @relation(fields: [userId], references: [id])
+  user         User       @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   status   OrderStatus @default(PENDING)
-  subtotal Decimal     @db.Money
+  subtotal Decimal     @db.Decimal(12, 2)
   items    OrderItem[]
   ratings  Rating[]
 
@@ -638,15 +669,15 @@ model Order {
 model OrderItem {
   id        String         @id @default(uuid())
   orderId   String
-  order     Order          @relation(fields: [orderId], references: [id])
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Restrict)
   productId String
-  product   Product        @relation(fields: [productId], references: [id])
+  product   Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
   variantId String
-  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
 
   // Snapshot at purchase time — never read from Product/Variant after order creation
   titleSnapshot String
-  priceSnapshot Decimal @db.Money
+  priceSnapshot Decimal @db.Decimal(12, 2)
   quantity      Int
 
   @@map("order_items")
