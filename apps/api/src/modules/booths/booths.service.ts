@@ -125,7 +125,10 @@ export class BoothsService {
     // Let's get the layout.
     const layout = await this.boothsRepository.findLayoutByBazaarId(application.bazaarId);
     if (!layout || layout.id !== booth.layoutId) {
-      throw new BadRequestException("Vendor's application belongs to a different bazaar.");
+      throw new BadRequestException({
+        code: 'APPLICATION_BAZAAR_MISMATCH',
+        message: "Vendor's application belongs to a different bazaar.",
+      });
     }
 
     try {
