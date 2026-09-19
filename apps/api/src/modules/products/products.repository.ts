@@ -57,11 +57,6 @@ import {
 export class ProductsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** @deprecated import PUBLIC_PRODUCT_WHERE from ./product-visibility instead. */
-  public get visibilityFilter(): Prisma.ProductWhereInput {
-    return PUBLIC_PRODUCT_WHERE;
-  }
-
   async findManyPaginated(params: {
     categoryId?: string;
     vendorId?: string;
@@ -160,7 +155,7 @@ export class ProductsRepository {
   }
 
   async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
-    return this.pageIds({ ...this.visibilityFilter, vendor: { verified: true, deletedAt: null } }, cursor, take);
+    return this.pageIds({ ...PUBLIC_PRODUCT_WHERE }, cursor, take);
   }
 
   private async pageIds(where: Prisma.ProductWhereInput, cursor: string | null, take: number): Promise<IdPage> {
@@ -193,7 +188,7 @@ export class ProductsRepository {
   }
 
   /**
-   * Admin queue. Deliberately NOT built on visibilityFilter: that hides
+   * Admin queue. Deliberately NOT built on PUBLIC_PRODUCT_WHERE: that hides
    * PENDING/REJECTED rows and products of unverified vendors, which is exactly
    * what the queue exists to show. Soft-deleted rows are always excluded;
    * isActive is not filtered (an inactive PENDING product still needs a decision).
