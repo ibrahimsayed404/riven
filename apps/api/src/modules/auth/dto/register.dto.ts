@@ -1,5 +1,5 @@
 import { Role } from '@prisma/client';
-import { IsEmail, IsEnum, IsString, Matches, MinLength, NotEquals } from 'class-validator';
+import { Equals, IsEmail, IsOptional, IsString, Matches, MinLength } from 'class-validator';
 
 export class RegisterDto {
   @IsEmail()
@@ -14,7 +14,12 @@ export class RegisterDto {
   @MinLength(1)
   name!: string;
 
-  @IsEnum(Role)
-  @NotEquals(Role.ADMIN, { message: 'ADMIN role cannot be self-assigned' })
-  role!: Role;
+  /**
+   * Accepted only for backward compatibility with clients that send
+   * role: 'SHOPPER'. Anything else is rejected here and again in the service:
+   * vendors and organizers register through their own routes (fix.js AUTH-02).
+   */
+  @IsOptional()
+  @Equals(Role.SHOPPER, { message: 'only SHOPPER accounts can be created here' })
+  role?: Role;
 }

@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  HttpStatus,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -10,6 +9,9 @@ import * as bcrypt from 'bcrypt';
 import { UsersService } from './users.service';
 import { UsersRepository } from './users.repository';
 import { AuditService } from '../audit/audit.service';
+import { AuthService } from '../auth/auth.service';
+import { OrganizersService } from '../bazaars/organizers.service';
+import { VendorsService } from '../vendors/vendors.service';
 
 jest.mock('bcrypt');
 
@@ -47,11 +49,17 @@ describe('UsersService', () => {
   let service: UsersService;
   let repository: jest.Mocked<UsersRepository>;
   let auditService: jest.Mocked<AuditService>;
+  let authService: jest.Mocked<AuthService>;
+  let vendorsService: jest.Mocked<VendorsService>;
+  let organizersService: jest.Mocked<OrganizersService>;
 
   beforeEach(() => {
     repository = createMockRepository();
     auditService = { record: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuditService>;
-    service = new UsersService(repository, auditService);
+    authService = { revokeAllSessions: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<AuthService>;
+    vendorsService = { softDeleteByOwner: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<VendorsService>;
+    organizersService = { softDeleteByOwner: jest.fn().mockResolvedValue(undefined) } as unknown as jest.Mocked<OrganizersService>;
+    service = new UsersService(repository, auditService, authService, vendorsService, organizersService);
   });
 
   describe('getProfile', () => {
@@ -98,19 +106,12 @@ describe('UsersService', () => {
       expect(repository.updateLocation).toHaveBeenCalledWith('user-1', 30.0, 31.0);
     });
 
-    it('rejects with 429 when called within 60 seconds', async () => {
+    it('no longer rate-limits in the service — that is the route @Throttle (ROBUST-01)', async () => {
       repository.updateLocation.mockResolvedValue(undefined);
 
-      // First call succeeds
       await service.updateLocation('user-1', 30.0, 31.0);
-
-      // Second call within 60s should be rate-limited
-      try {
-        await service.updateLocation('user-1', 30.1, 31.1);
-        fail('Expected HttpException to be thrown');
-      } catch (error) {
-        expect(error).toHaveProperty('status', HttpStatus.TOO_MANY_REQUESTS);
-      }
+      await expect(service.updateLocation('user-1', 30.1, 31.1)).resolves.toBeUndefined();
+      expect(repository.updateLocation).toHaveBeenCalledTimes(2);
     });
 
     it('allows updates for different users independently', async () => {
@@ -172,6 +173,7 @@ describe('UsersService', () => {
         service.deactivateUser('admin-1', 'user-1'),
       ).resolves.toBeUndefined();
       expect(repository.softDelete).toHaveBeenCalledWith('user-1');
+      expect(authService.revokeAllSessions).toHaveBeenCalledWith('user-1');
       expect(auditService.record).toHaveBeenCalledWith({
         actorId: 'admin-1',
         action: 'USER_DEACTIVATED',

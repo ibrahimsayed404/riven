@@ -8,6 +8,7 @@ import {
   Patch,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -35,6 +36,7 @@ export class UsersController {
     return this.usersService.updateProfile(user.id, dto);
   }
 
+  @Throttle({ default: { limit: 1, ttl: 60_000 } })
   @Patch('me/location')
   @HttpCode(HttpStatus.NO_CONTENT)
   updateLocation(

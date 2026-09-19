@@ -1,7 +1,5 @@
 import {
   BadRequestException,
-  HttpException,
-  HttpStatus,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -10,25 +8,20 @@ import { compare } from 'bcrypt';
 import { AdminAction, AdminTargetType, Role } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
+import { AuthService } from '../auth/auth.service';
+import { OrganizersService } from '../bazaars/organizers.service';
+import { VendorsService } from '../vendors/vendors.service';
 import { UsersRepository } from './users.repository';
 import { UserProfileResponse } from './dto/user-profile-response.dto';
 
-const LOCATION_RATE_LIMIT_MS = 60_000; // 1 update per 60 seconds per user
-
 @Injectable()
 export class UsersService {
-  /**
-   * In-memory per-user rate limit for location updates.
-   * Maps userId → timestamp (ms) of last location update.
-   *
-   * Acceptable for single-instance dev; swap to Redis for multi-instance.
-   * The map auto-cleans on restart (stale rate-limit state is low-risk).
-   */
-  private readonly locationUpdateTimestamps = new Map<string, number>();
-
   constructor(
     private readonly usersRepository: UsersRepository,
     private readonly auditService: AuditService,
+    private readonly authService: AuthService,
+    private readonly vendorsService: VendorsService,
+    private readonly organizersService: OrganizersService,
   ) {}
 
   async getProfile(userId: string): Promise<UserProfileResponse> {
@@ -76,25 +69,10 @@ export class UsersService {
     };
   }
 
+  // The once-per-minute rule is a @Throttle on the route, keyed by user by
+  // UserThrottlerGuard — not a per-process Map that grows forever (fix.js ROBUST-01).
   async updateLocation(userId: string, lat: number, lng: number): Promise<void> {
-    const now = Date.now();
-    const lastUpdate = this.locationUpdateTimestamps.get(userId);
-
-    if (lastUpdate && now - lastUpdate < LOCATION_RATE_LIMIT_MS) {
-      const retryAfterSeconds = Math.ceil(
-        (LOCATION_RATE_LIMIT_MS - (now - lastUpdate)) / 1000,
-      );
-      throw new HttpException(
-        {
-          code: 'LOCATION_RATE_LIMITED',
-          message: `Location can only be updated once every 60 seconds. Retry after ${retryAfterSeconds}s.`,
-        },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-
     await this.usersRepository.updateLocation(userId, lat, lng);
-    this.locationUpdateTimestamps.set(userId, now);
   }
 
   async deleteAccount(userId: string, password: string): Promise<void> {
@@ -116,6 +94,15 @@ export class UsersService {
       });
     }
 
+    // Sessions first: if the soft-delete then fails the user is merely logged
+    // out, never deleted-but-still-logged-in (fix.js AUTH-01).
+    await this.authService.revokeAllSessions(userId);
+    // The owned profile goes with the account (fix.js LOGIC-05). Each call is a
+    // no-op for roles that have no such row. Not one transaction — the rows
+    // belong to other modules — so profile first: a half-failure leaves a
+    // deleted storefront with a live login, never a live storefront with no owner.
+    if (user.role === Role.VENDOR) await this.vendorsService.softDeleteByOwner(userId);
+    if (user.role === Role.ORGANIZER) await this.organizersService.softDeleteByOwner(userId);
     await this.usersRepository.softDelete(userId);
   }
 
@@ -180,10 +167,9 @@ export class UsersService {
       return;
     }
 
-    // Known gap: this does NOT auto-revoke the target user's refresh tokens.
-    // A deactivated user could still use an existing valid access token
-    // until it expires (15m TTL). Full session-kill on deactivate can be
-    // a fast-follow if needed.
+    // Revoke every refresh token, then soft-delete. Existing access tokens die
+    // on their next request because the auth lookups now exclude deletedAt.
+    await this.authService.revokeAllSessions(targetId);
     await this.usersRepository.softDelete(targetId);
 
     await this.auditService.record({
