@@ -121,6 +121,18 @@ describe('BoothsService', () => {
       const result = await service.assignBooth('booth1', 'app1');
       expect(result.boothListingId).toBe('app1');
     });
+
+    it('surfaces a lost race as a conflict instead of stealing the booth', async () => {
+      // Both requests saw the booth unassigned; the guarded write claimed nothing.
+      mockBoothsRepository.findBoothById.mockResolvedValue({ id: 'booth1', boothListingId: null, layoutId: 'l1' });
+      mockBazaarsService.findApplicationById.mockResolvedValue({ id: 'app1', bazaarId: 'b1', applicationStatus: ApplicationStatus.ACCEPTED });
+      mockBoothsRepository.findLayoutByBazaarId.mockResolvedValue({ id: 'l1', bazaarId: 'b1' });
+      mockBoothsRepository.assignBooth.mockResolvedValue(null);
+
+      await expect(service.assignBooth('booth1', 'app1')).rejects.toMatchObject({
+        response: { code: 'BOOTH_ASSIGNED' },
+      });
+    });
   });
 
   describe('Unassign Idempotency', () => {

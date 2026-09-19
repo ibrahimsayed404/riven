@@ -131,7 +131,16 @@ export class BoothsService {
     }
 
     try {
-      return await this.boothsRepository.assignBooth(id, boothListingId);
+      // Guarded write: the pre-check above is the friendly path, this is the
+      // truth. Null means another request took the booth in between.
+      const assigned = await this.boothsRepository.assignBooth(id, boothListingId);
+      if (!assigned) {
+        throw new ConflictException({
+          code: 'BOOTH_ASSIGNED',
+          message: 'Booth was assigned to another vendor while this request was in flight. Reload and try again.',
+        });
+      }
+      return assigned;
     } catch (error: any) {
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('boothListingId')) {
         throw new ConflictException({ code: 'APPLICATION_ALREADY_ASSIGNED', message: 'This vendor application is already assigned to another booth.' });

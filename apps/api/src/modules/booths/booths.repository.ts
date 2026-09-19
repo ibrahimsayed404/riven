@@ -87,11 +87,20 @@ export class BoothsRepository {
     });
   }
 
-  assignBooth(id: string, boothListingId: string): Promise<Booth> {
-    return this.prisma.booth.update({
-      where: { id },
+  /**
+   * Conditional assign: the write only happens while the booth is still
+   * unassigned. Returns null when it was not — two admins assigning different
+   * vendors to one booth used to be a read-then-write where the second write
+   * won and the first vendor silently lost their booth
+   * (specs/bazaars-module-spec.md §14 asks for exactly this guard).
+   */
+  async assignBooth(id: string, boothListingId: string): Promise<Booth | null> {
+    const result = await this.prisma.booth.updateMany({
+      where: { id, boothListingId: null },
       data: { boothListingId },
     });
+    if (result.count === 0) return null;
+    return this.prisma.booth.findUniqueOrThrow({ where: { id } });
   }
 
   unassignBooth(id: string): Promise<Booth> {
