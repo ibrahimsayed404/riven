@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AdminAction, AdminTargetType, Prisma } from '@prisma/client';
+import { AdminAction, AdminTargetType } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
 import { OrganizersRepository, OrganizerProfile, OrganizerModerationStatus } from './organizers.repository';
@@ -27,7 +27,7 @@ export class OrganizersService {
     return organizer;
   }
 
-  async updateMyProfile(ownerId: string, data: Prisma.OrganizerUpdateInput): Promise<OrganizerProfile> {
+  async updateMyProfile(ownerId: string, data: { name?: string }): Promise<OrganizerProfile> {
     const organizer = await this.getOrganizerByOwnerId(ownerId);
     return this.organizersRepository.update(organizer.id, data);
   }
