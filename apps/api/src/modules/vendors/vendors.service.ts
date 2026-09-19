@@ -1,5 +1,5 @@
-import { Injectable, NotFoundException, HttpException, HttpStatus, ForbiddenException, ConflictException } from '@nestjs/common';
-import { AdminAction, AdminTargetType, Prisma } from '@prisma/client';
+import { Injectable, NotFoundException, ForbiddenException, ConflictException } from '@nestjs/common';
+import { AdminAction, AdminTargetType } from '@prisma/client';
 
 import { VendorsRepository, IdPage, VendorModerationStatus } from './vendors.repository';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
@@ -11,13 +11,17 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
+import { pageMeta } from '../../common/dto/pagination-query.dto';
 
-const LOCATION_UPDATE_COOLDOWN_MS = 60 * 1000;
+const vendorProfileNotFound = () =>
+  new NotFoundException({ code: 'VENDOR_PROFILE_NOT_FOUND', message: 'Vendor profile not found.' });
+const productNotFound = () =>
+  new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found or does not belong to you.' });
+const variantNotFound = () => new NotFoundException({ code: 'VARIANT_NOT_FOUND', message: 'Variant not found.' });
+const skuTaken = () => new ConflictException({ code: 'SKU_TAKEN', message: 'SKU must be unique.' });
 
 @Injectable()
 export class VendorsService {
-  private locationUpdateTimestamps = new Map<string, number>();
-
   constructor(
     private readonly vendorsRepository: VendorsRepository,
     private readonly searchIndexQueue: SearchIndexQueue,
@@ -27,7 +31,7 @@ export class VendorsService {
   async getMyProfile(ownerId: string) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
-      throw new NotFoundException('Vendor profile not found');
+      throw vendorProfileNotFound();
     }
     const location = await this.vendorsRepository.findVendorLocation(vendor.id);
     return { ...vendor, location };
@@ -36,7 +40,7 @@ export class VendorsService {
   async updateMyProfile(ownerId: string, updateDto: UpdateVendorProfileDto) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
-      throw new NotFoundException('Vendor profile not found');
+      throw vendorProfileNotFound();
     }
 
     const updated = await this.vendorsRepository.update(vendor.id, {
@@ -60,44 +64,41 @@ export class VendorsService {
     return { ...updated, location };
   }
 
+  // The once-per-minute rule lives on the route as a @Throttle, keyed by user
+  // by UserThrottlerGuard — not in a per-process Map (fix.js ROBUST-01).
   async updateMyLocation(ownerId: string, locationDto: UpdateVendorLocationDto) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
-      throw new NotFoundException('Vendor profile not found');
-    }
-
-    const now = Date.now();
-    const lastUpdate = this.locationUpdateTimestamps.get(vendor.id);
-
-    if (lastUpdate && now - lastUpdate < LOCATION_UPDATE_COOLDOWN_MS) {
-      const retryAfterSeconds = Math.ceil(
-        (LOCATION_UPDATE_COOLDOWN_MS - (now - lastUpdate)) / 1000,
-      );
-      throw new HttpException(
-        {
-          code: 'LOCATION_RATE_LIMITED',
-          message: `Location can only be updated once every 60 seconds. Retry after ${retryAfterSeconds}s.`,
-        },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
+      throw vendorProfileNotFound();
     }
 
     await this.vendorsRepository.updateLocation(vendor.id, locationDto.lat, locationDto.lng);
-    this.locationUpdateTimestamps.set(vendor.id, now);
     await this.searchIndexQueue.enqueue({ type: 'VENDOR', id: vendor.id });
   }
 
+  /**
+   * Called when the owning user account is deleted (fix.js LOGIC-05): the
+   * storefront must go with it. Products drop out of the public catalogue and
+   * search because every visibility rule checks vendor.deletedAt.
+   */
+  async softDeleteByOwner(ownerId: string): Promise<void> {
+    const vendorId = await this.vendorsRepository.softDeleteByOwner(ownerId);
+    if (!vendorId) return;
+    await this.searchIndexQueue.enqueueMany([
+      { type: 'VENDOR', id: vendorId },
+      { type: 'VENDOR_PRODUCTS', vendorId },
+    ]);
+  }
+
+  /** Public storefront. 404 for unverified or soft-deleted — do not leak existence. */
   async getVendorById(id: string) {
-    const vendor = await this.vendorsRepository.findById(id);
-    if (!vendor || !vendor.verified) {
-      throw new NotFoundException('Vendor not found');
+    const vendor = await this.vendorsRepository.findPublicById(id);
+    if (!vendor) {
+      throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
     }
 
     const location = await this.vendorsRepository.findVendorLocation(vendor.id);
-    
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { ownerId, ...publicVendor } = vendor;
-    return { ...publicVendor, location };
+    return { ...vendor, location };
   }
 
   // --- Admin moderation (specs/admin-module-spec.md §3, §4.1) ---
@@ -212,20 +213,24 @@ export class VendorsService {
   async getMyProducts(ownerId: string, page: number = 1, limit: number = 10) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
-      throw new NotFoundException('Vendor profile not found');
+      throw vendorProfileNotFound();
     }
-    return this.vendorsRepository.findProductsPaginated(vendor.id, page, limit);
+    const { data, total } = await this.vendorsRepository.findProductsPaginated(vendor.id, page, limit);
+    return { data, meta: pageMeta(total, page, limit) };
   }
 
   async createProduct(ownerId: string, createDto: CreateProductDto) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
-      throw new NotFoundException('Vendor profile not found');
+      throw vendorProfileNotFound();
     }
     if (!vendor.verified) {
-      throw new ForbiddenException('Vendor must be verified to create products');
+      throw new ForbiddenException({
+        code: 'VENDOR_NOT_VERIFIED',
+        message: 'Vendor must be verified to create products.',
+      });
     }
-    
+
     const product = await this.vendorsRepository.createProduct(vendor.id, {
       title: createDto.title,
       description: createDto.description,
@@ -244,11 +249,11 @@ export class VendorsService {
   async getMyProduct(ownerId: string, productId: string) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
-      throw new NotFoundException('Vendor profile not found');
+      throw vendorProfileNotFound();
     }
     const product = await this.vendorsRepository.findProductByIdAndVendor(productId, vendor.id);
     if (!product) {
-      throw new NotFoundException('Product not found or does not belong to you');
+      throw productNotFound();
     }
     return product;
   }
@@ -256,7 +261,7 @@ export class VendorsService {
   async updateProduct(ownerId: string, productId: string, updateDto: UpdateProductDto) {
     // getMyProduct ensures it exists and belongs to the vendor
     await this.getMyProduct(ownerId, productId);
-    
+
     const updated = await this.vendorsRepository.updateProduct(productId, {
       ...updateDto,
       approvalStatus: 'PENDING',
@@ -285,7 +290,7 @@ export class VendorsService {
       return variant;
     } catch (error: any) {
       if (error.code === 'P2002' && error.meta?.target?.includes('sku')) {
-        throw new ConflictException('SKU must be unique');
+        throw skuTaken();
       }
       throw error;
     }
@@ -293,9 +298,10 @@ export class VendorsService {
 
   async updateProductVariant(ownerId: string, productId: string, variantId: string, updateVariantDto: UpdateProductVariantDto) {
     const product = await this.getMyProduct(ownerId, productId);
+    // product.variants excludes soft-deleted ones, so a deleted variant is a 404 here.
     const variantExists = product.variants.some(v => v.id === variantId);
     if (!variantExists) {
-      throw new NotFoundException('Variant not found');
+      throw variantNotFound();
     }
     try {
       const variant = await this.vendorsRepository.updateProductVariant(variantId, updateVariantDto);
@@ -303,7 +309,7 @@ export class VendorsService {
       return variant;
     } catch (error: any) {
       if (error.code === 'P2002' && error.meta?.target?.includes('sku')) {
-        throw new ConflictException('SKU must be unique');
+        throw skuTaken();
       }
       throw error;
     }
@@ -313,7 +319,7 @@ export class VendorsService {
     const product = await this.getMyProduct(ownerId, productId);
     const variantExists = product.variants.some(v => v.id === variantId);
     if (!variantExists) {
-      throw new NotFoundException('Variant not found');
+      throw variantNotFound();
     }
     const variant = await this.vendorsRepository.deleteProductVariant(variantId);
     await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });

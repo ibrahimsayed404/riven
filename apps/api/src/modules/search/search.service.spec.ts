@@ -209,7 +209,7 @@ describe('SearchService', () => {
     it('combines category/vendorType with an explicit radius', async () => {
       await service.searchVendors({
         q: 'x',
-        category: 'fashion',
+        category: 'FASHION',
         vendorType: 'BOTH',
         lat: 30,
         lng: 31,
@@ -217,7 +217,7 @@ describe('SearchService', () => {
       } as SearchVendorsQueryDto);
 
       expect(lastSearchParams().filter).toBe(
-        'category = "fashion" AND vendorType = BOTH AND _geoRadius(30, 31, 2500)',
+        'category = "FASHION" AND vendorType = BOTH AND _geoRadius(30, 31, 2500)',
       );
     });
 

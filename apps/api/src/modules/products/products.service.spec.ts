@@ -47,10 +47,10 @@ describe('ProductsService', () => {
   });
 
   describe('listProducts', () => {
-    it('should call repository with default pagination', async () => {
+    it('should call repository with default pagination and return { data, meta }', async () => {
       productsRepository.findManyPaginated.mockResolvedValue({ data: [], total: 0 });
 
-      await service.listProducts({});
+      const result = await service.listProducts({});
 
       expect(productsRepository.findManyPaginated).toHaveBeenCalledWith({
         page: 1,
@@ -59,6 +59,7 @@ describe('ProductsService', () => {
         vendorId: undefined,
         search: undefined,
       });
+      expect(result).toEqual({ data: [], meta: { total: 0, page: 1, limit: 20, totalPages: 0 } });
     });
   });
 
