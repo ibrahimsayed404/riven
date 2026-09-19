@@ -54,6 +54,28 @@ With `trust proxy` off, `req.ips` is always empty and `req.ip` is the **socket**
 
 **The fix:** enable proxy trust to exactly the depth of the real deployment — `app.getHttpAdapter().getInstance().set('trust proxy', <n hops or the proxy CIDR>)` in `configureApp`, driven by a config value rather than hardcoded `true`. `trust proxy = true` blindly trusts a client-supplied `X-Forwarded-For` and lets an attacker forge a fresh key per request, which is the opposite failure; the hop count or CIDR form is the safe one. No change to the guard is needed once `req.ips` is populated.
 
+## 2b. Added after the first fix session — N-01
+
+### N-01 — The rate limiter keyed every request by IP, because its `user:` branch could never run
+
+| | |
+|---|---|
+| **Status** | **Fixed** `e646c12` |
+| **Files** | `apps/api/src/common/guards/user-throttler.guard.ts:15-19` (before the fix) · `apps/api/src/modules/auth/auth.module.ts:33` |
+| **Found** | 2026-09-19, while verifying P0-01 — not part of the original audit |
+
+`UserThrottlerGuard` is registered as `APP_GUARD` (`app.module.ts:74`), while `JwtAuthGuard` is applied at controller or handler level everywhere. Nest assembles guards as `[...global, ...class, ...method]` (`@nestjs/core/helpers/context-creator.js:11-15`) and runs them in that order (`guards/guards-consumer.js:14`), so **the throttler always ran before authentication** and `req.user` was undefined every time `getTracker` was called. Combined with the dead `req.ips` branch (P2-10), both non-IP branches were unreachable and every limit on every route was per-IP.
+
+This contradicted what three code comments and the previous fix-sweep report (ROBUST-01) claimed was fixed behaviour.
+
+**What was actually broken in production terms:** the `@Throttle({ limit: 1, ttl: 60_000 })` on `PATCH /users/me/location` and `PATCH /vendors/me/location` applied per IP, so two users behind one NAT — or a carrier-grade NAT, which is normal on Egyptian mobile networks — blocked each other. And because the throttler runs before authentication, an **unauthenticated** caller could spend that bucket: the request is counted, then rejected 401. Under P0-01 (a proxy in front), both collapse further to one location update per minute platform-wide.
+
+**Fix:** the guard resolves the caller from the bearer token itself, verifying the signature rather than decoding it — an unverified `sub` would let anyone mint a fresh bucket per request with a forged token, which is a worse failure than the one being fixed. A missing, malformed, forged or expired token falls back to the IP tracker. No authentication or authorization decision moved; `JwtAuthGuard` still owns that. `AuthModule` exports `JwtModule` so the guard declared in `AppModule` can resolve the already-configured `JwtService`.
+
+**Verification:** `user-throttler.guard.spec.ts` (6 cases) pins the behaviour, including that a forged or expired token does *not* get its own bucket. The spec was checked against the old tracker by reverting the single line — 2 of 6 fail — so it genuinely covers the regression. `app.smoke.spec.ts` boots the real `AppModule` and passes, which is what proves the DI wiring.
+
+**Still open around it:** P0-01 (client IP derivation) and P1-01 (per-process storage) are unchanged; N-01 shares a root cause with P0-01 and the two should be reasoned about together.
+
 ## 3. P1 findings
 
 | ID | Finding | Location | Status |
@@ -211,7 +233,7 @@ The primary match (signed `order.id` → `paymobOrderId`) is correct. The fallba
 | P2-07 | `getMyProducts` carries TS default args the controller already supplies, plus stray indentation | `vendors.service.ts:213` | **Fixed** `d0c1955` |
 | P2-08 | Four services rebuild the `meta` object inline instead of calling `pageMeta` | `vendors.service.ts:113-121` · `products.service.ts:49-57` · `users.service.ts:133-141` · `audit.service.ts:35-38` | Pending |
 | P2-09 | `dto.gridConfig as any` twice, discarding the validated type | `admin-booths.controller.ts:21,31` | **Fixed** `e4d7ba2` |
-| P2-10 | `req.ips` branch is unreachable while `trust proxy` is off (resolved by P0-01) | `user-throttler.guard.ts:17` | Pending |
+| P2-10 | `req.ips` branch is unreachable while `trust proxy` is off (resolved by P0-01) | `user-throttler.guard.ts:17` | Pending (second dead branch fixed by N-01 `e646c12`) |
 | P2-11 | `boothListingId` validated as `@IsString()` where every other id is `@IsUUID()` | `assign-booth.dto.ts:4-5` | **Fixed** `adcd8c2` |
 | P2-12 | `UpdateBoothLayoutDto` duplicates `CreateBoothLayoutDto` field for field | `update-booth-layout.dto.ts:1-9` | **Fixed** `55f5d8d` |
 | P2-13 | Layout lives at two unrelated paths: `bazaars/:id/layout` (public) and `admin/bazaars/:id/layout` | `public-booths.controller.ts:4` · `admin-booths.controller.ts:13,19` | Pending |
@@ -303,3 +325,16 @@ One fix broke the build mid-session and was corrected before commit: removing th
 2. **The e2e suite has still not run here** — no Postgres/PostGIS on this machine, so `test:e2e` and `prisma migrate deploy` remain unexercised, exactly as the previous report recorded. CI is where P1-02's contract change gets its first real HTTP exercise; two e2e specs (`booths.e2e.spec.ts`, `social.e2e.spec.ts`) touch the routes I changed.
 3. **P1-02 changed request validation on three routes.** Out-of-range `?page`/`?limit` and unknown `?status` values are now 400s. If any dashboard currently sends `?limit=0` or a lowercase status, it will start failing — worth a grep of the front-end before merging.
 4. **`.env` was created locally from `.env.example`** so the HTTP smoke test could boot; it is gitignored and not part of the branch. A repo-local `git config user.name/user.email` was also set, since this machine had no git identity.
+
+## 8. Fix session addendum — N-01
+
+`e646c12` — `fix(N-01): key rate limits by user again, not by IP`. Three files: the guard, its new spec, and `auth.module.ts` (one line, exporting `JwtModule`).
+
+Checks: typecheck exit 0 · lint **0 errors** (123 warnings, unchanged) · **29 suites / 290 tests passing** (up from 28/284 — the six new guard cases). `app.smoke.spec.ts` boots the real `AppModule` and still passes, which is what verifies the dependency-injection change.
+
+This was found during the reviewer-facing investigation of P0-01, not during the original audit pass. It is worth noting *why* the original audit missed it: the guard reads `req.user?.id`, which looks correct in isolation, and the bug lives in Nest's guard **ordering** — visible only by reading `@nestjs/core`'s context creator, not the application code. No test covered the claimed per-user behaviour, so nothing failed.
+
+Two things for the reviewer:
+
+1. **P0-01 is still open and still needs the proxy topology.** N-01 fixed *who* gets a bucket; P0-01 is about whether the IP fallback identifies anything real. Authenticated traffic is now keyed correctly regardless of proxy configuration, which meaningfully reduces P0-01's blast radius — but `POST /auth/login` is unauthenticated by definition, so the login-lockout scenario is untouched.
+2. **The per-user limits are now real for the first time.** `PATCH /users/me/location` genuinely enforces one update per minute per user. If any client polls location more often than that and was previously getting away with it on a shared IP bucket, it will now see 429s. Worth checking the mobile app's location cadence before this reaches production.
