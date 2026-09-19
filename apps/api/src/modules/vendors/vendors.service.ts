@@ -210,7 +210,7 @@ export class VendorsService {
 
   // --- Product Methods ---
 
-  async getMyProducts(ownerId: string, page: number = 1, limit: number = 10) {
+async getMyProducts(ownerId: string, page: number = 1, limit: number = 20) {
     const vendor = await this.vendorsRepository.findByOwnerId(ownerId);
     if (!vendor) {
       throw vendorProfileNotFound();
