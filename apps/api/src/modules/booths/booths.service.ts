@@ -120,9 +120,7 @@ export class BoothsService {
       throw new BadRequestException({ code: 'APPLICATION_NOT_ACCEPTED', message: 'Application is not accepted.' });
     }
 
-    // Need the layout to verify bazaarId
-    // Actually we can get bazaarId from the layout, but the Booth doesn't have it directly.
-    // Let's get the layout.
+    // The booth knows only its layout; the layout is what ties it to a bazaar.
     const layout = await this.boothsRepository.findLayoutByBazaarId(application.bazaarId);
     if (!layout || layout.id !== booth.layoutId) {
       throw new BadRequestException({
