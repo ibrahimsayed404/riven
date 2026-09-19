@@ -233,7 +233,7 @@ The primary match (signed `order.id` → `paymobOrderId`) is correct. The fallba
 | P2-07 | `getMyProducts` carries TS default args the controller already supplies, plus stray indentation | `vendors.service.ts:213` | **Fixed** `d0c1955` |
 | P2-08 | Four services rebuild the `meta` object inline instead of calling `pageMeta` | `vendors.service.ts:113-121` · `products.service.ts:49-57` · `users.service.ts:133-141` · `audit.service.ts:35-38` | Pending |
 | P2-09 | `dto.gridConfig as any` twice, discarding the validated type | `admin-booths.controller.ts:21,31` | **Fixed** `e4d7ba2` |
-| P2-10 | `req.ips` branch is unreachable while `trust proxy` is off (resolved by P0-01) | `user-throttler.guard.ts:17` | Pending (second dead branch fixed by N-01 `e646c12`) |
+| P2-10 | Both non-IP branches of `getTracker` were unreachable — `req.user` (guard order) and `req.ips` (trust proxy) | `user-throttler.guard.ts:17` | **Fixed** by N-01 `e646c12` + P0-01 `3a7ec6b` |
 | P2-11 | `boothListingId` validated as `@IsString()` where every other id is `@IsUUID()` | `assign-booth.dto.ts:4-5` | **Fixed** `adcd8c2` |
 | P2-12 | `UpdateBoothLayoutDto` duplicates `CreateBoothLayoutDto` field for field | `update-booth-layout.dto.ts:1-9` | **Fixed** `55f5d8d` |
 | P2-13 | Layout lives at two unrelated paths: `bazaars/:id/layout` (public) and `admin/bazaars/:id/layout` | `public-booths.controller.ts:4` · `admin-booths.controller.ts:13,19` | Pending |
@@ -315,7 +315,7 @@ One fix broke the build mid-session and was corrected before commit: removing th
 | P1-09 | Product decision: checkout TTL versus Paymob intention lifetime, plus whether `orphan` / `double_payment` log outcomes should alert. **For Ibrahim.** |
 | P1-10 | Blocked on a real Paymob sandbox payload; nothing to verify against locally. |
 | P2-08 | Four files — over the three-file limit for a single fix. |
-| P2-10 | Resolves itself once P0-01 lands. |
+| P2-10 | Both non-IP branches of `getTracker` were unreachable — `req.user` (guard order) and `req.ips` (trust proxy) | `user-throttler.guard.ts:17` | **Fixed** by N-01 `e646c12` + P0-01 `3a7ec6b` |
 | P2-13 | Would move a route path. |
 | P2-14, P2-15 | Environment drift and an index migration. |
 
