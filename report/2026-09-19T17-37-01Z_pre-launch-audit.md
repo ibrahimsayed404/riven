@@ -308,14 +308,14 @@ One fix broke the build mid-session and was corrected before commit: removing th
 
 | ID | Why it is still open |
 |---|---|
-| **P0-01** | Needs the real production topology — how many proxy hops, or which CIDR to trust. `trust proxy = true` is worse than the bug: it lets an attacker forge a fresh rate-limit key per request with a spoofed `X-Forwarded-For`. **Blocked on an answer, not on work.** |
+| **P0-01** | Code fixed (`3a7ec6b`): `TRUST_PROXY` now drives it, defaulting to today's behaviour. **The value itself is still unset** — until infrastructure sets it in the production environment, the defect is live in production. A deploy-time task, not a code task. |
 | P1-01 | Redis-backed throttler storage is a new dependency. |
 | P1-07 | Either a `pg_trgm` migration or re-pointing the endpoint at Meilisearch — schema or behaviour change. |
 | P1-08 | Capping upload size changes the upload contract the clients use. |
 | P1-09 | Product decision: checkout TTL versus Paymob intention lifetime, plus whether `orphan` / `double_payment` log outcomes should alert. **For Ibrahim.** |
 | P1-10 | Blocked on a real Paymob sandbox payload; nothing to verify against locally. |
-| P2-08 | Four files — over the three-file limit for a single fix. |
-| P2-10 | Both non-IP branches of `getTracker` were unreachable — `req.user` (guard order) and `req.ips` (trust proxy) | `user-throttler.guard.ts:17` | **Fixed** by N-01 `e646c12` + P0-01 `3a7ec6b` |
+| P2-08 | **Five** files, not the four the P2 table says — over the three-file limit for a single fix. |
+| P2-10 | Closed: N-01 `e646c12` fixed the `req.user` branch, P0-01 `3a7ec6b` made the `req.ips` branch reachable. |
 | P2-13 | Would move a route path. |
 | P2-14, P2-15 | Environment drift and an index migration. |
 
