@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Organizer } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 
@@ -55,14 +55,14 @@ export class OrganizersRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   findByOwnerId(ownerId: string): Promise<OrganizerProfile | null> {
-    return this.prisma.organizer.findUnique({ 
+    return this.prisma.organizer.findUnique({
       where: { ownerId },
       select: organizerProfileSelect,
     });
   }
 
   findById(id: string): Promise<OrganizerProfile | null> {
-    return this.prisma.organizer.findUnique({ 
+    return this.prisma.organizer.findUnique({
       where: { id },
       select: organizerProfileSelect,
     });
@@ -74,6 +74,14 @@ export class OrganizersRepository {
       data,
       select: organizerProfileSelect,
     });
+  }
+
+  /** Soft-deletes the organizer owned by this user, if any. */
+  async softDeleteByOwner(ownerId: string): Promise<string | null> {
+    const organizer = await this.prisma.organizer.findFirst({ where: { ownerId, deletedAt: null }, select: { id: true } });
+    if (!organizer) return null;
+    await this.prisma.organizer.update({ where: { id: organizer.id }, data: { deletedAt: new Date() } });
+    return organizer.id;
   }
 
   // --- Admin moderation ---

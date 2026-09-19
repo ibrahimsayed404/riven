@@ -1,11 +1,14 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { ApplicationStatus, BazaarStatus, Bazaar, Prisma, ScheduleType } from '@prisma/client';
+import { ApplicationStatus, BazaarStatus, Prisma, ScheduleType } from '@prisma/client';
 
 import { BazaarsRepository, BazaarWithLocation, BazaarPublicDetail, BazaarWithDistance, IdPage } from './bazaars.repository';
 import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { BazaarSearchDocument, toUnixSeconds } from '../../infra/search/search-documents';
+import { DomainEvents } from '../../common/events/domain-events.service';
+import { BazaarPublishedEvent } from './events/bazaar-published.event';
+import { BoothListingAcceptedEvent } from './events/booth-listing-accepted.event';
 
 @Injectable()
 export class BazaarsService {
@@ -14,6 +17,7 @@ export class BazaarsService {
     private readonly organizersService: OrganizersService,
     private readonly vendorsService: VendorsService,
     private readonly searchIndexQueue: SearchIndexQueue,
+    private readonly domainEvents: DomainEvents,
   ) {}
 
   async createBazaar(
@@ -21,13 +25,13 @@ export class BazaarsService {
     data: { name: string; description?: string; coverMedia?: string[]; lat: number; lng: number; scheduleType: ScheduleType; recurrenceRule?: string; startDate: string | Date; endDate?: string | Date; },
   ): Promise<BazaarWithLocation> {
     const organizer = await this.organizersService.getOrganizerByOwnerId(ownerId);
-    
+
     if (!organizer.verified) {
-      throw new ForbiddenException('Organizer must be verified to create bazaars.');
+      throw new ForbiddenException({ code: 'ORGANIZER_NOT_VERIFIED', message: 'Organizer must be verified to create bazaars.' });
     }
 
     if (data.scheduleType === ScheduleType.RECURRING && !data.recurrenceRule) {
-      throw new BadRequestException('recurrenceRule is required when scheduleType is RECURRING');
+      throw new BadRequestException({ code: 'RECURRENCE_RULE_REQUIRED', message: 'recurrenceRule is required when scheduleType is RECURRING' });
     }
 
     return this.bazaarsRepository.create({
@@ -47,7 +51,7 @@ export class BazaarsService {
     const bazaar = await this.bazaarsRepository.findById(id);
 
     if (!bazaar || bazaar.organizerId !== organizer.id) {
-      throw new NotFoundException('Bazaar not found.');
+      throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' });
     }
 
     return bazaar;
@@ -62,7 +66,7 @@ export class BazaarsService {
 
     if (data.scheduleType && data.scheduleType !== bazaar.scheduleType) {
       if (data.scheduleType === ScheduleType.RECURRING && !data.recurrenceRule && !bazaar.recurrenceRule) {
-        throw new BadRequestException('recurrenceRule is required when scheduleType is RECURRING');
+        throw new BadRequestException({ code: 'RECURRENCE_RULE_REQUIRED', message: 'recurrenceRule is required when scheduleType is RECURRING' });
       }
     }
 
@@ -75,11 +79,21 @@ export class BazaarsService {
     const bazaar = await this.getMyBazaarById(ownerId, id);
 
     if (bazaar.status !== BazaarStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT bazaars can be published.');
+      throw new BadRequestException({ code: 'BAZAAR_NOT_DRAFT', message: 'Only DRAFT bazaars can be published.' });
     }
 
     const published = await this.bazaarsRepository.updateStatus(id, BazaarStatus.PUBLISHED);
     await this.searchIndexQueue.enqueue({ type: 'BAZAAR', id });
+    // After the commit (fix.js ARCH-04): notifications' BAZAAR_NEARBY trigger.
+    this.domainEvents.emit(
+      new BazaarPublishedEvent(
+        published.id,
+        published.organizerId,
+        published.name,
+        published.location,
+        published.startDate,
+      ),
+    );
     return published;
   }
 
@@ -87,7 +101,7 @@ export class BazaarsService {
     const bazaar = await this.getMyBazaarById(ownerId, id);
 
     if (bazaar.status === BazaarStatus.COMPLETED) {
-      throw new BadRequestException('Cannot cancel a COMPLETED bazaar.');
+      throw new BadRequestException({ code: 'BAZAAR_COMPLETED', message: 'Cannot cancel a COMPLETED bazaar.' });
     }
 
     const cancelled = await this.bazaarsRepository.updateStatus(id, BazaarStatus.CANCELLED);
@@ -147,10 +161,15 @@ export class BazaarsService {
     return this.bazaarsRepository.findNearby(filters, limit, cursor);
   }
 
+  /** SPEC-03: bazaar ratings are open to any shopper once the bazaar is PUBLISHED or COMPLETED. */
+  isRateable(id: string): Promise<boolean> {
+    return this.bazaarsRepository.isRateable(id);
+  }
+
   async getPublicBazaarById(id: string): Promise<BazaarPublicDetail> {
     const bazaar = await this.bazaarsRepository.findPublicById(id);
     if (!bazaar) {
-      throw new NotFoundException('Bazaar not found.');
+      throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' });
     }
     return bazaar;
   }
@@ -159,21 +178,21 @@ export class BazaarsService {
 
   async applyToBazaar(vendorOwnerId: string, bazaarId: string) {
     const vendor = await this.vendorsService.getMyProfile(vendorOwnerId);
-    
+
     if (!vendor.verified) {
-      throw new ForbiddenException('Only verified vendors can apply to bazaars.');
+      throw new ForbiddenException({ code: 'VENDOR_NOT_VERIFIED', message: 'Only verified vendors can apply to bazaars.' });
     }
 
     const bazaar = await this.bazaarsRepository.findById(bazaarId);
     if (!bazaar || bazaar.status !== BazaarStatus.PUBLISHED || bazaar.deletedAt) {
-      throw new BadRequestException('Bazaar is not available for applications.');
+      throw new BadRequestException({ code: 'BAZAAR_NOT_ACCEPTING_APPLICATIONS', message: 'Bazaar is not available for applications.' });
     }
 
     try {
       return await this.bazaarsRepository.createApplication(bazaarId, vendor.id);
     } catch (error: any) {
       if (error.code === 'P2002') {
-        throw new ConflictException('You have already applied to this bazaar.');
+        throw new ConflictException({ code: 'APPLICATION_EXISTS', message: 'You have already applied to this bazaar.' });
       }
       throw error;
     }
@@ -184,11 +203,11 @@ export class BazaarsService {
     const application = await this.bazaarsRepository.findApplication(bazaarId, vendor.id);
 
     if (!application) {
-      throw new NotFoundException('Application not found.');
+      throw new NotFoundException({ code: 'APPLICATION_NOT_FOUND', message: 'Application not found.' });
     }
 
     if (application.applicationStatus !== ApplicationStatus.PENDING) {
-      throw new BadRequestException('Cannot withdraw application that is no longer PENDING.');
+      throw new BadRequestException({ code: 'APPLICATION_NOT_PENDING', message: 'Cannot withdraw application that is no longer PENDING.' });
     }
 
     return this.bazaarsRepository.deleteApplication(application.id);
@@ -209,18 +228,23 @@ export class BazaarsService {
     const application = await this.bazaarsRepository.findApplicationById(applicationId);
 
     if (!application || application.bazaarId !== bazaar.id) {
-      throw new NotFoundException('Application not found.');
+      throw new NotFoundException({ code: 'APPLICATION_NOT_FOUND', message: 'Application not found.' });
     }
 
     if (application.applicationStatus !== ApplicationStatus.PENDING) {
-      throw new BadRequestException('Can only make decisions on PENDING applications.');
+      throw new BadRequestException({ code: 'APPLICATION_NOT_PENDING', message: 'Can only make decisions on PENDING applications.' });
     }
 
-    return this.bazaarsRepository.updateApplicationStatus(application.id, status);
+    const decided = await this.bazaarsRepository.updateApplicationStatus(application.id, status);
+    if (status === 'ACCEPTED') {
+      // After the commit (fix.js ARCH-04): notifications' FOLLOWED_VENDOR_NEW_BAZAAR trigger.
+      this.domainEvents.emit(new BoothListingAcceptedEvent(decided.id, decided.bazaarId, decided.vendorId));
+    }
+    return decided;
   }
 
   // --- Internal Passthrough for Other Modules ---
-  
+
   async findById(id: string): Promise<BazaarWithLocation | null> {
     return this.bazaarsRepository.findById(id);
   }

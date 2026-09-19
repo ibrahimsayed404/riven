@@ -52,7 +52,7 @@ describe('AdminModule (e2e)', () => {
     // One vendor (pending), one organizer (pending), one shopper — via the real registration routes.
     const vendorRes = await request(app.getHttpServer())
       .post('/auth/register/vendor')
-      .send({ email: 'admin-vendor@example.com', password: 'Password123!', name: 'V', businessName: 'V Shop', category: 'Fashion', vendorType: 'MARKETPLACE' });
+      .send({ email: 'admin-vendor@example.com', password: 'Password123!', name: 'V', businessName: 'V Shop', category: 'FASHION', vendorType: 'MARKETPLACE' });
     expect(vendorRes.status).toBe(201);
     vendorToken = vendorRes.body.accessToken;
     vendorId = (await prisma.vendor.findFirstOrThrow({ where: { owner: { email: 'admin-vendor@example.com' } } })).id;

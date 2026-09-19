@@ -93,7 +93,7 @@ describe('MediaModule (e2e)', () => {
       .set('Authorization', `Bearer ${vendorToken}`)
       .send({ purpose: 'PRODUCT_IMAGE', contentType: 'application/pdf' })
       .expect(400);
-    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(res.body.code).toBe('VALIDATION_ERROR');
   });
 
   it('rejects an unknown purpose', async () => {

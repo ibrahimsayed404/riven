@@ -38,7 +38,7 @@ export class BazaarsRepository {
     // We must use $executeRaw for the initial insert.
     await this.prisma.$executeRaw`
       INSERT INTO "bazaars" (
-        "id", "organizerId", "name", "description", "coverMedia", 
+        "id", "organizerId", "name", "description", "coverMedia",
         "scheduleType", "recurrenceRule", "startDate", "endDate", "status",
         "createdAt", "updatedAt", "location"
       ) VALUES (
@@ -56,7 +56,7 @@ export class BazaarsRepository {
       (Bazaar & { lat: number | null; lng: number | null })[]
     >`
       SELECT
-        "id", "organizerId", "name", "description", "coverMedia", 
+        "id", "organizerId", "name", "description", "coverMedia",
         "scheduleType", "recurrenceRule", "startDate", "endDate", "status",
         "createdAt", "updatedAt", "deletedAt",
         ST_Y("location"::geometry) AS "lat",
@@ -74,6 +74,14 @@ export class BazaarsRepository {
       ...rest,
       location: lat !== null && lng !== null ? { lat, lng } : null,
     };
+  }
+
+  /** A bazaar shoppers may rate: it has been published (running or finished) and is not deleted. */
+  async isRateable(id: string): Promise<boolean> {
+    const count = await this.prisma.bazaar.count({
+      where: { id, deletedAt: null, status: { in: [BazaarStatus.PUBLISHED, BazaarStatus.COMPLETED] } },
+    });
+    return count > 0;
   }
 
   async findPublicById(id: string): Promise<BazaarPublicDetail | null> {
@@ -120,7 +128,7 @@ export class BazaarsRepository {
       (Bazaar & { lat: number | null; lng: number | null })[]
     >`
       SELECT
-        "id", "organizerId", "name", "description", "coverMedia", 
+        "id", "organizerId", "name", "description", "coverMedia",
         "scheduleType", "recurrenceRule", "startDate", "endDate", "status",
         "createdAt", "updatedAt", "deletedAt",
         ST_Y("location"::geometry) AS "lat",
@@ -146,7 +154,7 @@ export class BazaarsRepository {
     filters: { lat?: number; lng?: number; radiusKm?: number; scheduleType?: ScheduleType },
   ): Promise<{ data: BazaarWithLocation[]; total: number }> {
     const offset = (page - 1) * limit;
-    
+
     // Base conditions
     const conditions = [
       Prisma.sql`"status" = 'PUBLISHED'::"BazaarStatus"`,
@@ -174,7 +182,7 @@ export class BazaarsRepository {
       (Bazaar & { lat: number | null; lng: number | null })[]
     >`
       SELECT
-        "id", "organizerId", "name", "description", "coverMedia", 
+        "id", "organizerId", "name", "description", "coverMedia",
         "scheduleType", "recurrenceRule", "startDate", "endDate", "status",
         "createdAt", "updatedAt", "deletedAt",
         ST_Y("location"::geometry) AS "lat",
