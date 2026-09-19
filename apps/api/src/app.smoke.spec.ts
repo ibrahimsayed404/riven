@@ -58,6 +58,15 @@ describe('HTTP stack smoke test (no external services)', () => {
 
   const http = () => request(app.getHttpServer());
 
+  it('applies the configured trust-proxy setting to Express (P0-01)', async () => {
+    // Which client address the rate limiter sees is decided by this setting.
+    // .env.example ships it unset, so the default must stay false: X-Forwarded-For
+    // ignored, req.ip = the socket. Anything else here would mean a header the
+    // client controls had started deciding rate-limit identity.
+    const expressApp = app.getHttpAdapter().getInstance() as { get(setting: string): unknown };
+    expect(expressApp.get('trust proxy')).toBe(false);
+  });
+
   it('serves /health with helmet headers and throttler headers (VULN-01, VULN-02)', async () => {
     const res = await http().get('/health').expect(200);
     expect(res.body).toEqual({ status: 'ok' });
