@@ -112,12 +112,7 @@ export class VendorsService {
     const { data, total } = await this.vendorsRepository.findManyForAdmin(params);
     return {
       data,
-      meta: {
-        total,
-        page: params.page,
-        limit: params.limit,
-        totalPages: Math.ceil(total / params.limit),
-      },
+      meta: pageMeta(total, params.page, params.limit),
     };
   }
 

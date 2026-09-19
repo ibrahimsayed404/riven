@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { AdminAction, AdminTargetType } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
+import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { OrganizersRepository, OrganizerProfile, OrganizerModerationStatus } from './organizers.repository';
 
 @Injectable()
@@ -53,12 +54,7 @@ export class OrganizersService {
     const { data, total } = await this.organizersRepository.findManyForAdmin(params);
     return {
       data,
-      meta: {
-        total,
-        page: params.page,
-        limit: params.limit,
-        totalPages: Math.ceil(total / params.limit),
-      },
+      meta: pageMeta(total, params.page, params.limit),
     };
   }
 
