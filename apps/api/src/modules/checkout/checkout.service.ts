@@ -1,263 +1,174 @@
-import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
-import { PrismaService } from '../../infra/prisma/prisma.service';
-import { ProductsRepository } from '../products/products.repository';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
-export class OutOfStockError extends Error {
-  constructor(public readonly variantId: string) {
-    super(`Variant ${variantId} out of stock`);
-    this.name = 'OutOfStockError';
-  }
-}
-
+import { toCents } from '../../common/money';
 import { PaymobService } from '../../infra/paymob/paymob.service';
+import { CartForCheckout, CheckoutRepository, OrderDraft, OutOfStockError } from './checkout.repository';
+import { orderGroupReference } from './order-payment.handler';
+
+export { OutOfStockError } from './checkout.repository';
+
+const MAX_SERIALIZATION_RETRIES = 3;
 
 @Injectable()
 export class CheckoutService {
+  private readonly logger = new Logger(CheckoutService.name);
+
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly productsRepo: ProductsRepository,
+    private readonly checkoutRepository: CheckoutRepository,
     private readonly paymobService: PaymobService,
   ) {}
 
   async checkoutCart(userId: string) {
     let attempts = 0;
-    const maxAttempts = 3;
 
-    while (attempts < maxAttempts) {
+    while (attempts < MAX_SERIALIZATION_RETRIES) {
       try {
-        return await this.executeCheckoutTransaction(userId);
+        return await this.executeCheckout(userId);
       } catch (error) {
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2034' // Transaction failed due to a write conflict or a deadlock.
-        ) {
+        // Serializable isolation: a concurrent checkout on the same stock rows
+        // aborts one side with P2034; that side simply re-reads and retries.
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
           attempts++;
-          if (attempts >= maxAttempts) {
-            throw new InternalServerErrorException('System is experiencing high load. Please try again later.');
+          if (attempts >= MAX_SERIALIZATION_RETRIES) {
+            throw new InternalServerErrorException({
+              code: 'CHECKOUT_CONTENDED',
+              message: 'System is experiencing high load. Please try again later.',
+            });
           }
-          // Optional: Add small delay here before retrying if needed
           continue;
         }
-        
+
         if (error instanceof OutOfStockError) {
           throw new BadRequestException({
             code: 'CHECKOUT_ITEM_UNAVAILABLE',
             message: 'An item ran out of stock during checkout.',
+            details: { items: [{ variantId: error.variantId, reason: 'OUT_OF_STOCK' }] },
           });
         }
 
-        // If it's another BadRequestException (from pre-transaction validation)
-        if (error instanceof BadRequestException) {
-          throw error;
-        }
-
-        // Re-throw the original error to avoid hiding real bugs
         throw error;
       }
     }
-    
-    throw new InternalServerErrorException('Checkout failed');
+
+    throw new InternalServerErrorException({ code: 'CHECKOUT_FAILED', message: 'Checkout failed.' });
   }
 
-  private async executeCheckoutTransaction(userId: string) {
-    // 1. Fetch cart fresh
-    const cart = await this.prisma.cart.findUnique({
-      where: { userId },
-      include: {
-        items: {
-          include: {
-            product: true,
-            variant: true,
-          },
-        },
-      },
-    });
-
+  private async executeCheckout(userId: string) {
+    const cart = await this.checkoutRepository.findCartWithItems(userId);
     if (!cart || cart.items.length === 0) {
-      throw new BadRequestException('Cart is empty');
+      throw new BadRequestException({ code: 'CART_EMPTY', message: 'Cart is empty.' });
     }
 
-    // 2. Validate items
-    const failedItems: { cartItemId: string; reason: string }[] = [];
+    this.assertAllAvailable(cart, await this.checkoutRepository.findPurchasableProductIds(cart.items.map((i) => i.productId)));
 
-    // Pre-fetch visibility check (we need to know if products are still valid)
-    const visibleProducts = await this.prisma.product.findMany({
-      where: {
-        id: { in: cart.items.map(i => i.productId) },
-        ...this.productsRepo.visibilityFilter,
-      },
-      select: { id: true },
-    });
-    
-    const visibleProductIds = new Set(visibleProducts.map(p => p.id));
-
-    for (const item of cart.items) {
-      if (!visibleProductIds.has(item.productId)) {
-        failedItems.push({ cartItemId: item.id, reason: 'PRODUCT_UNAVAILABLE' });
-        continue;
-      }
-      
-      // Stock check
-      if (item.quantity > item.variant.stockQuantity) {
-        failedItems.push({ cartItemId: item.id, reason: 'OUT_OF_STOCK' });
-      }
-    }
-
-    if (failedItems.length > 0) {
-      throw new BadRequestException({
-        code: 'CHECKOUT_ITEM_UNAVAILABLE',
-        message: 'Some items in your cart are no longer available or out of stock.',
-        items: failedItems,
-      });
-    }
-
-    // 3. Group by vendorId
-    const itemsByVendor = new Map<string, typeof cart.items>();
-    for (const item of cart.items) {
-      const vendorId = item.product.vendorId;
-      if (!itemsByVendor.has(vendorId)) {
-        itemsByVendor.set(vendorId, []);
-      }
-      itemsByVendor.get(vendorId)!.push(item);
-    }
-
-    // Prepare operations for the transaction
-    const result = await this.prisma.$transaction(async (tx) => {
-      // 4. Create OrderGroup
-      const orderGroup = await tx.orderGroup.create({
-        data: {
-          userId,
-        },
-      });
-
-      // 5. Create Orders per vendor
-      const createdOrders = [];
-      for (const [vendorId, items] of itemsByVendor.entries()) {
-        const subtotal = items.reduce((sum, item) => {
-          const price = Number(item.variant.priceOverride ?? item.product.basePrice);
-          return sum + (price * item.quantity);
-        }, 0);
-
-        const order = await tx.order.create({
-          data: {
-            orderGroupId: orderGroup.id,
-            vendorId,
-            userId,
-            status: 'PENDING',
-            subtotal,
-            items: {
-              create: items.map(item => ({
-                productId: item.productId,
-                variantId: item.variantId,
-                titleSnapshot: item.product.title,
-                priceSnapshot: item.variant.priceOverride ?? item.product.basePrice,
-                quantity: item.quantity,
-              })),
-            },
-          },
-          include: {
-            items: true,
-          },
-        });
-        createdOrders.push(order);
-      }
-
-      // 6. Decrement stock
-      for (const item of cart.items) {
-        const updatedVariant = await tx.productVariant.update({
-          where: { id: item.variantId },
-          data: {
-            stockQuantity: {
-              decrement: item.quantity,
-            },
-          },
-          select: { stockQuantity: true },
-        });
-
-        // Concurrency safety check: if stock goes negative, throw to rollback
-        if (updatedVariant.stockQuantity < 0) {
-          throw new OutOfStockError(item.variantId);
-        }
-      }
-
-      // 7. Clear cart
-      await tx.cartItem.deleteMany({
-        where: { cartId: cart.id },
-      });
-
-      return {
-        ...orderGroup,
-        orders: createdOrders,
-      };
-    }, {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    const group = await this.checkoutRepository.createOrderGroup({
+      userId,
+      cartId: cart.id,
+      orders: this.draftOrdersByVendor(cart),
     });
 
-    // 8. Attempt Paymob intention creation
-    const totalAmount = result.orders.reduce((sum, order) => sum + Number(order.subtotal), 0);
-    
+    const totalCents = group.orders.reduce((sum, order) => sum + toCents(order.subtotal), 0);
+
     try {
-      const paymobResult = await this.paymobService.createIntention(totalAmount, result.id);
-      
-      // Update OrderGroup with intention ID
-      await this.prisma.orderGroup.update({
-        where: { id: result.id },
-        data: { paymobIntentId: paymobResult.intentId.toString() },
+      const intent = await this.paymobService.createIntention(totalCents, orderGroupReference(group.id));
+      await this.checkoutRepository.setPaymobIntent(group.id, {
+        intentId: intent.intentId,
+        paymobOrderId: intent.paymobOrderId,
       });
-
       return {
-        ...result,
-        paymobIntentId: paymobResult.intentId.toString(),
-        clientUrl: paymobResult.clientUrl,
+        ...group,
+        paymobIntentId: intent.intentId,
+        clientUrl: intent.clientUrl,
         paymentSetupFailed: false,
       };
     } catch (error) {
-      console.error('Paymob intent creation failed after successful checkout:', error);
-      // Return order group but signal that payment setup failed
-      return {
-        ...result,
-        paymentSetupFailed: true,
-      };
+      // Orders exist and stock is reserved; the client can retry payment setup.
+      this.logger.error(
+        `Paymob intent creation failed for order group ${group.id}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      return { ...group, paymentSetupFailed: true };
     }
   }
 
   async retryPaymentSetup(userId: string, orderGroupId: string) {
-    const orderGroup = await this.prisma.orderGroup.findUnique({
-      where: { id: orderGroupId },
-      include: { orders: true },
+    const group = await this.checkoutRepository.findGroupWithOrders(orderGroupId);
+    if (!group) {
+      throw new NotFoundException({ code: 'ORDER_GROUP_NOT_FOUND', message: 'Order group not found.' });
+    }
+    if (group.userId !== userId) {
+      throw new ForbiddenException({ code: 'ORDER_GROUP_FORBIDDEN', message: 'Order group does not belong to you.' });
+    }
+    if (group.paymobIntentId) {
+      throw new BadRequestException({
+        code: 'PAYMENT_ALREADY_SET_UP',
+        message: 'A payment intention already exists for this order group.',
+      });
+    }
+    if (!group.orders.every((order) => order.status === 'PENDING')) {
+      throw new BadRequestException({
+        code: 'ORDER_GROUP_NOT_PENDING',
+        message: 'Cannot set up payment for orders that are no longer pending.',
+      });
+    }
+
+    const totalCents = group.orders.reduce((sum, order) => sum + toCents(order.subtotal), 0);
+    const intent = await this.paymobService.createIntention(totalCents, orderGroupReference(group.id));
+    await this.checkoutRepository.setPaymobIntent(group.id, {
+      intentId: intent.intentId,
+      paymobOrderId: intent.paymobOrderId,
     });
 
-    if (!orderGroup) {
-      throw new BadRequestException('Order group not found');
+    return { paymobIntentId: intent.intentId, clientUrl: intent.clientUrl };
+  }
+
+  /** Every line must still be purchasable and in stock; report all failures at once. */
+  private assertAllAvailable(cart: CartForCheckout, purchasable: Set<string>): void {
+    const failed: { cartItemId: string; reason: 'PRODUCT_UNAVAILABLE' | 'OUT_OF_STOCK' }[] = [];
+
+    for (const item of cart.items) {
+      if (!purchasable.has(item.productId) || item.variant.deletedAt) {
+        failed.push({ cartItemId: item.id, reason: 'PRODUCT_UNAVAILABLE' });
+      } else if (item.quantity > item.variant.stockQuantity) {
+        failed.push({ cartItemId: item.id, reason: 'OUT_OF_STOCK' });
+      }
     }
 
-    if (orderGroup.userId !== userId) {
-      throw new BadRequestException('Order group does not belong to this user');
+    if (failed.length > 0) {
+      throw new BadRequestException({
+        code: 'CHECKOUT_ITEM_UNAVAILABLE',
+        message: 'Some items in your cart are no longer available or out of stock.',
+        details: { items: failed },
+      });
+    }
+  }
+
+  /** One order per vendor; all money in integer piastres (fix.js PAY-04). */
+  private draftOrdersByVendor(cart: CartForCheckout): OrderDraft[] {
+    const byVendor = new Map<string, OrderDraft>();
+
+    for (const item of cart.items) {
+      const priceCents = toCents(item.variant.priceOverride ?? item.product.basePrice);
+      const draft = byVendor.get(item.product.vendorId) ?? { vendorId: item.product.vendorId, subtotalCents: 0, items: [] };
+      draft.items.push({
+        productId: item.productId,
+        variantId: item.variantId,
+        titleSnapshot: item.product.title,
+        priceSnapshotCents: priceCents,
+        quantity: item.quantity,
+      });
+      draft.subtotalCents += priceCents * item.quantity;
+      byVendor.set(item.product.vendorId, draft);
     }
 
-    if (orderGroup.paymobIntentId) {
-      throw new BadRequestException('Payment intention already exists for this order group');
-    }
-
-    // Ensure orders are still PENDING
-    const allPending = orderGroup.orders.every(o => o.status === 'PENDING');
-    if (!allPending) {
-      throw new BadRequestException('Cannot retry payment for orders that are not PENDING');
-    }
-
-    const totalAmount = orderGroup.orders.reduce((sum, order) => sum + Number(order.subtotal), 0);
-    
-    const paymobResult = await this.paymobService.createIntention(totalAmount, orderGroup.id);
-    
-    await this.prisma.orderGroup.update({
-      where: { id: orderGroup.id },
-      data: { paymobIntentId: paymobResult.intentId.toString() },
-    });
-
-    return {
-      paymobIntentId: paymobResult.intentId.toString(),
-      clientUrl: paymobResult.clientUrl,
-    };
+    return [...byVendor.values()];
   }
 }

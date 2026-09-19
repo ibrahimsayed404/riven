@@ -1,12 +1,14 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Query, UseGuards } from '@nestjs/common';
+import { Role } from '@prisma/client';
+
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
-import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import { OrdersService } from './orders.service';
-import { OrderStatus, Role } from '@prisma/client';
 import { VendorsService } from '../vendors/vendors.service';
+import { ListOrdersQueryDto } from './dto/list-orders-query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { OrdersService } from './orders.service';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.VENDOR)
@@ -23,23 +25,13 @@ export class VendorOrdersController {
   }
 
   @Get()
-  async getOrders(
-    @CurrentUser('id') userId: string,
-    @Query('page') pageString?: string,
-    @Query('limit') limitString?: string,
-    @Query('status') status?: OrderStatus,
-  ) {
+  async getOrders(@CurrentUser('id') userId: string, @Query() query: ListOrdersQueryDto) {
     const vendorId = await this.getVendorId(userId);
-    const page = pageString ? parseInt(pageString, 10) : 1;
-    const limit = limitString ? parseInt(limitString, 10) : 10;
-    return this.ordersService.getVendorOrders(vendorId, page, limit, status);
+    return this.ordersService.getVendorOrders(vendorId, query.page ?? 1, query.limit ?? 20, query.status);
   }
 
   @Get(':id')
-  async getOrder(
-    @CurrentUser('id') userId: string,
-    @Param('id', ParseUUIDPipe) id: string,
-  ) {
+  async getOrder(@CurrentUser('id') userId: string, @Param('id', ParseUUIDPipe) id: string) {
     const vendorId = await this.getVendorId(userId);
     return this.ordersService.getVendorOrder(vendorId, id);
   }

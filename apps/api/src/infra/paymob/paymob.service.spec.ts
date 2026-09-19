@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PaymobService } from './paymob.service';
 import { ConfigService } from '@nestjs/config';
@@ -26,27 +27,26 @@ describe('PaymobService', () => {
   });
 
   describe('createIntention', () => {
-    it('should format amount to cents/piastres properly', async () => {
+    it('sends integer piastres as-is and captures the Paymob order id (PAY-04, PAY-02)', async () => {
       // We spy on global fetch
       const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
         ok: true,
-        json: async () => ({ id: 999, client_url: 'https://paymob.com/checkout' }),
+        json: async () => ({ id: 999, intention_order_id: 424242, client_url: 'https://paymob.com/checkout' }),
       } as any);
 
-      const result = await service.createIntention(10.50, 'order-123');
-      
-      expect(result.intentId).toBe(999);
-      expect(result.clientUrl).toBe('https://paymob.com/checkout');
-      
+      const result = await service.createIntention(1050, 'order-123');
+
+      expect(result).toEqual({ intentId: '999', paymobOrderId: '424242', clientUrl: 'https://paymob.com/checkout' });
+
       // Verify fetch arguments
       const fetchArgs = fetchSpy.mock.calls[0];
       const requestBody = JSON.parse(fetchArgs[1]?.body as string);
-      
-      // 10.50 EGP * 100 = 1050
+
+      // Callers already converted to piastres; nothing is multiplied here.
       expect(requestBody.amount).toBe(1050);
       expect(requestBody.special_reference).toBe('order-123');
       expect(requestBody.payment_methods).toEqual([12345]);
-      
+
       fetchSpy.mockRestore();
     });
 
@@ -57,9 +57,17 @@ describe('PaymobService', () => {
         json: async () => ({ message: 'Invalid integration ID' }),
       } as any);
 
-      await expect(service.createIntention(10.50, 'order-123'))
+      await expect(service.createIntention(1050, 'order-123'))
         .rejects.toThrow(/Paymob Intention API failed/);
 
+      fetchSpy.mockRestore();
+    });
+
+    it('refuses a non-integer or non-positive amount before calling Paymob', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+      await expect(service.createIntention(10.5, 'order-123')).rejects.toMatchObject({ response: { code: 'INVALID_AMOUNT' } });
+      await expect(service.createIntention(0, 'order-123')).rejects.toMatchObject({ response: { code: 'INVALID_AMOUNT' } });
+      expect(fetchSpy).not.toHaveBeenCalled();
       fetchSpy.mockRestore();
     });
   });
@@ -100,7 +108,6 @@ describe('PaymobService', () => {
       // hashed with 'test-hmac-secret'
 
       const concatenated = '10002023-01-01T00:00:00.000000EGPfalsefalse12312345truefalsefalsefalsetruefalse456789false1234MasterCardcardtrue';
-      const crypto = require('crypto');
       const validHash = crypto.createHmac('sha512', 'test-hmac-secret').update(concatenated).digest('hex');
 
       const isValid = service.verifyWebhookHmac(payload, validHash);
