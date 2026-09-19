@@ -10,6 +10,8 @@ import { OrganizersService } from './organizers.service';
 import { CreateBazaarDto } from './dto/create-bazaar.dto';
 import { UpdateBazaarDto } from './dto/update-bazaar.dto';
 import { UpdateOrganizerProfileDto } from './dto/update-organizer-profile.dto';
+import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 
 @Controller('organizers/me')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -36,10 +38,9 @@ export class OrganizerBazaarsController {
   @Get('bazaars')
   getBazaars(
     @CurrentUser('id') ownerId: string,
-    @Query('page') page: string = '1',
-    @Query('limit') limit: string = '10',
+    @Query() query: PaginationQueryDto,
   ) {
-    return this.bazaarsService.getMyBazaars(ownerId, parseInt(page, 10), parseInt(limit, 10));
+    return this.bazaarsService.getMyBazaars(ownerId, query.page ?? 1, query.limit ?? 10);
   }
 
   @Post('bazaars')
@@ -89,11 +90,9 @@ export class OrganizerBazaarsController {
   getApplications(
     @CurrentUser('id') ownerId: string,
     @Param('id') bazaarId: string,
-    @Query('page') page: string = '1',
-    @Query('limit') limit: string = '10',
-    @Query('status') status?: ApplicationStatus,
+    @Query() query: ListApplicationsQueryDto,
   ) {
-    return this.bazaarsService.getBazaarApplications(ownerId, bazaarId, parseInt(page, 10), parseInt(limit, 10), status);
+    return this.bazaarsService.getBazaarApplications(ownerId, bazaarId, query.page ?? 1, query.limit ?? 10, query.status);
   }
 
   @Patch('bazaars/:id/applications/:applicationId/accept')
