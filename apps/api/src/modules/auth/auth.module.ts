@@ -30,6 +30,9 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   ],
   controllers: [AuthController],
   providers: [AuthService, AuthRepository, JwtStrategy],
-  exports: [AuthService],
+  // JwtModule is exported so the global UserThrottlerGuard (declared in
+  // AppModule) can resolve JwtService and identify the caller before
+  // JwtAuthGuard runs. Same instance, same secret, same options.
+  exports: [AuthService, JwtModule],
 })
 export class AuthModule {}
