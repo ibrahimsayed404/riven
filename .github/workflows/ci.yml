@@ -38,3 +38,82 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      - name: .env.example matches env validation
+        run: pnpm --filter @riven/api check:env
+
+      - name: Dependency audit (production tree)
+        # fix.js DEPS-01 — fails on any known vulnerability of moderate severity or above.
+        run: pnpm audit --prod --audit-level moderate
+
+  test:
+    # fix.js CI-01: a green check used to prove typecheck only. Unit specs run
+    # first (no services); e2e specs run against throwaway containers so
+    # their deleteMany() cleanup can never touch a real database.
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: riven
+          POSTGRES_PASSWORD: riven
+          POSTGRES_DB: riven_test
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U riven -d riven_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 20
+      meilisearch:
+        image: getmeili/meilisearch:v1.12
+        env:
+          MEILI_MASTER_KEY: riven_test_master_key
+          MEILI_NO_ANALYTICS: 'true'
+        ports: ['7700:7700']
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://riven:riven@localhost:5433/riven_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      MEILISEARCH_HOST: http://localhost:7700
+      MEILISEARCH_API_KEY: riven_test_master_key
+      MEILISEARCH_INDEX_PREFIX: riven_ci_
+      JWT_SECRET: ci-only-secret-that-is-at-least-32-characters-long
+      JWT_ACCESS_TOKEN_TTL: 15m
+      JWT_REFRESH_TOKEN_TTL: 7d
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: riven-media
+      S3_ACCESS_KEY_ID: ci
+      S3_SECRET_ACCESS_KEY: ci-secret
+      S3_PUBLIC_URL: http://localhost:9000/riven-media
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm --filter @riven/api prisma generate
+
+      - name: Unit tests
+        run: pnpm --filter @riven/api test:unit
+
+      - name: Apply migrations to the throwaway database
+        run: pnpm --filter @riven/api prisma migrate deploy
+
+      - name: E2E tests
+        run: pnpm --filter @riven/api test:e2e
