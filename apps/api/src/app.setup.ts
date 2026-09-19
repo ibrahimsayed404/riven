@@ -11,6 +11,15 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 export function configureApp(app: INestApplication): void {
   const configService = app.get(ConfigService);
 
+  // How req.ip is derived. Express defaults to false, which ignores
+  // X-Forwarded-For entirely: behind a proxy every anonymous caller then shares
+  // one rate-limit identity, and eleven login attempts lock the route for
+  // everyone. The value is deployment knowledge, so it comes from config and
+  // env.validation.ts refuses the unsafe spellings of it.
+  const trustProxy = configService.get<false | number | string[]>('TRUST_PROXY') ?? false;
+  const expressApp = app.getHttpAdapter().getInstance() as { set(setting: string, value: unknown): void };
+  expressApp.set('trust proxy', trustProxy);
+
   // Security headers with helmet defaults; the API serves JSON only, so the
   // content-security-policy defaults cost nothing.
   app.use(helmet());
