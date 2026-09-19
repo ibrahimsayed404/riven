@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { BoothsRepository, PublicBooth } from './booths.repository';
+import { GridConfigDto } from './dto/create-booth-layout.dto';
 import { BazaarsService } from '../bazaars/bazaars.service';
-import { Prisma, ApplicationStatus } from '@prisma/client';
+import { ApplicationStatus } from '@prisma/client';
 
 @Injectable()
 export class BoothsService {
@@ -10,14 +11,14 @@ export class BoothsService {
     private readonly bazaarsService: BazaarsService,
   ) {}
 
-  async createLayout(bazaarId: string, gridConfig: Prisma.InputJsonValue) {
+  async createLayout(bazaarId: string, gridConfig: GridConfigDto) {
     const bazaar = await this.bazaarsService.findById(bazaarId);
     if (!bazaar) {
       throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' });
     }
 
     try {
-      return await this.boothsRepository.createLayout(bazaarId, gridConfig);
+      return await this.boothsRepository.createLayout(bazaarId, { ...gridConfig });
     } catch (error: any) {
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('bazaarId')) {
         throw new ConflictException({ code: 'LAYOUT_EXISTS', message: 'Layout already exists for this bazaar.' });
@@ -34,13 +35,13 @@ export class BoothsService {
     return layout;
   }
 
-  async updateLayout(bazaarId: string, gridConfig: Prisma.InputJsonValue) {
+  async updateLayout(bazaarId: string, gridConfig: GridConfigDto) {
     const layout = await this.boothsRepository.findLayoutByBazaarId(bazaarId);
     if (!layout) {
       throw new NotFoundException({ code: 'LAYOUT_NOT_FOUND', message: 'Layout not found.' });
     }
 
-    return this.boothsRepository.updateLayoutGridConfig(bazaarId, gridConfig);
+    return this.boothsRepository.updateLayoutGridConfig(bazaarId, { ...gridConfig });
   }
 
   async createBooth(

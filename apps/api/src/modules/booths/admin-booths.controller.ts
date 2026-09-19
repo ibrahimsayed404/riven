@@ -18,7 +18,7 @@ export class AdminBoothsController {
 
   @Post('bazaars/:bazaarId/layout')
   createLayout(@Param('bazaarId') bazaarId: string, @Body() dto: CreateBoothLayoutDto) {
-    return this.boothsService.createLayout(bazaarId, dto.gridConfig as any);
+    return this.boothsService.createLayout(bazaarId, dto.gridConfig);
   }
 
   @Get('bazaars/:bazaarId/layout')
@@ -28,7 +28,7 @@ export class AdminBoothsController {
 
   @Patch('bazaars/:bazaarId/layout')
   updateLayout(@Param('bazaarId') bazaarId: string, @Body() dto: UpdateBoothLayoutDto) {
-    return this.boothsService.updateLayout(bazaarId, dto.gridConfig as any);
+    return this.boothsService.updateLayout(bazaarId, dto.gridConfig);
   }
 
   @Post('bazaars/:bazaarId/layout/booths')
