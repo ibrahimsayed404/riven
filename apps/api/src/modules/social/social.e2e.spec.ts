@@ -2,7 +2,6 @@ import { BadRequestException, INestApplication, ValidationPipe } from '@nestjs/c
 import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import {
-  ApprovalStatus,
   FavorableType,
   FollowableType,
   OrderStatus,
@@ -24,7 +23,6 @@ describe('SocialModule (e2e)', () => {
   let shopperToken: string;
 
   let otherShopperId: string;
-  let otherShopperToken: string;
 
   let vendorId: string;
   let productId: string;
@@ -132,7 +130,6 @@ describe('SocialModule (e2e)', () => {
       },
     });
     otherShopperId = otherShopper.id;
-    otherShopperToken = await jwtService.signAsync({ sub: otherShopperId, role: Role.SHOPPER });
 
     // 3. Create Vendor User & Vendor
     const vendorUser = await prisma.user.create({
@@ -147,7 +144,7 @@ describe('SocialModule (e2e)', () => {
       data: {
         ownerId: vendorUser.id,
         name: 'Artisan Goods',
-        category: 'Crafts',
+        category: 'HOME_CRAFTS',
         vendorType: VendorType.MARKETPLACE,
       },
     });

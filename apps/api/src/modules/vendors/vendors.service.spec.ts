@@ -30,6 +30,8 @@ describe('VendorsService', () => {
       listPublicIds: jest.fn(),
       findModerationState: jest.fn(),
       findManyForAdmin: jest.fn(),
+      findPublicById: jest.fn(),
+      countPendingForAdmin: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -106,18 +108,34 @@ describe('VendorsService', () => {
   });
 
   describe('updateMyLocation', () => {
-    it('should throw HttpException with 429 when called within cooldown window', async () => {
+    // Rate limiting moved to the route (@Throttle + UserThrottlerGuard); the
+    // service just writes and re-indexes (fix.js ROBUST-01).
+    it('writes the location and enqueues a VENDOR sync', async () => {
       vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', verified: true } as any);
-      
-      // Call once, which succeeds and sets the timestamp
+
       await service.updateMyLocation('owner-1', { lat: 10, lng: 20 });
-      
-      // Call again immediately, should throw
-      await expect(service.updateMyLocation('owner-1', { lat: 10, lng: 20 }))
-        .rejects
-        .toThrow(expect.objectContaining({
-          status: 429
-        }));
+      await service.updateMyLocation('owner-1', { lat: 11, lng: 21 });
+
+      expect(vendorsRepository.updateLocation).toHaveBeenCalledTimes(2);
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'VENDOR', id: 'vendor-1' });
+    });
+  });
+
+  describe('getVendorById (public)', () => {
+    it('404s with VENDOR_NOT_FOUND when the public read returns null (unverified or deleted)', async () => {
+      vendorsRepository.findPublicById.mockResolvedValue(null);
+
+      await expect(service.getVendorById('v-1')).rejects.toMatchObject({ response: { code: 'VENDOR_NOT_FOUND' } });
+    });
+
+    it('returns the public select plus location — no ownerId / subscriptionStatus / rejectionReason', async () => {
+      vendorsRepository.findPublicById.mockResolvedValue({ id: 'v-1', name: 'Shop' } as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue({ lat: 1, lng: 2 });
+
+      const result = await service.getVendorById('v-1');
+
+      expect(result).toEqual({ id: 'v-1', name: 'Shop', location: { lat: 1, lng: 2 } });
+      expect(result).not.toHaveProperty('ownerId');
     });
   });
 
@@ -279,7 +297,7 @@ describe('VendorsService', () => {
     const vendor = {
       id: 'vendor-1',
       name: 'Nour Atelier',
-      category: 'fashion',
+      category: 'FASHION',
       description: 'd',
       brandStory: null,
       logoUrl: null,

@@ -14,7 +14,7 @@ export class OrganizersService {
   async getOrganizerByOwnerId(ownerId: string): Promise<OrganizerProfile> {
     const organizer = await this.organizersRepository.findByOwnerId(ownerId);
     if (!organizer) {
-      throw new NotFoundException('Organizer profile not found.');
+      throw new NotFoundException({ code: 'ORGANIZER_PROFILE_NOT_FOUND', message: 'Organizer profile not found.' });
     }
     return organizer;
   }
@@ -22,7 +22,7 @@ export class OrganizersService {
   async getOrganizerById(id: string): Promise<OrganizerProfile> {
     const organizer = await this.organizersRepository.findById(id);
     if (!organizer) {
-      throw new NotFoundException('Organizer profile not found.');
+      throw new NotFoundException({ code: 'ORGANIZER_PROFILE_NOT_FOUND', message: 'Organizer profile not found.' });
     }
     return organizer;
   }
@@ -30,6 +30,16 @@ export class OrganizersService {
   async updateMyProfile(ownerId: string, data: Prisma.OrganizerUpdateInput): Promise<OrganizerProfile> {
     const organizer = await this.getOrganizerByOwnerId(ownerId);
     return this.organizersRepository.update(organizer.id, data);
+  }
+
+  /**
+   * Called when the owning user account is deleted (fix.js LOGIC-05). Their
+   * PUBLISHED bazaars are left as they are — bazaar visibility never depended
+   * on the organizer row (admin spec Open Item 3), and cancelling live events
+   * with accepted vendors is a product decision, not a side effect.
+   */
+  async softDeleteByOwner(ownerId: string): Promise<void> {
+    await this.organizersRepository.softDeleteByOwner(ownerId);
   }
 
   // --- Admin moderation (specs/admin-module-spec.md §3, §4.2) ---

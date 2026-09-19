@@ -230,7 +230,7 @@ describe('SearchModule (e2e)', () => {
         data: {
           ownerId: verifiedOwner.id,
           name: 'Nour Atelier',
-          category: 'fashion',
+          category: 'FASHION',
           description: 'Linen and cotton',
           verified: true,
           vendorType: VendorType.BOTH,
@@ -251,7 +251,7 @@ describe('SearchModule (e2e)', () => {
     ).id;
     unverifiedVendorId = (
       await prisma.vendor.create({
-        data: { ownerId: unverifiedOwnerId, name: 'Hidden Studio', category: 'fashion', verified: false },
+        data: { ownerId: unverifiedOwnerId, name: 'Hidden Studio', category: 'FASHION', verified: false },
       })
     ).id;
 
@@ -436,17 +436,17 @@ describe('SearchModule (e2e)', () => {
     it('rejects a page beyond the window and radiusKm without coordinates', async () => {
       const page = await get({ page: '51' });
       expect(page.status).toBe(400);
-      expect(page.body.error.code).toBe('SEARCH_QUERY_INVALID');
+      expect(page.body.code).toBe('SEARCH_QUERY_INVALID');
 
       const radius = await get({ radiusKm: '5' });
       expect(radius.status).toBe(400);
-      expect(radius.body.error.code).toBe('SEARCH_QUERY_INVALID');
+      expect(radius.body.code).toBe('SEARCH_QUERY_INVALID');
     });
 
     it('rejects unknown params and a missing q via the global pipe', async () => {
       const unknown = await get({ approvalStatus: 'PENDING' });
       expect(unknown.status).toBe(400);
-      expect(unknown.body.error.code).toBe('VALIDATION_ERROR');
+      expect(unknown.body.code).toBe('VALIDATION_ERROR');
 
       const noQ = await request(app.getHttpServer()).get('/search/products');
       expect(noQ.status).toBe(400);
@@ -531,7 +531,7 @@ describe('SearchModule (e2e)', () => {
 
       const bad = await request(app.getHttpServer()).get('/search').query({ q: 'winter', types: 'events' });
       expect(bad.status).toBe(400);
-      expect(bad.body.error.code).toBe('SEARCH_TYPE_INVALID');
+      expect(bad.body.code).toBe('SEARCH_TYPE_INVALID');
     });
   });
 

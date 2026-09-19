@@ -3,6 +3,7 @@ import { AdminAction, AdminTargetType, ApprovalStatus } from '@prisma/client';
 import { ProductsRepository, IdPage } from './products.repository';
 import { AuditService } from '../audit/audit.service';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
+import { DEFAULT_PAGE_SIZE, pageMeta } from '../../common/dto/pagination-query.dto';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { ProductSearchDocument, toPriceNumber } from '../../infra/search/search-documents';
 
@@ -15,22 +16,23 @@ export class ProductsService {
   ) {}
 
   async listProducts(query: ListProductsQueryDto) {
-    const page = query.page ? parseInt(query.page, 10) : 1;
-    const limit = query.limit ? parseInt(query.limit, 10) : 20;
+    const page = query.page ?? 1;
+    const limit = query.limit ?? DEFAULT_PAGE_SIZE;
 
-    return this.productsRepository.findManyPaginated({
+    const { data, total } = await this.productsRepository.findManyPaginated({
       categoryId: query.categoryId,
       vendorId: query.vendorId,
       search: query.search,
       page,
       limit,
     });
+    return { data, meta: pageMeta(total, page, limit) };
   }
 
   async getProductById(id: string) {
     const product = await this.productsRepository.findById(id);
     if (!product) {
-      throw new NotFoundException('Product not found');
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
     }
     return product;
   }

@@ -1,4 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { Role } from '@prisma/client';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -36,6 +39,8 @@ export class VendorsController {
     return this.vendorsService.updateMyProfile(user.id, updateDto);
   }
 
+  // Once a minute per vendor (UserThrottlerGuard keys by user id) — fix.js ROBUST-01.
+  @Throttle({ default: { limit: 1, ttl: 60_000 } })
   @Patch('me/location')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.VENDOR)
@@ -57,12 +62,8 @@ export class VendorsController {
   @Get('me/products')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.VENDOR)
-  getMyProducts(
-    @CurrentUser() user: AuthenticatedUser,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
-  ) {
-    return this.vendorsService.getMyProducts(user.id, page ? parseInt(page, 10) : 1, limit ? parseInt(limit, 10) : 10);
+  getMyProducts(@CurrentUser() user: AuthenticatedUser, @Query() query: PaginationQueryDto) {
+    return this.vendorsService.getMyProducts(user.id, query.page ?? 1, query.limit ?? 20);
   }
 
   @Post('me/products')

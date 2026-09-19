@@ -1,193 +1,159 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { CheckoutService, OutOfStockError } from './checkout.service';
-import { PrismaService } from '../../infra/prisma/prisma.service';
-import { ProductsRepository } from '../products/products.repository';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PaymobService } from '../../infra/paymob/paymob.service';
+import { CheckoutRepository, OutOfStockError } from './checkout.repository';
+import { CheckoutService } from './checkout.service';
+
+const D = (n: number | string) => new Prisma.Decimal(n);
+
+function cartWith(items: any[]) {
+  return { id: 'cart-1', userId: 'user-1', items } as any;
+}
+
+const line = (over: Partial<any> = {}) => ({
+  id: 'item-1',
+  productId: 'prod-1',
+  variantId: 'var-1',
+  quantity: 2,
+  product: { id: 'prod-1', vendorId: 'v-1', title: 'Shirt', basePrice: D('10.10') },
+  variant: { id: 'var-1', stockQuantity: 5, priceOverride: null, deletedAt: null },
+  ...over,
+});
 
 describe('CheckoutService', () => {
   let service: CheckoutService;
-  let prisma: jest.Mocked<PrismaService>;
-  let productsRepo: jest.Mocked<ProductsRepository>;
-  let paymobService: jest.Mocked<PaymobService>;
+  let repo: jest.Mocked<CheckoutRepository>;
+  let paymob: jest.Mocked<PaymobService>;
 
-  const mockUserId = 'user-1';
-
-  beforeEach(async () => {
-    const mockPrisma = {
-      cart: { findUnique: jest.fn() },
-      product: { findMany: jest.fn() },
-      orderGroup: { findUnique: jest.fn(), update: jest.fn() },
-      $transaction: jest.fn(),
-    };
-
-    const mockProductsRepo = {
-      visibilityFilter: { isActive: true },
-    };
-
-    const mockPaymobService = {
-      createIntention: jest.fn(),
-    };
-
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        CheckoutService,
-        { provide: PrismaService, useValue: mockPrisma },
-        { provide: ProductsRepository, useValue: mockProductsRepo },
-        { provide: PaymobService, useValue: mockPaymobService },
-      ],
-    }).compile();
-
-    service = module.get<CheckoutService>(CheckoutService);
-    prisma = module.get(PrismaService) as any;
-    productsRepo = module.get(ProductsRepository) as any;
-    paymobService = module.get(PaymobService) as any;
+  beforeEach(() => {
+    repo = {
+      findCartWithItems: jest.fn(),
+      findPurchasableProductIds: jest.fn().mockResolvedValue(new Set(['prod-1', 'prod-2'])),
+      createOrderGroup: jest.fn(),
+      setPaymobIntent: jest.fn().mockResolvedValue({}),
+      findGroupWithOrders: jest.fn(),
+    } as unknown as jest.Mocked<CheckoutRepository>;
+    paymob = { createIntention: jest.fn() } as unknown as jest.Mocked<PaymobService>;
+    service = new CheckoutService(repo, paymob);
   });
 
-  it('should throw BadRequestException if cart is empty', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({ items: [] } as any);
-    await expect(service.checkoutCart(mockUserId)).rejects.toThrow(BadRequestException);
+  it('CART_EMPTY when there is no cart or no lines', async () => {
+    repo.findCartWithItems.mockResolvedValue(null);
+    await expect(service.checkoutCart('user-1')).rejects.toMatchObject({ response: { code: 'CART_EMPTY' } });
   });
 
-  it('should throw BadRequestException if item is no longer visible', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({
-      items: [{ id: 'item-1', productId: 'prod-1', quantity: 1, variant: { stockQuantity: 5 } }],
+  it('reports every unavailable line in details (LOGIC-01) — hidden product, deleted variant, short stock', async () => {
+    repo.findCartWithItems.mockResolvedValue(
+      cartWith([
+        line({ id: 'a', productId: 'gone' }),
+        line({ id: 'b', productId: 'prod-2', variant: { stockQuantity: 5, priceOverride: null, deletedAt: new Date() } }),
+        line({ id: 'c', quantity: 9 }),
+        line({ id: 'd' }),
+      ]),
+    );
+
+    await expect(service.checkoutCart('user-1')).rejects.toMatchObject({
+      response: {
+        code: 'CHECKOUT_ITEM_UNAVAILABLE',
+        details: {
+          items: [
+            { cartItemId: 'a', reason: 'PRODUCT_UNAVAILABLE' },
+            { cartItemId: 'b', reason: 'PRODUCT_UNAVAILABLE' },
+            { cartItemId: 'c', reason: 'OUT_OF_STOCK' },
+          ],
+        },
+      },
+    });
+    expect(repo.createOrderGroup).not.toHaveBeenCalled();
+  });
+
+  it('drafts one order per vendor with integer-piastre math and asks Paymob for the integer total (PAY-04)', async () => {
+    repo.findCartWithItems.mockResolvedValue(
+      cartWith([
+        line({ id: 'a', quantity: 3 }), // 3 x 10.10 = 3030
+        line({
+          id: 'b', productId: 'prod-2', variantId: 'var-2', quantity: 1,
+          product: { id: 'prod-2', vendorId: 'v-2', title: 'Bag', basePrice: D('0.20') },
+          variant: { id: 'var-2', stockQuantity: 1, priceOverride: D('0.10'), deletedAt: null }, // override wins: 10
+        }),
+      ]),
+    );
+    repo.createOrderGroup.mockResolvedValue({
+      id: 'group-1', userId: 'user-1',
+      orders: [{ id: 'o1', subtotal: D('30.30') }, { id: 'o2', subtotal: D('0.10') }],
     } as any);
+    paymob.createIntention.mockResolvedValue({ intentId: 'int-1', paymobOrderId: 'po-1', clientUrl: 'https://pay' });
 
-    // Return empty array meaning no visible products found
-    (prisma.product.findMany as jest.Mock).mockResolvedValue([]);
+    const result = await service.checkoutCart('user-1');
 
-    await expect(service.checkoutCart(mockUserId)).rejects.toThrow(BadRequestException);
+    const drafts = repo.createOrderGroup.mock.calls[0][0].orders;
+    expect(drafts).toEqual([
+      expect.objectContaining({ vendorId: 'v-1', subtotalCents: 3030 }),
+      expect.objectContaining({ vendorId: 'v-2', subtotalCents: 10 }),
+    ]);
+    expect(drafts[0].items[0]).toMatchObject({ priceSnapshotCents: 1010, quantity: 3 });
+    // 30.30 + 0.10 as floats would be 30.400000000000002; as cents it is exactly 3040.
+    expect(paymob.createIntention).toHaveBeenCalledWith(3040, 'og:group-1');
+    expect(repo.setPaymobIntent).toHaveBeenCalledWith('group-1', { intentId: 'int-1', paymobOrderId: 'po-1' });
+    expect(result).toMatchObject({ paymobIntentId: 'int-1', clientUrl: 'https://pay', paymentSetupFailed: false });
   });
 
-  it('should throw BadRequestException if requested quantity exceeds stock', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({
-      items: [{ id: 'item-1', productId: 'prod-1', quantity: 10, variant: { stockQuantity: 5 } }],
-    } as any);
+  it('returns paymentSetupFailed when Paymob is down; orders stay created', async () => {
+    repo.findCartWithItems.mockResolvedValue(cartWith([line()]));
+    repo.createOrderGroup.mockResolvedValue({ id: 'group-1', orders: [{ subtotal: D(20.2) }] } as any);
+    paymob.createIntention.mockRejectedValue(new Error('down'));
 
-    (prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod-1' }] as any);
-
-    await expect(service.checkoutCart(mockUserId)).rejects.toThrow(BadRequestException);
+    const result = await service.checkoutCart('user-1');
+    expect(result).toMatchObject({ id: 'group-1', paymentSetupFailed: true });
+    expect(result).not.toHaveProperty('paymobIntentId');
   });
 
-  it('should handle transaction success and return result with Paymob intent', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({
-      items: [
-        { id: 'item-1', productId: 'prod-1', quantity: 1, product: { vendorId: 'v-1' }, variant: { stockQuantity: 5 } },
-      ],
-    } as any);
+  it('maps OutOfStockError from the transaction to CHECKOUT_ITEM_UNAVAILABLE', async () => {
+    repo.findCartWithItems.mockResolvedValue(cartWith([line()]));
+    repo.createOrderGroup.mockRejectedValue(new OutOfStockError('var-1'));
 
-    (prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod-1' }] as any);
-    (prisma.$transaction as jest.Mock).mockResolvedValue({ id: 'group-1', orders: [{ subtotal: 1000 }] });
-    
-    paymobService.createIntention.mockResolvedValue({ intentId: 'intent-123', clientUrl: 'url' });
-
-    const result = await service.checkoutCart(mockUserId);
-    expect(result.id).toBe('group-1');
-    expect(result.paymobIntentId).toBe('intent-123');
-    expect(result.paymentSetupFailed).toBe(false);
-    expect(prisma.$transaction).toHaveBeenCalled();
-    expect(paymobService.createIntention).toHaveBeenCalledWith(1000, 'group-1');
-    expect(prisma.orderGroup.update).toHaveBeenCalledWith({
-      where: { id: 'group-1' },
-      data: { paymobIntentId: 'intent-123' },
+    await expect(service.checkoutCart('user-1')).rejects.toMatchObject({
+      response: { code: 'CHECKOUT_ITEM_UNAVAILABLE', details: { items: [{ variantId: 'var-1', reason: 'OUT_OF_STOCK' }] } },
     });
   });
 
-  it('should return result with paymentSetupFailed if Paymob intent creation fails', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({
-      items: [
-        { id: 'item-1', productId: 'prod-1', quantity: 1, product: { vendorId: 'v-1' }, variant: { stockQuantity: 5 } },
-      ],
-    } as any);
+  it('retries a serialization conflict (P2034) and gives up with CHECKOUT_CONTENDED after 3 tries', async () => {
+    repo.findCartWithItems.mockResolvedValue(cartWith([line()]));
+    const conflict = new Prisma.PrismaClientKnownRequestError('conflict', { code: 'P2034', clientVersion: 't' });
+    repo.createOrderGroup.mockRejectedValue(conflict);
 
-    (prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod-1' }] as any);
-    (prisma.$transaction as jest.Mock).mockResolvedValue({ id: 'group-1', orders: [{ subtotal: 1000 }] });
-    
-    paymobService.createIntention.mockRejectedValue(new Error('Paymob API Down'));
-
-    const result = await service.checkoutCart(mockUserId);
-    expect(result.id).toBe('group-1');
-    expect(result.paymentSetupFailed).toBe(true);
-    expect(result.paymobIntentId).toBeUndefined(); // Didn't succeed
-  });
-
-  it('should catch OutOfStockError from inside transaction and throw BadRequest', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({
-      items: [
-        { id: 'item-1', productId: 'prod-1', quantity: 1, product: { vendorId: 'v-1' }, variant: { stockQuantity: 5 } },
-      ],
-    } as any);
-
-    (prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod-1' }] as any);
-    
-    (prisma.$transaction as jest.Mock).mockRejectedValue(new OutOfStockError('var-1'));
-
-    await expect(service.checkoutCart(mockUserId)).rejects.toThrow(BadRequestException);
-  });
-
-  it('should retry on P2034 serialization failure up to 3 times', async () => {
-    (prisma.cart.findUnique as jest.Mock).mockResolvedValue({
-      items: [
-        { id: 'item-1', productId: 'prod-1', quantity: 1, product: { vendorId: 'v-1' }, variant: { stockQuantity: 5 } },
-      ],
-    } as any);
-
-    (prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 'prod-1' }] as any);
-    
-    const serializationError = new Prisma.PrismaClientKnownRequestError('conflict', { code: 'P2034', clientVersion: '5' });
-    (prisma.$transaction as jest.Mock).mockRejectedValue(serializationError);
-
-    await expect(service.checkoutCart(mockUserId)).rejects.toThrow('System is experiencing high load. Please try again later.');
-    expect(prisma.$transaction).toHaveBeenCalledTimes(3);
+    await expect(service.checkoutCart('user-1')).rejects.toMatchObject({ response: { code: 'CHECKOUT_CONTENDED' } });
+    expect(repo.createOrderGroup).toHaveBeenCalledTimes(3);
   });
 
   describe('retryPaymentSetup', () => {
-    it('should throw if order group not found', async () => {
-      (prisma.orderGroup.findUnique as jest.Mock).mockResolvedValue(null);
-      await expect(service.retryPaymentSetup('user-1', 'group-1')).rejects.toThrow(BadRequestException);
+    it('404 / 403 / 400 with codes (ERR-01)', async () => {
+      repo.findGroupWithOrders.mockResolvedValue(null);
+      await expect(service.retryPaymentSetup('u', 'g')).rejects.toBeInstanceOf(NotFoundException);
+
+      repo.findGroupWithOrders.mockResolvedValue({ id: 'g', userId: 'other', paymobIntentId: null, orders: [] } as any);
+      await expect(service.retryPaymentSetup('u', 'g')).rejects.toBeInstanceOf(ForbiddenException);
+
+      repo.findGroupWithOrders.mockResolvedValue({ id: 'g', userId: 'u', paymobIntentId: 'x', orders: [] } as any);
+      await expect(service.retryPaymentSetup('u', 'g')).rejects.toMatchObject({ response: { code: 'PAYMENT_ALREADY_SET_UP' } });
+
+      repo.findGroupWithOrders.mockResolvedValue({ id: 'g', userId: 'u', paymobIntentId: null, orders: [{ status: 'CANCELLED' }] } as any);
+      await expect(service.retryPaymentSetup('u', 'g')).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('should throw if order group belongs to different user', async () => {
-      (prisma.orderGroup.findUnique as jest.Mock).mockResolvedValue({ userId: 'user-2' });
-      await expect(service.retryPaymentSetup('user-1', 'group-1')).rejects.toThrow(BadRequestException);
-    });
+    it('creates the intention for the integer total and stores both ids', async () => {
+      repo.findGroupWithOrders.mockResolvedValue({
+        id: 'g', userId: 'u', paymobIntentId: null,
+        orders: [{ status: 'PENDING', subtotal: D('10.05') }, { status: 'PENDING', subtotal: D('0.95') }],
+      } as any);
+      paymob.createIntention.mockResolvedValue({ intentId: 'int-2', paymobOrderId: null, clientUrl: undefined });
 
-    it('should throw if already has a paymob intent', async () => {
-      (prisma.orderGroup.findUnique as jest.Mock).mockResolvedValue({ userId: 'user-1', paymobIntentId: 'existing-intent' });
-      await expect(service.retryPaymentSetup('user-1', 'group-1')).rejects.toThrow(BadRequestException);
-    });
+      const result = await service.retryPaymentSetup('u', 'g');
 
-    it('should throw if any order is not PENDING', async () => {
-      (prisma.orderGroup.findUnique as jest.Mock).mockResolvedValue({
-        userId: 'user-1',
-        paymobIntentId: null,
-        orders: [{ status: 'PAID' }],
-      });
-      await expect(service.retryPaymentSetup('user-1', 'group-1')).rejects.toThrow(BadRequestException);
-    });
-
-    it('should create intention and update order group on success', async () => {
-      (prisma.orderGroup.findUnique as jest.Mock).mockResolvedValue({
-        id: 'group-1',
-        userId: 'user-1',
-        paymobIntentId: null,
-        orders: [{ status: 'PENDING', subtotal: 1000 }],
-      });
-      
-      paymobService.createIntention.mockResolvedValue({ intentId: 'intent-new', clientUrl: 'url' });
-
-      const result = await service.retryPaymentSetup('user-1', 'group-1');
-      
-      expect(result.paymobIntentId).toBe('intent-new');
-      expect(result.clientUrl).toBe('url');
-      expect(paymobService.createIntention).toHaveBeenCalledWith(1000, 'group-1');
-      expect(prisma.orderGroup.update).toHaveBeenCalledWith({
-        where: { id: 'group-1' },
-        data: { paymobIntentId: 'intent-new' },
-      });
+      expect(paymob.createIntention).toHaveBeenCalledWith(1100, 'og:g');
+      expect(repo.setPaymobIntent).toHaveBeenCalledWith('g', { intentId: 'int-2', paymobOrderId: null });
+      expect(result).toEqual({ paymobIntentId: 'int-2', clientUrl: undefined });
     });
   });
 });

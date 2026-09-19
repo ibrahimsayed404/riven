@@ -1,7 +1,9 @@
 # Riven — Product & Architecture Spec (v1)
 
 ## 1. What Riven is
-A discovery platform connecting shoppers, local brands/vendors, and bazaar/event organizers across Egypt. Not e-commerce — no cart, no checkout for products. Riven monetizes the *infrastructure of discovery*, not the sale of goods.
+A discovery platform connecting shoppers, local brands/vendors, and bazaar/event organizers across Egypt. Discovery is monetized through organizer listing fees and vendor subscriptions.
+
+> **Scope update:** the original v1 line here read "Not e-commerce — no cart, no checkout for products." That was superseded by `fashion-marketplace-addendum.md`, which adds a vendor-direct fashion marketplace (catalog, multi-vendor cart, per-vendor sub-orders, Paymob checkout) on top of discovery. Where this document and the addendum conflict, the addendum wins.
 
 ## 2. Revenue model
 - **Organizers** pay to create/list a bazaar (per-bazaar fee).
@@ -90,7 +92,7 @@ Payment         id, payerType(enum: vendor/organizer), payerId, amount,
 
 ## 7. Community features (lightweight, v1)
 - Follow / favorite vendors and bazaars.
-- Rate (1–5 + comment) vendors, bazaars, events.
+- Rate (1–5 + comment) vendors, bazaars, events. *Implementation note:* vendor/product ratings require a delivered order; bazaar ratings are open to any shopper once the bazaar is published or completed (attendance is not verifiable); event ratings wait for the events module.
 - No posts, no chat, no "Moments" (explicitly deferred — revisit later).
 
 ## 8. Notifications

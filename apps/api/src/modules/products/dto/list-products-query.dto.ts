@@ -1,23 +1,18 @@
-import { IsOptional, IsString } from 'class-validator';
+import { IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
-export class ListProductsQueryDto {
+import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
+
+export class ListProductsQueryDto extends PaginationQueryDto {
   @IsOptional()
-  @IsString()
+  @IsUUID()
   categoryId?: string;
 
   @IsOptional()
-  @IsString()
+  @IsUUID()
   vendorId?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   search?: string;
-
-  @IsOptional()
-  @IsString()
-  page?: string;
-
-  @IsOptional()
-  @IsString()
-  limit?: string;
 }

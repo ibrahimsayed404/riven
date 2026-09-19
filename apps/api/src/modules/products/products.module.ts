@@ -9,6 +9,6 @@ import { AuditModule } from '../audit/audit.module';
   imports: [AuditModule],
   controllers: [ProductsController, AdminProductsController],
   providers: [ProductsService, ProductsRepository],
-  exports: [ProductsService, ProductsRepository],
+  exports: [ProductsService],
 })
 export class ProductsModule {}

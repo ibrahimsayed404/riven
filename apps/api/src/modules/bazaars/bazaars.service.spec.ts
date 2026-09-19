@@ -4,7 +4,8 @@ import { BazaarsRepository } from './bazaars.repository';
 import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { DomainEvents } from '../../common/events/domain-events.service';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { BazaarStatus, ScheduleType, ApplicationStatus } from '@prisma/client';
 
 describe('BazaarsService', () => {
@@ -13,6 +14,7 @@ describe('BazaarsService', () => {
   let organizersService: jest.Mocked<OrganizersService>;
   let vendorsService: jest.Mocked<VendorsService>;
   let searchIndexQueue: jest.Mocked<SearchIndexQueue>;
+  let domainEvents: { emit: jest.Mock };
 
   const mockOrganizer = {
     id: 'org-1',
@@ -90,6 +92,7 @@ describe('BazaarsService', () => {
             getMyProfile: jest.fn(),
           },
         },
+        { provide: DomainEvents, useValue: { emit: jest.fn() } },
       ],
     }).compile();
 
@@ -98,6 +101,7 @@ describe('BazaarsService', () => {
     organizersService = module.get(OrganizersService);
     vendorsService = module.get(VendorsService);
     searchIndexQueue = module.get(SearchIndexQueue);
+    domainEvents = module.get(DomainEvents);
   });
 
   describe('createBazaar', () => {
@@ -149,6 +153,17 @@ describe('BazaarsService', () => {
       bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.COMPLETED });
 
       await expect(service.publishBazaar('owner-1', 'bazaar-1')).rejects.toThrow(BadRequestException);
+    });
+
+    it('emits bazaar.published after the write (ARCH-04)', async () => {
+      organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer);
+      bazaarsRepo.findById.mockResolvedValue(mockBazaar);
+      bazaarsRepo.updateStatus.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.PUBLISHED });
+
+      await service.publishBazaar('owner-1', 'bazaar-1');
+
+      expect(domainEvents.emit).toHaveBeenCalledTimes(1);
+      expect(domainEvents.emit.mock.calls[0][0]).toMatchObject({ name: 'bazaar.published', bazaarId: 'bazaar-1' });
     });
 
     it('should enqueue a search sync after publishing', async () => {
@@ -230,7 +245,7 @@ describe('BazaarsService', () => {
 
     it('should throw ForbiddenException if vendor is unverified', async () => {
       vendorsService.getMyProfile.mockResolvedValue({ ...mockVendor, verified: false } as any);
-      
+
       await expect(service.applyToBazaar('owner-2', 'bazaar-1')).rejects.toThrow(ForbiddenException);
     });
   });

@@ -7,6 +7,11 @@ const CATEGORY_PATH_MAX_DEPTH = 10;
 /** A batch of ids for keyset iteration (reindex / fan-out). */
 export type IdPage = { ids: string[]; nextCursor: string | null };
 
+export type PublicProduct = Prisma.ProductGetPayload<{ select: typeof PUBLIC_PRODUCT_SELECT }>;
+export type PublicProductDetail = Prisma.ProductGetPayload<{
+  select: typeof PUBLIC_PRODUCT_SELECT & { variants: { select: typeof PUBLIC_VARIANT_SELECT } };
+}>;
+
 // Admin queue row: the fields an admin needs to decide, plus the vendor's
 // verification flag so the UI can flag "approved but vendor unverified".
 const adminProductRowSelect = {
@@ -41,20 +46,20 @@ export type ProductForSearch = Product & {
 };
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import {
+  ACTIVE_VARIANT_WHERE,
+  PUBLIC_PRODUCT_SELECT,
+  PUBLIC_PRODUCT_WHERE,
+  PUBLIC_VARIANT_SELECT,
+} from './product-visibility';
 
 @Injectable()
 export class ProductsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** @deprecated import PUBLIC_PRODUCT_WHERE from ./product-visibility instead. */
   public get visibilityFilter(): Prisma.ProductWhereInput {
-    return {
-      isActive: true,
-      approvalStatus: 'APPROVED',
-      deletedAt: null,
-      vendor: {
-        verified: true,
-      },
-    };
+    return PUBLIC_PRODUCT_WHERE;
   }
 
   async findManyPaginated(params: {
@@ -63,9 +68,9 @@ export class ProductsRepository {
     search?: string;
     page: number;
     limit: number;
-  }): Promise<{ data: Product[]; total: number }> {
+  }): Promise<{ data: PublicProduct[]; total: number }> {
     const where: Prisma.ProductWhereInput = {
-      ...this.visibilityFilter,
+      ...PUBLIC_PRODUCT_WHERE,
     };
 
     if (params.categoryId) {
@@ -87,6 +92,7 @@ export class ProductsRepository {
       const total = await tx.product.count({ where });
       const data = await tx.product.findMany({
         where,
+        select: PUBLIC_PRODUCT_SELECT,
         skip: (params.page - 1) * params.limit,
         take: params.limit,
         orderBy: { createdAt: 'desc' },
@@ -95,14 +101,15 @@ export class ProductsRepository {
     });
   }
 
-  findById(id: string): Promise<(Product & { variants: ProductVariant[] }) | null> {
+  findById(id: string): Promise<PublicProductDetail | null> {
     return this.prisma.product.findFirst({
       where: {
         id,
-        ...this.visibilityFilter,
+        ...PUBLIC_PRODUCT_WHERE,
       },
-      include: {
-        variants: true,
+      select: {
+        ...PUBLIC_PRODUCT_SELECT,
+        variants: { where: ACTIVE_VARIANT_WHERE, select: PUBLIC_VARIANT_SELECT },
       },
     });
   }
@@ -116,13 +123,12 @@ export class ProductsRepository {
     return this.prisma.product.findFirst({
       where: {
         id,
-        ...this.visibilityFilter,
-        vendor: { verified: true, deletedAt: null },
+        ...PUBLIC_PRODUCT_WHERE,
       },
       include: {
         vendor: { select: { name: true } },
         category: { select: { slug: true } },
-        variants: { select: { size: true, color: true, priceOverride: true } },
+        variants: { where: ACTIVE_VARIANT_WHERE, select: { size: true, color: true, priceOverride: true } },
       },
     });
   }

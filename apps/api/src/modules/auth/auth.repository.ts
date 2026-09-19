@@ -7,19 +7,21 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 export class AuthRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  // Every lookup here excludes soft-deleted users: a deactivated account must
+  // not be able to log in, refresh, or pass JwtStrategy.validate (fix.js AUTH-01).
   findUserByEmail(email: string): Promise<User | null> {
-    return this.prisma.user.findUnique({ where: { email } });
+    return this.prisma.user.findFirst({ where: { email, deletedAt: null } });
   }
 
   findUserById(id: string): Promise<User | null> {
-    return this.prisma.user.findUnique({ where: { id } });
+    return this.prisma.user.findFirst({ where: { id, deletedAt: null } });
   }
 
   findAuthenticatedUserById(
     id: string,
   ): Promise<Pick<User, 'id' | 'email' | 'name' | 'role'> | null> {
-    return this.prisma.user.findUnique({
-      where: { id },
+    return this.prisma.user.findFirst({
+      where: { id, deletedAt: null },
       select: {
         id: true,
         email: true,

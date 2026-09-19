@@ -1,6 +1,11 @@
 import { Controller, Get, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { join } from 'node:path';
+
+import { DomainEventsModule } from './common/events/domain-events.module';
+import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 
 import { PrismaModule } from './infra/prisma/prisma.module';
 import { validateEnv } from './infra/config/env.validation';
@@ -40,7 +45,11 @@ class HealthController {
       envFilePath: [join(process.cwd(), '.env'), join(process.cwd(), '../../.env')],
       validate: validateEnv,
     }),
+    // Global rate limit: generous default, tightened per route with @Throttle
+    // (auth, location updates). Keyed by user when authenticated, else by IP.
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 300 }]),
     PrismaModule,
+    DomainEventsModule,
     AuthModule,
     UsersModule,
     VendorsModule,
@@ -62,5 +71,6 @@ class HealthController {
     AdminModule,
   ],
   controllers: [HealthController],
+  providers: [{ provide: APP_GUARD, useClass: UserThrottlerGuard }],
 })
 export class AppModule {}

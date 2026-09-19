@@ -103,7 +103,7 @@ describe('VendorsModule (e2e)', () => {
         password: 'Password123!',
         name: 'Vendor One',
         businessName: 'Vendor One Shop',
-        category: 'Food',
+        category: 'FOOD',
         vendorType: 'MARKETPLACE'
       });
       

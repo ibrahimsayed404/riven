@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { Cart, CartItem, Prisma, Product, ProductVariant } from '@prisma/client';
+import { Cart, CartItem, Product, ProductVariant } from '@prisma/client';
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { ProductsRepository } from '../products/products.repository';
+import { ACTIVE_VARIANT_WHERE, PUBLIC_PRODUCT_WHERE } from '../products/product-visibility';
 
 export type CartItemWithDetails = CartItem & {
   product: Product;
@@ -14,10 +14,7 @@ export type CartWithItems = Cart & {
 
 @Injectable()
 export class CartRepository {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly productsRepo: ProductsRepository,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async findOrCreateCart(userId: string): Promise<CartWithItems> {
     const cart = await this.prisma.cart.upsert({
@@ -109,14 +106,14 @@ export class CartRepository {
     return this.prisma.product.findFirst({
       where: {
         id: productId,
-        ...this.productsRepo.visibilityFilter,
+        ...PUBLIC_PRODUCT_WHERE,
         variants: {
-          some: { id: variantId },
+          some: { id: variantId, ...ACTIVE_VARIANT_WHERE },
         },
       },
       include: {
         variants: {
-          where: { id: variantId },
+          where: { id: variantId, ...ACTIVE_VARIANT_WHERE },
         },
       },
     });

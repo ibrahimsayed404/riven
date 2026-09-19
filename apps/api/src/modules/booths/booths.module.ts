@@ -9,6 +9,6 @@ import { BazaarsModule } from '../bazaars/bazaars.module';
   imports: [BazaarsModule],
   controllers: [AdminBoothsController, PublicBoothsController],
   providers: [BoothsService, BoothsRepository],
-  exports: [BoothsService, BoothsRepository],
+  exports: [BoothsService],
 })
 export class BoothsModule {}

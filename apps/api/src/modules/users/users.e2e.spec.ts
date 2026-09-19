@@ -1,10 +1,12 @@
-import { BadRequestException, ExecutionContext, INestApplication, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ExecutionContext, INestApplication, Module, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Role } from '@prisma/client';
 import * as request from 'supertest';
 
 import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AuthModule } from '../auth/auth.module';
+import { AuthService } from '../auth/auth.service';
 import { UsersModule } from './users.module';
 import { UsersService } from './users.service';
 import { PrismaService } from '../../infra/prisma/prisma.service';
@@ -33,6 +35,14 @@ const mockJwtAuthGuard = {
   },
 };
 
+// UsersModule imports AuthModule for session revocation; the real one needs
+// ConfigService/JwtModule. This suite mocks UsersService anyway, so stub it.
+@Module({
+  providers: [{ provide: AuthService, useValue: { revokeAllSessions: jest.fn() } }],
+  exports: [AuthService],
+})
+class StubAuthModule {}
+
 const mockUsersService = {
   getProfile: jest.fn(),
   updateProfile: jest.fn(),
@@ -55,6 +65,8 @@ describe('Users Module (e2e)', () => {
     const moduleRef = await Test.createTestingModule({
       imports: [UsersModule, PrismaModule],
     })
+      .overrideModule(AuthModule)
+      .useModule(StubAuthModule)
       .overrideProvider(UsersService)
       .useValue(mockUsersService)
       .overrideProvider(PrismaService)

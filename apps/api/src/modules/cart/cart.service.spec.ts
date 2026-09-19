@@ -2,7 +2,6 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { CartService } from './cart.service';
 import { CartRepository } from './cart.repository';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 
 describe('CartService', () => {
   let service: CartService;
@@ -61,7 +60,7 @@ describe('CartService', () => {
     it('should throw NotFoundException if product/variant is not found or visible', async () => {
       cartRepository.findOrCreateCart.mockResolvedValue({ id: mockCartId, items: [] } as any);
       cartRepository.getProductWithVariant.mockResolvedValue(null);
-      
+
       await expect(service.addItem(mockUserId, mockProductId, mockVariantId, 1))
         .rejects.toThrow(NotFoundException);
     });
@@ -94,7 +93,7 @@ describe('CartService', () => {
       cartRepository.getProductWithVariant.mockResolvedValue({
         variants: [{ id: mockVariantId, stockQuantity: 5 }],
       } as any);
-      
+
       const mockResult = { id: 'item-1', quantity: 2 } as any;
       cartRepository.upsertCartItem.mockResolvedValue(mockResult);
 
@@ -112,11 +111,36 @@ describe('CartService', () => {
 
     it('should remove item if quantity is 0', async () => {
       cartRepository.getCartItem.mockResolvedValue({ id: 'item-1', cartId: mockCartId } as any);
-      cartRepository.getCart.mockResolvedValue({ id: mockCartId } as any);
-      
+      cartRepository.getCart.mockResolvedValue({ id: mockCartId, items: [] } as any);
+
       const res = await service.updateItemQuantity(mockUserId, 'item-1', 0);
       expect(res).toEqual({ deleted: true });
       expect(cartRepository.removeCartItem).toHaveBeenCalledWith('item-1');
+    });
+
+    it('rejects a quantity above stock with INSUFFICIENT_STOCK (LOGIC-06)', async () => {
+      cartRepository.getCartItem.mockResolvedValue({ id: 'item-1', cartId: mockCartId } as any);
+      cartRepository.getCart.mockResolvedValue({
+        id: mockCartId,
+        items: [{ id: 'item-1', variantId: mockVariantId, quantity: 1, variant: { stockQuantity: 3 } }],
+      } as any);
+
+      await expect(service.updateItemQuantity(mockUserId, 'item-1', 4)).rejects.toMatchObject({
+        response: { code: 'INSUFFICIENT_STOCK', details: { inStock: 3 } },
+      });
+      expect(cartRepository.updateCartItemQuantity).not.toHaveBeenCalled();
+    });
+
+    it('accepts a quantity within stock', async () => {
+      cartRepository.getCartItem.mockResolvedValue({ id: 'item-1', cartId: mockCartId } as any);
+      cartRepository.getCart.mockResolvedValue({
+        id: mockCartId,
+        items: [{ id: 'item-1', variantId: mockVariantId, quantity: 1, variant: { stockQuantity: 3 } }],
+      } as any);
+      cartRepository.updateCartItemQuantity.mockResolvedValue({ id: 'item-1', quantity: 3 } as any);
+
+      await service.updateItemQuantity(mockUserId, 'item-1', 3);
+      expect(cartRepository.updateCartItemQuantity).toHaveBeenCalledWith('item-1', 3);
     });
   });
 });

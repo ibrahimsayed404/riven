@@ -76,7 +76,7 @@ describe('Checkout and Orders (e2e)', () => {
       data: {
         ownerId: vendorUser.id,
         name: 'Vendor 1 Shop',
-        category: 'Tech',
+        category: 'OTHER',
         verified: true,
       },
     });

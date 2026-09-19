@@ -1,7 +1,10 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
-import { FavorableType, FollowableType, Prisma, RatingTargetType } from '@prisma/client';
-import { PrismaService } from '../../infra/prisma/prisma.service';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { FavorableType, FollowableType } from '@prisma/client';
+
+import { BazaarsService } from '../bazaars/bazaars.service';
 import { OrdersService } from '../orders/orders.service';
+import { ProductsService } from '../products/products.service';
+import { VendorsService } from '../vendors/vendors.service';
 import {
   CreateFavoriteDto,
   DeleteFavoriteDto,
@@ -13,14 +16,21 @@ import {
   GetRatingSummaryQueryDto,
   GetRatingsQueryDto,
 } from './dto';
+import { KeysetPage, SocialRepository } from './social.repository';
 
 type Cursor = { s: string; id: string };
+
+/** Anything a shopper can follow or favorite. EVENT exists in the enum but has no module yet. */
+type PublicTargetType = FavorableType | FollowableType;
 
 @Injectable()
 export class SocialService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly socialRepository: SocialRepository,
     private readonly ordersService: OrdersService,
+    private readonly vendorsService: VendorsService,
+    private readonly bazaarsService: BazaarsService,
+    private readonly productsService: ProductsService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -28,64 +38,19 @@ export class SocialService {
   // ---------------------------------------------------------------------------
 
   async addFavorite(userId: string, dto: CreateFavoriteDto) {
-    return this.prisma.favorite.upsert({
-      where: {
-        userId_favorableType_favorableId: {
-          userId,
-          favorableType: dto.favorableType,
-          favorableId: dto.favorableId,
-        },
-      },
-      update: {},
-      create: {
-        userId,
-        favorableType: dto.favorableType,
-        favorableId: dto.favorableId,
-      },
-    });
+    await this.assertPublicTarget(dto.favorableType, dto.favorableId);
+    return this.socialRepository.upsertFavorite(userId, dto.favorableType, dto.favorableId);
   }
 
   async removeFavorite(userId: string, dto: DeleteFavoriteDto) {
-    await this.prisma.favorite.deleteMany({
-      where: {
-        userId,
-        favorableType: dto.favorableType,
-        favorableId: dto.favorableId,
-      },
-    });
+    await this.socialRepository.deleteFavorite(userId, dto.favorableType, dto.favorableId);
     return { success: true };
   }
 
   async getFavorites(userId: string, query: GetFavoritesQueryDto) {
     const limit = query.limit ?? 20;
-    const where: Prisma.FavoriteWhereInput = {
-      userId,
-      ...(query.favorableType ? { favorableType: query.favorableType } : {}),
-    };
-
-    if (query.cursor) {
-      const { s, id } = this.decodeCursor(query.cursor);
-      const cursorDate = new Date(s);
-      where.OR = [
-        { createdAt: { lt: cursorDate } },
-        { createdAt: cursorDate, id: { lt: id } },
-      ];
-    }
-
-    const items = await this.prisma.favorite.findMany({
-      where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: limit + 1,
-    });
-
-    let nextCursor: string | null = null;
-    if (items.length > limit) {
-      items.pop();
-      const last = items[items.length - 1];
-      nextCursor = this.encodeCursor(last.createdAt, last.id);
-    }
-
-    return { data: items, nextCursor };
+    const items = await this.socialRepository.findFavorites(userId, query.favorableType, this.page(limit, query.cursor));
+    return this.paginate(items, limit);
   }
 
   async batchCheckFavorites(
@@ -96,17 +61,7 @@ export class SocialService {
     if (!favorableIds.length) {
       return new Set<string>();
     }
-
-    const favorites = await this.prisma.favorite.findMany({
-      where: {
-        userId,
-        favorableType,
-        favorableId: { in: favorableIds },
-      },
-      select: { favorableId: true },
-    });
-
-    return new Set(favorites.map((f) => f.favorableId));
+    return new Set(await this.socialRepository.findFavoriteIds(userId, favorableType, favorableIds));
   }
 
   // ---------------------------------------------------------------------------
@@ -114,187 +69,151 @@ export class SocialService {
   // ---------------------------------------------------------------------------
 
   async addFollow(userId: string, dto: CreateFollowDto) {
-    return this.prisma.follow.upsert({
-      where: {
-        userId_followableType_followableId: {
-          userId,
-          followableType: dto.followableType,
-          followableId: dto.followableId,
-        },
-      },
-      update: {},
-      create: {
-        userId,
-        followableType: dto.followableType,
-        followableId: dto.followableId,
-      },
-    });
+    await this.assertPublicTarget(dto.followableType, dto.followableId);
+    return this.socialRepository.upsertFollow(userId, dto.followableType, dto.followableId);
   }
 
   async removeFollow(userId: string, dto: DeleteFollowDto) {
-    await this.prisma.follow.deleteMany({
-      where: {
-        userId,
-        followableType: dto.followableType,
-        followableId: dto.followableId,
-      },
-    });
+    await this.socialRepository.deleteFollow(userId, dto.followableType, dto.followableId);
     return { success: true };
   }
 
   async getFollows(userId: string, query: GetFollowsQueryDto) {
     const limit = query.limit ?? 20;
-    const where: Prisma.FollowWhereInput = {
-      userId,
-      ...(query.followableType ? { followableType: query.followableType } : {}),
-    };
-
-    if (query.cursor) {
-      const { s, id } = this.decodeCursor(query.cursor);
-      const cursorDate = new Date(s);
-      where.OR = [
-        { createdAt: { lt: cursorDate } },
-        { createdAt: cursorDate, id: { lt: id } },
-      ];
-    }
-
-    const items = await this.prisma.follow.findMany({
-      where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: limit + 1,
-    });
-
-    let nextCursor: string | null = null;
-    if (items.length > limit) {
-      items.pop();
-      const last = items[items.length - 1];
-      nextCursor = this.encodeCursor(last.createdAt, last.id);
-    }
-
-    return { data: items, nextCursor };
+    const items = await this.socialRepository.findFollows(userId, query.followableType, this.page(limit, query.cursor));
+    return this.paginate(items, limit);
   }
 
   // ---------------------------------------------------------------------------
   // Ratings
   // ---------------------------------------------------------------------------
 
+  /**
+   * Two gates (fix.js SPEC-03):
+   *  - VENDOR / PRODUCT: a DELIVERED order of this shopper containing the target.
+   *  - BAZAAR: the bazaar has run (PUBLISHED or COMPLETED); no order — attendance
+   *    is not something the platform can verify, and riven-spec §8 wants bazaars rateable.
+   *  - EVENT: blocked until an events module exists.
+   */
   async addRating(userId: string, dto: CreateRatingDto) {
-    const isVerified = await this.ordersService.verifyDeliveredPurchase(
+    const orderId = await this.assertRatingAllowed(userId, dto);
+
+    return this.socialRepository.upsertRating({
       userId,
-      dto.orderId,
-      dto.targetType,
-      dto.targetId,
-    );
-
-    if (!isVerified) {
-      throw new ForbiddenException({
-        code: 'NOT_VERIFIED_PURCHASE',
-        message: 'Rating requires a verified delivered purchase for this target.',
-      });
-    }
-
-    return this.prisma.rating.upsert({
-      where: {
-        userId_targetType_targetId: {
-          userId,
-          targetType: dto.targetType,
-          targetId: dto.targetId,
-        },
-      },
-      update: {
-        score: dto.score,
-        comment: dto.comment ?? null,
-        orderId: dto.orderId,
-      },
-      create: {
-        userId,
-        targetType: dto.targetType,
-        targetId: dto.targetId,
-        score: dto.score,
-        comment: dto.comment ?? null,
-        orderId: dto.orderId,
-      },
+      targetType: dto.targetType,
+      targetId: dto.targetId,
+      score: dto.score,
+      comment: dto.comment ?? null,
+      orderId,
     });
   }
 
-  async getRatingSummary(query: GetRatingSummaryQueryDto) {
-    const aggregate = await this.prisma.rating.aggregate({
-      where: {
-        targetType: query.targetType,
-        targetId: query.targetId,
-      },
-      _avg: {
-        score: true,
-      },
-      _count: {
-        _all: true,
-      },
-    });
+  private async assertRatingAllowed(userId: string, dto: CreateRatingDto): Promise<string | null> {
+    switch (dto.targetType) {
+      case 'BAZAAR': {
+        if (!(await this.bazaarsService.isRateable(dto.targetId))) {
+          throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found or not yet published.' });
+        }
+        return null;
+      }
+      case 'EVENT':
+        throw new NotFoundException({ code: 'TARGET_NOT_FOUND', message: 'Events are not available yet.' });
+      case 'VENDOR':
+      case 'PRODUCT': {
+        if (!dto.orderId) {
+          throw new BadRequestException({
+            code: 'ORDER_ID_REQUIRED',
+            message: 'Rating a vendor or product requires the delivered order it was bought in.',
+          });
+        }
+        const isVerified = await this.ordersService.verifyDeliveredPurchase(userId, dto.orderId, dto.targetType, dto.targetId);
+        if (!isVerified) {
+          throw new ForbiddenException({
+            code: 'NOT_VERIFIED_PURCHASE',
+            message: 'Rating requires a verified delivered purchase for this target.',
+          });
+        }
+        return dto.orderId;
+      }
+    }
+  }
 
+  async getRatingSummary(query: GetRatingSummaryQueryDto) {
+    const { average, count } = await this.socialRepository.aggregateRatings(query.targetType, query.targetId);
     return {
-      average: aggregate._avg.score !== null ? Number(aggregate._avg.score.toFixed(2)) : 0,
-      count: aggregate._count._all,
+      average: average !== null ? Number(average.toFixed(2)) : 0,
+      count,
     };
   }
 
   async getRatings(query: GetRatingsQueryDto) {
     const limit = query.limit ?? 20;
-    const where: Prisma.RatingWhereInput = {
-      targetType: query.targetType,
-      targetId: query.targetId,
+    const items = await this.socialRepository.findRatings(query.targetType, query.targetId, this.page(limit, query.cursor));
+    const { data, nextCursor } = this.paginate(items, limit);
+
+    return {
+      data: data.map((item) => ({
+        id: item.id,
+        targetType: item.targetType,
+        targetId: item.targetId,
+        score: item.score,
+        comment: item.comment,
+        createdAt: item.createdAt,
+        reviewerName: item.user.name,
+      })),
+      nextCursor,
     };
+  }
 
-    if (query.cursor) {
-      const { s, id } = this.decodeCursor(query.cursor);
-      const cursorDate = new Date(s);
-      where.OR = [
-        { createdAt: { lt: cursorDate } },
-        { createdAt: cursorDate, id: { lt: id } },
-      ];
+  // ---------------------------------------------------------------------------
+  // Target existence (fix.js VULN-04)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A follow/favorite may only point at something the shopper could see on
+   * the public surface. Each owning module's public read already 404s on
+   * unverified / unpublished / soft-deleted rows, so we simply reuse it.
+   */
+  private async assertPublicTarget(type: PublicTargetType, id: string): Promise<void> {
+    switch (type) {
+      case 'VENDOR':
+        await this.vendorsService.getVendorById(id);
+        return;
+      case 'BAZAAR':
+        await this.bazaarsService.getPublicBazaarById(id);
+        return;
+      case 'PRODUCT':
+        await this.productsService.getProductById(id);
+        return;
+      case 'EVENT':
+        // No events module exists yet; nothing can be resolved, so nothing can be favorited.
+        throw new NotFoundException({ code: 'TARGET_NOT_FOUND', message: 'Events are not available yet.' });
+      default: {
+        const never: never = type;
+        throw new BadRequestException({ code: 'TARGET_TYPE_UNSUPPORTED', message: `Unsupported target type ${String(never)}.` });
+      }
     }
+  }
 
-    const items = await this.prisma.rating.findMany({
-      where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: limit + 1,
-      select: {
-        id: true,
-        targetType: true,
-        targetId: true,
-        score: true,
-        comment: true,
-        createdAt: true,
-        user: {
-          select: {
-            name: true,
-          },
-        },
-      },
-    });
+  // ---------------------------------------------------------------------------
+  // Keyset cursor helpers
+  // ---------------------------------------------------------------------------
 
+  private page(limit: number, cursor?: string): KeysetPage {
+    if (!cursor) return { take: limit + 1 };
+    const { s, id } = this.decodeCursor(cursor);
+    return { take: limit + 1, after: { createdAt: new Date(s), id } };
+  }
+
+  private paginate<T extends { createdAt: Date; id: string }>(items: T[], limit: number): { data: T[]; nextCursor: string | null } {
     let nextCursor: string | null = null;
     if (items.length > limit) {
       items.pop();
       const last = items[items.length - 1];
       nextCursor = this.encodeCursor(last.createdAt, last.id);
     }
-
-    const data = items.map((item) => ({
-      id: item.id,
-      targetType: item.targetType,
-      targetId: item.targetId,
-      score: item.score,
-      comment: item.comment,
-      createdAt: item.createdAt,
-      reviewerName: item.user.name,
-    }));
-
-    return { data, nextCursor };
+    return { data: items, nextCursor };
   }
-
-  // ---------------------------------------------------------------------------
-  // Keyset cursor helpers
-  // ---------------------------------------------------------------------------
 
   private encodeCursor(sortValue: Date | string, id: string): string {
     const s = sortValue instanceof Date ? sortValue.toISOString() : sortValue;
@@ -307,28 +226,23 @@ export class SocialService {
     try {
       parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
     } catch {
-      throw new BadRequestException({
-        code: 'INVALID_CURSOR',
-        message: 'Invalid pagination cursor.',
-      });
+      throw this.invalidCursor();
     }
 
     if (typeof parsed !== 'object' || parsed === null) {
-      throw new BadRequestException({
-        code: 'INVALID_CURSOR',
-        message: 'Invalid pagination cursor.',
-      });
+      throw this.invalidCursor();
     }
 
     const { s, id } = parsed as { s?: unknown; id?: unknown };
 
     if (typeof s !== 'string' || typeof id !== 'string' || id.length === 0) {
-      throw new BadRequestException({
-        code: 'INVALID_CURSOR',
-        message: 'Invalid pagination cursor.',
-      });
+      throw this.invalidCursor();
     }
 
     return { s, id };
+  }
+
+  private invalidCursor(): BadRequestException {
+    return new BadRequestException({ code: 'INVALID_CURSOR', message: 'Invalid pagination cursor.' });
   }
 }

@@ -13,14 +13,14 @@ export class BoothsService {
   async createLayout(bazaarId: string, gridConfig: Prisma.InputJsonValue) {
     const bazaar = await this.bazaarsService.findById(bazaarId);
     if (!bazaar) {
-      throw new NotFoundException('Bazaar not found.');
+      throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' });
     }
 
     try {
       return await this.boothsRepository.createLayout(bazaarId, gridConfig);
     } catch (error: any) {
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('bazaarId')) {
-        throw new ConflictException('Layout already exists for this bazaar.');
+        throw new ConflictException({ code: 'LAYOUT_EXISTS', message: 'Layout already exists for this bazaar.' });
       }
       throw error;
     }
@@ -29,7 +29,7 @@ export class BoothsService {
   async getLayout(bazaarId: string) {
     const layout = await this.boothsRepository.findLayoutByBazaarId(bazaarId);
     if (!layout) {
-      throw new NotFoundException('Layout not found.');
+      throw new NotFoundException({ code: 'LAYOUT_NOT_FOUND', message: 'Layout not found.' });
     }
     return layout;
   }
@@ -37,7 +37,7 @@ export class BoothsService {
   async updateLayout(bazaarId: string, gridConfig: Prisma.InputJsonValue) {
     const layout = await this.boothsRepository.findLayoutByBazaarId(bazaarId);
     if (!layout) {
-      throw new NotFoundException('Layout not found.');
+      throw new NotFoundException({ code: 'LAYOUT_NOT_FOUND', message: 'Layout not found.' });
     }
 
     return this.boothsRepository.updateLayoutGridConfig(bazaarId, gridConfig);
@@ -49,7 +49,7 @@ export class BoothsService {
   ) {
     const layout = await this.boothsRepository.findLayoutByBazaarId(bazaarId);
     if (!layout) {
-      throw new NotFoundException('Layout not found for this bazaar.');
+      throw new NotFoundException({ code: 'LAYOUT_NOT_FOUND', message: 'Layout not found for this bazaar.' });
     }
 
     try {
@@ -63,7 +63,7 @@ export class BoothsService {
       );
     } catch (error: any) {
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('label')) {
-        throw new ConflictException('A booth with this label already exists in this layout.');
+        throw new ConflictException({ code: 'BOOTH_LABEL_TAKEN', message: 'A booth with this label already exists in this layout.' });
       }
       throw error;
     }
@@ -75,14 +75,14 @@ export class BoothsService {
   ) {
     const booth = await this.boothsRepository.findBoothById(id);
     if (!booth) {
-      throw new NotFoundException('Booth not found.');
+      throw new NotFoundException({ code: 'BOOTH_NOT_FOUND', message: 'Booth not found.' });
     }
 
     try {
       return await this.boothsRepository.updateBooth(id, data);
     } catch (error: any) {
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('label')) {
-        throw new ConflictException('A booth with this label already exists in this layout.');
+        throw new ConflictException({ code: 'BOOTH_LABEL_TAKEN', message: 'A booth with this label already exists in this layout.' });
       }
       throw error;
     }
@@ -91,11 +91,11 @@ export class BoothsService {
   async deleteBooth(id: string) {
     const booth = await this.boothsRepository.findBoothById(id);
     if (!booth) {
-      throw new NotFoundException('Booth not found.');
+      throw new NotFoundException({ code: 'BOOTH_NOT_FOUND', message: 'Booth not found.' });
     }
 
     if (booth.boothListingId !== null) {
-      throw new BadRequestException('Unassign the vendor before deleting this booth.');
+      throw new BadRequestException({ code: 'BOOTH_ASSIGNED', message: 'Unassign the vendor before deleting this booth.' });
     }
 
     return this.boothsRepository.deleteBooth(id);
@@ -104,20 +104,20 @@ export class BoothsService {
   async assignBooth(id: string, boothListingId: string) {
     const booth = await this.boothsRepository.findBoothById(id);
     if (!booth) {
-      throw new NotFoundException('Booth not found.');
+      throw new NotFoundException({ code: 'BOOTH_NOT_FOUND', message: 'Booth not found.' });
     }
 
     if (booth.boothListingId !== null) {
-      throw new BadRequestException('Booth already has a vendor assigned — unassign first.');
+      throw new BadRequestException({ code: 'BOOTH_ASSIGNED', message: 'Booth already has a vendor assigned — unassign first.' });
     }
 
     const application = await this.bazaarsService.findApplicationById(boothListingId);
     if (!application) {
-      throw new NotFoundException('Booth listing application not found.');
+      throw new NotFoundException({ code: 'APPLICATION_NOT_FOUND', message: 'Booth listing application not found.' });
     }
 
     if (application.applicationStatus !== ApplicationStatus.ACCEPTED) {
-      throw new BadRequestException('Application is not accepted.');
+      throw new BadRequestException({ code: 'APPLICATION_NOT_ACCEPTED', message: 'Application is not accepted.' });
     }
 
     // Need the layout to verify bazaarId
@@ -132,7 +132,7 @@ export class BoothsService {
       return await this.boothsRepository.assignBooth(id, boothListingId);
     } catch (error: any) {
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('boothListingId')) {
-        throw new ConflictException('This vendor application is already assigned to another booth.');
+        throw new ConflictException({ code: 'APPLICATION_ALREADY_ASSIGNED', message: 'This vendor application is already assigned to another booth.' });
       }
       throw error;
     }
@@ -141,7 +141,7 @@ export class BoothsService {
   async unassignBooth(id: string) {
     const booth = await this.boothsRepository.findBoothById(id);
     if (!booth) {
-      throw new NotFoundException('Booth not found.');
+      throw new NotFoundException({ code: 'BOOTH_NOT_FOUND', message: 'Booth not found.' });
     }
 
     if (booth.boothListingId === null) {
@@ -155,12 +155,12 @@ export class BoothsService {
     // Only succeeds if the bazaar is status: PUBLISHED and deletedAt: null
     const bazaar = await this.bazaarsService.findPublicById(bazaarId);
     if (!bazaar) {
-      throw new NotFoundException('Bazaar not found or not published.');
+      throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found or not published.' });
     }
 
     const layout = await this.boothsRepository.findPublicLayoutByBazaarId(bazaarId);
     if (!layout) {
-      throw new NotFoundException('Layout not found for this bazaar.');
+      throw new NotFoundException({ code: 'LAYOUT_NOT_FOUND', message: 'Layout not found for this bazaar.' });
     }
 
     // Map the shape

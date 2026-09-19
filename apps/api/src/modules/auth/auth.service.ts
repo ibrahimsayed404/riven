@@ -1,9 +1,9 @@
-import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { compare, hash } from 'bcrypt';
 import { createHash, randomBytes } from 'node:crypto';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 
 import { RegisterDto } from './dto/register.dto';
 import { AuthRepository } from './auth.repository';
@@ -14,6 +14,19 @@ import { RegisterVendorDto } from './dto/register-vendor.dto';
 import { RegisterOrganizerDto } from './dto/register-organizer.dto';
 
 const PASSWORD_SALT_ROUNDS = 12;
+
+/**
+ * One canonical form for every email we store or look up, so Foo@x.com and
+ * foo@x.com are the same account (fix.js AUTH-03). Done here rather than in a
+ * DTO @Transform so it also applies when a test boots without transform: true.
+ */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
 
 type RegisteredUserResponse = {
   id: string;
@@ -43,22 +56,29 @@ export class AuthService {
   ) {}
 
   async register(registerDto: RegisterDto): Promise<RegisteredUserResponse> {
-    const existingUser = await this.authRepository.findUserByEmail(registerDto.email);
-
-    if (existingUser) {
-      throw new ConflictException({
-        code: 'EMAIL_ALREADY_EXISTS',
-        message: 'A user with this email already exists.',
+    // Public registration is shopper-only. Vendors and organizers have their own
+    // routes that create the profile row in the same transaction; a VENDOR user
+    // without a Vendor row is unusable (fix.js AUTH-02). ADMIN is rejected here
+    // as well as in the DTO — CLAUDE.md wants the service to own that rule.
+    if (registerDto.role !== undefined && registerDto.role !== Role.SHOPPER) {
+      throw new BadRequestException({
+        code: 'ROLE_NOT_SELF_ASSIGNABLE',
+        message: 'Only shopper accounts can be created here. Use /auth/register/vendor or /auth/register/organizer.',
       });
     }
 
+    const email = normalizeEmail(registerDto.email);
+    await this.assertEmailAvailable(email);
+
     const passwordHash = await hash(registerDto.password, PASSWORD_SALT_ROUNDS);
-    const user = await this.authRepository.createUser({
-      email: registerDto.email,
-      name: registerDto.name,
-      passwordHash,
-      role: registerDto.role,
-    });
+    const user = await this.createUserOrConflict(() =>
+      this.authRepository.createUser({
+        email,
+        name: registerDto.name,
+        passwordHash,
+        role: Role.SHOPPER,
+      }),
+    );
 
     return {
       id: user.id,
@@ -70,31 +90,27 @@ export class AuthService {
   }
 
   async registerVendor(registerVendorDto: RegisterVendorDto): Promise<LoginResponse> {
-    const existingUser = await this.authRepository.findUserByEmail(registerVendorDto.email);
-
-    if (existingUser) {
-      throw new ConflictException({
-        code: 'EMAIL_ALREADY_EXISTS',
-        message: 'A user with this email already exists.',
-      });
-    }
+    const email = normalizeEmail(registerVendorDto.email);
+    await this.assertEmailAvailable(email);
 
     const passwordHash = await hash(registerVendorDto.password, PASSWORD_SALT_ROUNDS);
-    
-    const user = await this.authRepository.createVendorUser(
-      {
-        email: registerVendorDto.email,
-        name: registerVendorDto.name,
-        passwordHash,
-        role: Role.VENDOR,
-      },
-      {
-        name: registerVendorDto.businessName,
-        category: registerVendorDto.category,
-        vendorType: registerVendorDto.vendorType,
-        description: registerVendorDto.description,
-        // verified defaults to false
-      }
+
+    const user = await this.createUserOrConflict(() =>
+      this.authRepository.createVendorUser(
+        {
+          email,
+          name: registerVendorDto.name,
+          passwordHash,
+          role: Role.VENDOR,
+        },
+        {
+          name: registerVendorDto.businessName,
+          category: registerVendorDto.category,
+          vendorType: registerVendorDto.vendorType,
+          description: registerVendorDto.description,
+          // verified defaults to false
+        },
+      ),
     );
 
     const accessToken = await this.jwtService.signAsync({
@@ -116,28 +132,24 @@ export class AuthService {
   }
 
   async registerOrganizer(registerOrganizerDto: RegisterOrganizerDto): Promise<LoginResponse> {
-    const existingUser = await this.authRepository.findUserByEmail(registerOrganizerDto.email);
-
-    if (existingUser) {
-      throw new ConflictException({
-        code: 'EMAIL_ALREADY_EXISTS',
-        message: 'A user with this email already exists.',
-      });
-    }
+    const email = normalizeEmail(registerOrganizerDto.email);
+    await this.assertEmailAvailable(email);
 
     const passwordHash = await hash(registerOrganizerDto.password, PASSWORD_SALT_ROUNDS);
-    
-    const user = await this.authRepository.createOrganizerUser(
-      {
-        email: registerOrganizerDto.email,
-        name: registerOrganizerDto.name,
-        passwordHash,
-        role: Role.ORGANIZER,
-      },
-      {
-        name: registerOrganizerDto.organizationName,
-        // verified defaults to false in schema
-      }
+
+    const user = await this.createUserOrConflict(() =>
+      this.authRepository.createOrganizerUser(
+        {
+          email,
+          name: registerOrganizerDto.name,
+          passwordHash,
+          role: Role.ORGANIZER,
+        },
+        {
+          name: registerOrganizerDto.organizationName,
+          // verified defaults to false in schema
+        },
+      ),
     );
 
     const accessToken = await this.jwtService.signAsync({
@@ -164,7 +176,7 @@ export class AuthService {
       message: 'Invalid email or password.',
     });
 
-    const user = await this.authRepository.findUserByEmail(loginDto.email);
+    const user = await this.authRepository.findUserByEmail(normalizeEmail(loginDto.email));
 
     if (!user) {
       throw invalidCredentialsException;
@@ -256,6 +268,45 @@ export class AuthService {
     await this.authRepository.revokeRefreshToken(
       this.hashRefreshToken(logoutDto.refreshToken),
     );
+  }
+
+  /**
+   * Kill every session of a user. Called when an account is deactivated or
+   * deleted so the soft-delete is not merely cosmetic (fix.js AUTH-01). Access
+   * tokens already issued stay valid until their short TTL; JwtStrategy now
+   * rejects the user on the next lookup anyway.
+   */
+  async revokeAllSessions(userId: string): Promise<void> {
+    await this.authRepository.revokeAllActiveRefreshTokensForUser(userId);
+  }
+
+  private async assertEmailAvailable(email: string): Promise<void> {
+    if (await this.authRepository.findUserByEmail(email)) {
+      throw this.emailAlreadyExists();
+    }
+  }
+
+  /**
+   * The pre-check above is the friendly path; the unique index is the truth.
+   * Two concurrent signups both pass the check — the loser gets P2002, which
+   * must be a 409, not a 500 (fix.js AUTH-04).
+   */
+  private async createUserOrConflict<T>(create: () => Promise<T>): Promise<T> {
+    try {
+      return await create();
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw this.emailAlreadyExists();
+      }
+      throw error;
+    }
+  }
+
+  private emailAlreadyExists(): ConflictException {
+    return new ConflictException({
+      code: 'EMAIL_ALREADY_EXISTS',
+      message: 'A user with this email already exists.',
+    });
   }
 
   private async createRefreshToken(userId: string): Promise<string> {

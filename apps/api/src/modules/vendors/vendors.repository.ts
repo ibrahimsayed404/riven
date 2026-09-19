@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Vendor, Product, ProductVariant } from '@prisma/client';
+import { Prisma, Product, ProductVariant } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { ACTIVE_VARIANT_WHERE } from '../products/product-visibility';
 
 const vendorProfileSelect = {
   id: true,
@@ -24,6 +25,27 @@ const vendorProfileSelect = {
 } satisfies Prisma.VendorSelect;
 
 export type VendorProfile = Prisma.VendorGetPayload<{ select: typeof vendorProfileSelect }>;
+
+// The storefront a shopper sees. Deliberately not derived from the profile
+// select: no ownerId, subscriptionStatus, rejectionReason (fix.js VULN-03).
+const vendorPublicSelect = {
+  id: true,
+  name: true,
+  category: true,
+  description: true,
+  logo: true,
+  coverMedia: true,
+  hasFixedLocation: true,
+  vendorType: true,
+  brandStory: true,
+  logoUrl: true,
+  bannerUrl: true,
+  returnPolicy: true,
+  shippingPolicy: true,
+  createdAt: true,
+} satisfies Prisma.VendorSelect;
+
+export type VendorPublic = Prisma.VendorGetPayload<{ select: typeof vendorPublicSelect }>;
 
 // Only what the search index is allowed to see — see VendorSearchDocument.
 const vendorForSearchSelect = {
@@ -88,16 +110,32 @@ export class VendorsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   findByOwnerId(ownerId: string): Promise<VendorProfile | null> {
-    return this.prisma.vendor.findUnique({ 
+    return this.prisma.vendor.findUnique({
       where: { ownerId },
       select: vendorProfileSelect,
     });
   }
 
   findById(id: string): Promise<VendorProfile | null> {
-    return this.prisma.vendor.findUnique({ 
+    return this.prisma.vendor.findUnique({
       where: { id },
       select: vendorProfileSelect,
+    });
+  }
+
+  /** Soft-deletes the vendor owned by this user, if any. Returns the vendor id or null. */
+  async softDeleteByOwner(ownerId: string): Promise<string | null> {
+    const vendor = await this.prisma.vendor.findFirst({ where: { ownerId, deletedAt: null }, select: { id: true } });
+    if (!vendor) return null;
+    await this.prisma.vendor.update({ where: { id: vendor.id }, data: { deletedAt: new Date() } });
+    return vendor.id;
+  }
+
+  /** Storefront read: verified and not soft-deleted, else null. */
+  findPublicById(id: string): Promise<VendorPublic | null> {
+    return this.prisma.vendor.findFirst({
+      where: { id, verified: true, deletedAt: null },
+      select: vendorPublicSelect,
     });
   }
 
@@ -206,21 +244,23 @@ export class VendorsRepository {
     });
   }
 
+  // "All statuses" means every approvalStatus — not deleted rows. A deleted
+  // product must not be editable or re-submitted for approval (fix.js LOGIC-02).
   findProductByIdAndVendor(productId: string, vendorId: string): Promise<(Product & { variants: ProductVariant[] }) | null> {
     return this.prisma.product.findFirst({
       where: {
         id: productId,
         vendorId,
-        // deletedAt: null // Assuming soft delete via deletedAt? Wait, the spec says: "DELETE /vendors/me/products/:id — soft-delete (deletedAt)." But we should include deleted items if needed or just filter? Spec says "GET /vendors/me/products — paginated, all statuses". I should just return it.
+        deletedAt: null,
       },
       include: {
-        variants: true,
-      }
+        variants: { where: ACTIVE_VARIANT_WHERE },
+      },
     });
   }
 
   findProductsPaginated(vendorId: string, page: number, limit: number): Promise<{ data: Product[]; total: number }> {
-    const where: Prisma.ProductWhereInput = { vendorId };
+    const where: Prisma.ProductWhereInput = { vendorId, deletedAt: null };
     return this.prisma.$transaction(async (tx) => {
       const total = await tx.product.count({ where });
       const data = await tx.product.findMany({
@@ -267,9 +307,11 @@ export class VendorsRepository {
     });
   }
 
+  /** Soft delete: cart_items and order_items reference variants with RESTRICT (fix.js LOGIC-03). */
   deleteProductVariant(variantId: string): Promise<ProductVariant> {
-    return this.prisma.productVariant.delete({
+    return this.prisma.productVariant.update({
       where: { id: variantId },
+      data: { deletedAt: new Date() },
     });
   }
 }

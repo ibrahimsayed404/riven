@@ -1,13 +1,16 @@
 import { Module } from '@nestjs/common';
-import { CheckoutController } from './checkout.controller';
-import { PaymobWebhookController } from './paymob-webhook.controller';
-import { CheckoutService } from './checkout.service';
-import { ProductsModule } from '../products/products.module';
-import { PaymobModule } from '../../infra/paymob/paymob.module';
 
+import { PaymobModule } from '../../infra/paymob/paymob.module';
+import { CheckoutController } from './checkout.controller';
+import { CheckoutRepository } from './checkout.repository';
+import { CheckoutService } from './checkout.service';
+import { OrderPaymentHandler } from './order-payment.handler';
+
+// The Paymob webhook route lives in PaymobModule; this module only registers
+// OrderPaymentHandler with its dispatcher (fix.js PLAN-02).
 @Module({
-  imports: [ProductsModule, PaymobModule],
-  controllers: [CheckoutController, PaymobWebhookController],
-  providers: [CheckoutService],
+  imports: [PaymobModule],
+  controllers: [CheckoutController],
+  providers: [CheckoutService, CheckoutRepository, OrderPaymentHandler],
 })
 export class CheckoutModule {}

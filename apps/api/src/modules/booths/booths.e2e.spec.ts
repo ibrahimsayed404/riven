@@ -3,7 +3,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AppModule } from '../../app.module';
-import { Role, ApplicationStatus, BazaarStatus, ScheduleType } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 
 describe('BoothsModule (e2e)', () => {
