@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| **Status** | Pending |
+| **Status** | **Mechanism fixed** `3a7ec6b` — the value is still a deployment decision |
 | **Files** | `apps/api/src/app.setup.ts:11-25` · `apps/api/src/common/guards/user-throttler.guard.ts:15-19` · `apps/api/src/modules/auth/auth.controller.ts:39-43` |
 | **Effort** | ~15 min |
 | **Risk of the fix** | Low — one line, but it changes how every client IP is derived, so it needs a deliberate value (see below), not a blind `true`. |
@@ -338,3 +338,38 @@ Two things for the reviewer:
 
 1. **P0-01 is still open and still needs the proxy topology.** N-01 fixed *who* gets a bucket; P0-01 is about whether the IP fallback identifies anything real. Authenticated traffic is now keyed correctly regardless of proxy configuration, which meaningfully reduces P0-01's blast radius — but `POST /auth/login` is unauthenticated by definition, so the login-lockout scenario is untouched.
 2. **The per-user limits are now real for the first time.** `PATCH /users/me/location` genuinely enforces one update per minute per user. If any client polls location more often than that and was previously getting away with it on a shared IP bucket, it will now see 429s. Worth checking the mobile app's location cadence before this reaches production.
+
+## 9. Fix session addendum — P0-01
+
+`3a7ec6b` — `fix(P0-01): derive req.ip from a configured trust-proxy setting`. Three files: `env.validation.ts`, `app.setup.ts`, `.env.example`.
+
+Checks: typecheck exit 0 · `check:env` ok (13 required, 9 optional) · lint **0 errors** · **29 suites / 290 tests passing**.
+
+### What was done, and what deliberately was not
+
+The missing information was never *how* to fix this — it was **which value is correct for this deployment**, and that is not a fact about the code. So the mechanism now exists and reads from config, with the default preserving today's behaviour exactly. `TRUST_PROXY` unset or empty parses to `false`, so **this commit changes no runtime behaviour until somebody sets it**.
+
+`true` is refused at boot. That is a deliberate guardrail, not an oversight: it trusts the entire `X-Forwarded-For` chain including the portion the client wrote, so any caller can forge a fresh rate-limit identity per request. That converts a denial-of-service into a full bypass — strictly worse than the bug. A hop count or CIDR list expresses the same intent without the hole.
+
+### Evidence, measured rather than asserted
+
+Against the installed express 5.2.1, sending `X-Forwarded-For: 203.0.113.7, 10.0.0.9` over a real socket:
+
+| `trust proxy` | `req.ip` | `req.ips` |
+|---|---|---|
+| unset / `false` | `127.0.0.1` (the socket) | `[]` |
+| `1` | `10.0.0.9` | `["10.0.0.9"]` |
+| `2` | `203.0.113.7` | `["203.0.113.7","10.0.0.9"]` |
+| `true` | `203.0.113.7` — written entirely by the client | `["203.0.113.7","10.0.0.9"]` |
+
+This also shows why the number must match reality: with exactly one real proxy, `1` yields the true client address, while `2` would hand an attacker control of the value.
+
+`validateEnv` checked directly: unset → `false`, `""` → `false`, `"false"` → `false`, `"1"` → `1`, `"10.0.0.0/8, loopback"` → `["10.0.0.0/8","loopback"]`, `"true"` and `"TRUE"` → boot failure.
+
+### Still required from the infrastructure owner
+
+**One value.** What is in front of the Node process in production, and how many of those hops are ours — and does the outermost one overwrite `X-Forwarded-For` rather than appending to what the client sent? Until `TRUST_PROXY` is set in the production environment, the original defect is still live in production even though the code is now capable of fixing it. **This is a deploy-time task, not a code task, and it should not be marked done when the branch merges.**
+
+### Not covered by a test
+
+No automated test asserts that `configureApp` applies the setting. Adding one means touching `app.smoke.spec.ts`, which would have made this a four-file change, over the limit you set. The Express behaviour above is verified empirically and the env parsing is verified directly, but the wiring between them rests on review. Worth adding when convenient.
