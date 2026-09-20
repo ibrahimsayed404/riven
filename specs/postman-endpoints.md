@@ -438,13 +438,13 @@ Query: `q`, `types?` = comma list of product,vendor,bazaar, `limit` <=20.
 
 ### GET /search/products
 Query: `q`, `categoryId?`, `category?` (slug), `vendorId?`, `minPrice?`, `maxPrice?`, `size?`, `color?`, `sort?` (relevance | price_asc | price_desc | newest), `page`, `limit`.
-200 → `{ data, meta }`. Only publicly visible products are indexed.
+200 → `{ hits: [...], estimatedTotalHits, page, limit }`. Only publicly visible products are indexed.
 
 ### GET /search/vendors
-Query: `q`, `category?`: VendorCategory, `vendorType?`, geo, `page`, `limit`. 200 → `{ data, meta }`. Verified vendors only.
+Query: `q`, `category?`: VendorCategory, `vendorType?`, geo, `page`, `limit`. 200 → `{ hits, estimatedTotalHits, page, limit }`. Verified vendors only.
 
 ### GET /search/bazaars
-Query: `q`, `scheduleType?`, `upcomingOnly?` (default true), geo, `page`, `limit`. 200 → `{ data, meta }`. PUBLISHED only.
+Query: `q`, `scheduleType?`, `upcomingOnly?` (default true), geo, `page`, `limit`. 200 → `{ hits, estimatedTotalHits, page, limit }`. PUBLISHED only.
 
 ### POST /admin/search/reindex
 Queues a full rebuild of one or all indexes from Postgres.
