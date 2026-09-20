@@ -22,14 +22,20 @@ export type SearchSyncJob =
  * Deterministic job ids so BullMQ deduplicates while a job is still waiting.
  * Requires removeOnComplete on the queue (see SearchIndexQueue) — a lingering
  * completed job with the same id would make every later add a silent no-op.
+ *
+ * No ':' in the id: BullMQ reserves that character for repeatable-job ids and
+ * throws "Custom Id cannot contain :" on add, which turned every write that
+ * re-indexes (profile edit, product approve, bazaar publish, ...) into a 500.
  */
+const JOB_ID_SEPARATOR = '.';
+
 export function searchSyncJobId(job: SearchSyncJob): string {
   switch (job.type) {
     case 'VENDOR_PRODUCTS':
-      return `VENDOR_PRODUCTS:${job.vendorId}`;
+      return `VENDOR_PRODUCTS${JOB_ID_SEPARATOR}${job.vendorId}`;
     case 'REINDEX':
-      return `REINDEX:${job.index}`;
+      return `REINDEX${JOB_ID_SEPARATOR}${job.index}`;
     default:
-      return `${job.type}:${job.id}`;
+      return `${job.type}${JOB_ID_SEPARATOR}${job.id}`;
   }
 }
