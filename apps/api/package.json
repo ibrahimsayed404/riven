@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand --testPathIgnorePatterns e2e",
-    "test:e2e": "jest --runInBand --testPathPattern e2e",
+    "test:e2e": "jest --runInBand --testPathPatterns e2e",
     "check:env": "node scripts/check-env-example.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.seed.json",
     "prisma": "prisma"
