@@ -30,6 +30,8 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   ],
   controllers: [AuthController],
   providers: [AuthService, AuthRepository, JwtStrategy],
-  exports: [AuthService],
+  // JwtModule is exported so UserThrottlerGuard (an APP_GUARD, runs before
+  // JwtAuthGuard) can verify the bearer token and key limits per user.
+  exports: [AuthService, JwtModule],
 })
 export class AuthModule {}

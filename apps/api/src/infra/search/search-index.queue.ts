@@ -7,10 +7,13 @@ import { SEARCH_SYNC_QUEUE, SearchSyncJob, searchSyncJobId } from './search-sync
 /**
  * Queue options for every search-sync job.
  *
- * removeOnComplete is not a tidiness setting here — it is what makes jobId
- * deduplication work. BullMQ only lets a jobId be reused once the previous
- * job with that id is gone; if completed jobs lingered, every later enqueue
- * for the same entity would be silently dropped and it would never sync again.
+ * Deduplication is by BullMQ's `deduplication` option, not by a custom jobId:
+ * a custom jobId silently drops an add while a job with that id is *active*,
+ * and the active job has already read the database — so "create bazaar,
+ * publish it 50 ms later" left the bazaar un-indexed. `keepLastIfActive`
+ * queues one follow-up job that runs after the active one and sees the
+ * committed state. removeOnComplete keeps the queue small; it is no longer
+ * what makes dedup correct.
  */
 export const SEARCH_SYNC_JOB_OPTIONS: JobsOptions = {
   removeOnComplete: true,
@@ -26,12 +29,15 @@ export const SEARCH_SYNC_JOB_OPTIONS: JobsOptions = {
  *
  * Call after the owning $transaction has committed, never inside it.
  */
+/** One job per entity in the queue at a time, plus at most one queued behind an active one. */
+const dedup = (job: SearchSyncJob): JobsOptions['deduplication'] => ({ id: searchSyncJobId(job), keepLastIfActive: true });
+
 @Injectable()
 export class SearchIndexQueue {
   constructor(@InjectQueue(SEARCH_SYNC_QUEUE) private readonly queue: Queue<SearchSyncJob>) {}
 
   async enqueue(job: SearchSyncJob): Promise<void> {
-    await this.queue.add(job.type, job, { ...SEARCH_SYNC_JOB_OPTIONS, jobId: searchSyncJobId(job) });
+    await this.queue.add(job.type, job, { ...SEARCH_SYNC_JOB_OPTIONS, deduplication: dedup(job) });
   }
 
   async enqueueMany(jobs: SearchSyncJob[]): Promise<void> {
@@ -40,7 +46,7 @@ export class SearchIndexQueue {
       jobs.map((job) => ({
         name: job.type,
         data: job,
-        opts: { ...SEARCH_SYNC_JOB_OPTIONS, jobId: searchSyncJobId(job) },
+        opts: { ...SEARCH_SYNC_JOB_OPTIONS, deduplication: dedup(job) },
       })),
     );
   }

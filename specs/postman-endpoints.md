@@ -253,7 +253,7 @@ Empties the cart. Auth: SHOPPER. 200/204.
 ### POST /checkout
 Turns the cart into one **OrderGroup** with one **Order per vendor**, reserves stock, empties the cart, and asks Paymob for a payment intention. If Paymob is not configured (local dev) the orders are still created and `paymentSetupFailed: true` is returned — call retry-payment later.
 Auth: SHOPPER. Body: none.
-201 → `{ orderGroupId, orders: [{ id, vendorId, status: "PENDING", subtotal, items }], totalAmount, payment fields, paymentSetupFailed? }`
+201 → the OrderGroup: `{ id (= orderGroupId), userId, totalAmount, paymobIntentId?, orders: [{ id, vendorId, status: "PENDING", subtotal, items }], paymentSetupFailed }`
 Errors: 400 CART_EMPTY · 400 CHECKOUT_ITEM_UNAVAILABLE (`details.items` lists the bad lines: unavailable / insufficient stock).
 Note: a PENDING group that is never paid is auto-cancelled after 60 min and its stock released.
 
@@ -282,7 +282,7 @@ Auth: SHOPPER (owner). Body: none.
 
 ### PATCH /orders/:id/confirm-delivery
 Shopper confirms receipt: SHIPPED → DELIVERED. Unlocks rating the vendor/products of this order.
-Auth: SHOPPER (owner). 200 → order. Errors: 404 · 400 INVALID_TRANSITION · 409 ORDER_STATE_CHANGED.
+Auth: SHOPPER (owner). 200 → order. Errors: 404 · 400 ORDER_NOT_SHIPPED · 409 ORDER_STATE_CHANGED.
 
 ### GET /vendors/me/orders
 The vendor's sub-orders with shopper contact (`user: { name, email, phone }`) — no `items` in the list.
@@ -295,7 +295,7 @@ Auth: VENDOR (owner). 200. Errors: 404 ORDER_NOT_FOUND.
 ### PATCH /vendors/me/orders/:id/status
 Vendor progresses fulfilment. Allowed: PAID → FULFILLED, FULFILLED → SHIPPED only.
 Auth: VENDOR (owner). Body: `{ "status": "FULFILLED" | "SHIPPED" }`
-200 → order. Errors: 400 VENDOR_TRANSITION_NOT_ALLOWED · 400 INVALID_TRANSITION · 409 ORDER_STATE_CHANGED.
+200 → order. Errors: 400 VENDOR_TRANSITION_NOT_ALLOWED (any value other than FULFILLED/SHIPPED) · 400 INVALID_ORDER_TRANSITION (wrong current state; message lists allowed next states) · 409 ORDER_STATE_CHANGED.
 
 ---
 
@@ -303,7 +303,7 @@ Auth: VENDOR (owner). Body: `{ "status": "FULFILLED" | "SHIPPED" }`
 
 ### GET /bazaars
 Published bazaars, optionally near a point.
-Auth: none. Query: `lat?`, `lng?`, `radiusKm?` (all three together for proximity), `scheduleType?`, `page`, `limit`.
+Auth: none. Query: `lat?` (-90..90), `lng?` (-180..180), `radiusKm?` (0.1–150; all three together for proximity), `scheduleType?`, `page` (>=1), `limit` (1–100, default 20).
 200 → `{ data: [bazaar + location {lat,lng}], meta }`
 
 ### GET /bazaars/:id
@@ -355,7 +355,7 @@ PENDING → REJECTED. Auth: ORGANIZER (owner). 200. Errors: 404 · 400 APPLICATI
 
 ### POST /bazaars/:id/apply
 Vendor applies to a PUBLISHED bazaar. One application per vendor per bazaar. Vendor must be verified.
-Auth: VENDOR. Body: none. 201 → application (PENDING). Errors: 404 BAZAAR_NOT_FOUND · 403 VENDOR_NOT_VERIFIED · 409 ALREADY_APPLIED.
+Auth: VENDOR. Body: none. 201 → application (PENDING). Errors: 403 VENDOR_NOT_VERIFIED · 404 BAZAAR_NOT_FOUND · 400 BAZAAR_NOT_ACCEPTING_APPLICATIONS (exists but not PUBLISHED) · 409 APPLICATION_EXISTS.
 
 ### DELETE /bazaars/:id/apply
 Withdraws a PENDING application. Auth: VENDOR. 204. Errors: 404.

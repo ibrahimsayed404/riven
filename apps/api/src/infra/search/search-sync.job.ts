@@ -7,7 +7,7 @@ export type SearchSyncEntityType = 'PRODUCT' | 'VENDOR' | 'BAZAAR';
 /**
  * Jobs carry identifiers only — never a document snapshot. The processor reads
  * current database state when it runs, so collapsing a burst of updates to the
- * same entity into one job (via jobId) is safe by construction.
+ * same entity into one job (via the deduplication id) is safe by construction.
  */
 export type SearchSyncJob =
   // Sync one entity: upsert if index-eligible, delete otherwise.
