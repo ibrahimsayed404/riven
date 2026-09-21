@@ -1,11 +1,12 @@
 import { Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { Role, ApplicationStatus } from '@prisma/client';
+import { Role } from '@prisma/client';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { BazaarsService } from './bazaars.service';
+import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
 
 @Controller()
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -31,12 +32,8 @@ export class VendorBazaarApplicationsController {
   }
 
   @Get('vendors/me/bazaar-applications')
-  getApplications(
-    @CurrentUser('id') ownerId: string,
-    @Query('page') page: string = '1',
-    @Query('limit') limit: string = '10',
-    @Query('status') status?: ApplicationStatus,
-  ) {
-    return this.bazaarsService.getVendorApplications(ownerId, parseInt(page, 10), parseInt(limit, 10), status);
+  getApplications(@CurrentUser('id') ownerId: string, @Query() query: ListApplicationsQueryDto) {
+    const { page = 1, limit = 20, status } = query;
+    return this.bazaarsService.getVendorApplications(ownerId, page, limit, status);
   }
 }

@@ -10,7 +10,7 @@ export class SearchAdminService {
   /**
    * Backfill / recovery. Enqueues one REINDEX job per index; the processor
    * pages ids from Postgres and fans out per-entity jobs. A second request
-   * while one is still pending deduplicates on jobId (REINDEX.<index>).
+   * while one is still pending deduplicates on the deduplication id (REINDEX.<index>).
    */
   async reindex(types?: SearchIndexName[]): Promise<{ enqueued: SearchIndexName[] }> {
     const indexes = types && types.length > 0 ? types : [...SEARCH_INDEXES];
