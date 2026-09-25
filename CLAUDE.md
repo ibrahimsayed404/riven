@@ -139,8 +139,8 @@ pnpm typecheck
 ## Gotchas
 
 - **Postgres is on host port 5433**, not 5432 — deliberate, to avoid colliding with a local Postgres install.
-- **`test` wipes the database.** Unit and e2e specs run together (`testRegex: .*\.spec\.ts$`), and the e2e specs `deleteMany()` users, vendors, bazaars and booths against the configured database. There is no separate test DB and no seed script.
+- **`test` wipes the database.** Unit and e2e specs run together (`testRegex: .*\.spec\.ts$`), and the e2e specs `deleteMany()` users, vendors, bazaars and booths against the configured database. There is no separate test DB. The seed script (`pnpm --filter @riven/api prisma db seed`, `prisma/seed.ts`) only upserts the placeholder category tree — safe to re-run. It does **not** create an ADMIN user: the first admin is still a manual DB insert (`specs/admin-module-spec.md` Open Item 1).
 - **CI** runs lint + typecheck + `check:env`, then unit tests, then `prisma migrate deploy` + e2e against throwaway postgis/redis/meilisearch containers (`.github/workflows/ci.yml`). Locally: `test:unit` needs no services; `test:e2e` and `test` wipe the configured database.
 - **Env vars are Zod-validated at boot** (`infra/config/env.validation.ts`), including `S3_*` (required) and `PAYMOB_*` (optional, but must be well-formed when set). `pnpm --filter @riven/api check:env` verifies `.env.example` still lists every required key.
-- **`apps/api/prisma/schema.prisma` is the source of truth**; `specs/schema.prisma` is a reference copy that has drifted.
+- **`apps/api/prisma/schema.prisma` is the source of truth**; `specs/schema.prisma` is now an empty pointer to it (it used to be a copy that drifted).
 - **Paymob webhook ID-matching is still unverified against a real sandbox.** The handler (`modules/checkout/paymob-webhook.service.ts`) matches only on signed fields (`order.id`, `id`) against `OrderGroup.paymobOrderId` / `paymobIntentId`, and `paymobOrderId` is read from `intention_order_id` in the intention response — both field names need confirming with a sandbox payload before any other payment work. Money is integer piastres end to end (`common/money.ts`).
