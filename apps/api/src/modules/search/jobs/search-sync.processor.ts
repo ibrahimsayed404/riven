@@ -56,6 +56,9 @@ export class SearchSyncProcessor extends WorkerHost {
         case 'VENDOR_PRODUCTS':
           await this.fanOutVendorProducts(data.vendorId);
           return;
+        case 'CATEGORY_PRODUCTS':
+          await this.fanOutCategoryProducts(data.categoryId);
+          return;
         case 'REINDEX':
           await this.reindex(data.index);
           return;
@@ -105,6 +108,15 @@ export class SearchSyncProcessor extends WorkerHost {
       (ids) => this.queue.enqueueMany(ids.map((id) => ({ type: 'PRODUCT' as const, id }))),
     );
     this.logger.log(`search-sync: fanned out ${total} product jobs for vendor ${vendorId}`);
+  }
+
+  /** Same as the vendor fan-out, for the products filed directly under one category. */
+  private async fanOutCategoryProducts(categoryId: string): Promise<void> {
+    const total = await this.forEachPage(
+      (cursor) => this.productsService.listProductIdsByCategory(categoryId, cursor, SEARCH_SYNC_BATCH_SIZE),
+      (ids) => this.queue.enqueueMany(ids.map((id) => ({ type: 'PRODUCT' as const, id }))),
+    );
+    this.logger.log(`search-sync: fanned out ${total} product jobs for category ${categoryId}`);
   }
 
   private async reindex(index: SearchIndexName): Promise<void> {

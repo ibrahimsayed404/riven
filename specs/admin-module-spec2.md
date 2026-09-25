@@ -120,7 +120,11 @@ Admins can moderate the approval queues (pass 1), but they can't *see* most of t
   - An unknown `parentId` gives **404 `CATEGORY_PARENT_NOT_FOUND`**.
   - A `parentId` equal to the category itself or one of its descendants gives **400 `CATEGORY_CYCLE`**. Walk the ancestors of the new parent inside the same `$transaction` as the update.
   - A PATCH that changes nothing is a no-op: 200, no audit row.
-- **Search side-effect:** product search documents embed `categorySlug` and `categoryPath` (`products.service.ts:129-140`). After a committed update that changes `slug`, `name` or `parentId`, enqueue a product re-index for every product in the category **and its descendants**, using the existing search-sync queue (`infra/search`). Enqueue after commit, never inside the transaction. Create doesn't need this, because a new category has no products.
+  - A PATCH with none of the three fields gives **400 `CATEGORY_UPDATE_EMPTY`** *(added during implementation)*.
+  - The cycle walk runs at **Serializable** isolation, because two concurrent moves could each pass the check under READ COMMITTED and together create a loop.
+- **Search side-effect:** product search documents embed `categorySlug` and `categoryPath` (`products.service.ts:129-140`). After a committed update, enqueue a product re-index for every product in the category **and its descendants**, using the existing search-sync queue (`infra/search`). Enqueue after commit, never inside the transaction. Create doesn't need this, because a new category has no products.
+  - **Corrected during implementation:** only a change to `slug` or `parentId` triggers it. `categoryPath` is built from **slugs** (`findCategoryPath` selects `slug`), and the name isn't in the search document, so a rename alone leaves every document correct.
+  - **Mechanism:** a new `CATEGORY_PRODUCTS { categoryId }` search-sync job, one per category in the subtree (resolved by the categories service). The processor pages that category's product ids through `ProductsService.listProductIdsByCategory` and enqueues `PRODUCT` jobs. This mirrors the existing `VENDOR_PRODUCTS` fan-out.
 - **Delete is not in Part A**; see **B3**.
 
 ### A8. Schema change — one migration
@@ -142,7 +146,7 @@ No new tables or columns. Part B decisions add their own enum values in their ow
 
 ### A9. Errors added in this pass
 
-`BAZAAR_NOT_FOUND`, `APPLICATION_NOT_FOUND`, `ORDER_NOT_FOUND` (these reuse existing codes if the module already throws them; check first), `CATEGORY_NOT_FOUND`, `CATEGORY_PARENT_NOT_FOUND`, `CATEGORY_SLUG_TAKEN` (409), `CATEGORY_CYCLE` (400).
+`BAZAAR_NOT_FOUND`, `APPLICATION_NOT_FOUND`, `ORDER_NOT_FOUND` (these reuse existing codes if the module already throws them; check first), `CATEGORY_NOT_FOUND`, `CATEGORY_PARENT_NOT_FOUND`, `CATEGORY_SLUG_TAKEN` (409), `CATEGORY_CYCLE` (400), `CATEGORY_UPDATE_EMPTY` (400, added during A7 implementation).
 
 ### A10. Tasks — each is one reviewed unit, with staged diffs (repository/service → controllers/DTOs → tests)
 

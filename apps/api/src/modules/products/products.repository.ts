@@ -181,6 +181,11 @@ export class ProductsRepository {
     return this.pageIds({ vendorId }, cursor, take);
   }
 
+  /** Every product filed directly under a category, any status — eligibility is decided per product later. */
+  async listIdsByCategory(categoryId: string, cursor: string | null, take: number): Promise<IdPage> {
+    return this.pageIds({ categoryId }, cursor, take);
+  }
+
   async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
     return this.pageIds({ ...this.visibilityFilter, vendor: { verified: true, deletedAt: null } }, cursor, take);
   }

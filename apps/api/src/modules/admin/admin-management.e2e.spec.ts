@@ -21,6 +21,7 @@ describe('Admin management — pass 2 (e2e)', () => {
   };
   let vendorId: string;
   let productId: string;
+  let productCategoryId: string;
   let organizerId: string;
   let otherOrganizerToken: string;
   let draftBazaarId: string;
@@ -46,6 +47,8 @@ describe('Admin management — pass 2 (e2e)', () => {
     await prisma.cartItem.deleteMany();
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
+    // Only this suite's categories (A7 creates some); other suites upsert their own.
+    await prisma.category.deleteMany({ where: { slug: { startsWith: 'mgmt-' } } });
     await prisma.booth.deleteMany();
     await prisma.boothListing.deleteMany();
     await prisma.boothLayout.deleteMany();
@@ -143,6 +146,7 @@ describe('Admin management — pass 2 (e2e)', () => {
       update: {},
       create: { name: 'Mgmt E2E', slug: 'mgmt-e2e-cat' },
     });
+    productCategoryId = category.id;
     const product = await prisma.product.create({
       data: {
         vendorId,
@@ -624,6 +628,123 @@ describe('Admin management — pass 2 (e2e)', () => {
       expect(res.body.data[0]).toMatchObject({ id: lowCommentedRatingId, reviewerName: 'S' });
       expect(res.body.data[0]).not.toHaveProperty('user');
       expect(JSON.stringify(res.body)).not.toContain('mgmt-shopper@example.com');
+    });
+  });
+
+  // --- A7 -------------------------------------------------------------------
+  // The first admin writes in this suite: every successful change must leave an
+  // audit row, and every rejected or no-op one must leave none.
+
+  describe('/admin/categories', () => {
+    let rootId: string;
+    let childId: string;
+
+    const auditRows = (action: 'CATEGORY_CREATED' | 'CATEGORY_UPDATED', targetId: string) =>
+      prisma.adminAuditLog.findMany({ where: { action, targetType: 'CATEGORY', targetId } });
+
+    describe('guards', () => {
+      authMatrix('get', () => '/admin/categories');
+      authMatrix('post', () => '/admin/categories');
+      authMatrix('patch', () => `/admin/categories/${productCategoryId}`);
+    });
+
+    it('GET lists categories flat, with non-deleted product and child counts', async () => {
+      const res = await asAdmin('get', '/admin/categories').expect(200);
+      const cat = res.body.find((c: { id: string }) => c.id === productCategoryId);
+      expect(cat).toEqual({
+        id: productCategoryId,
+        name: 'Mgmt E2E',
+        slug: 'mgmt-e2e-cat',
+        parentId: null,
+        productCount: 1,
+        childCount: 0,
+      });
+    });
+
+    it('POST creates a root (name trimmed) and a child, each audited with the admin as actor', async () => {
+      const root = await asAdmin('post', '/admin/categories').send({ name: '  Mgmt Root  ', slug: 'mgmt-root' }).expect(201);
+      expect(root.body).toMatchObject({ name: 'Mgmt Root', slug: 'mgmt-root', parentId: null });
+      rootId = root.body.id;
+
+      const child = await asAdmin('post', '/admin/categories')
+        .send({ name: 'Mgmt Child', slug: 'mgmt-child', parentId: rootId })
+        .expect(201);
+      expect(child.body.parentId).toBe(rootId);
+      childId = child.body.id;
+
+      const [row] = await auditRows('CATEGORY_CREATED', rootId);
+      expect(row).toMatchObject({ targetType: 'CATEGORY', targetId: rootId });
+      const admin = await prisma.user.findUniqueOrThrow({ where: { email: 'mgmt-admin@example.com' } });
+      expect(row.actorId).toBe(admin.id);
+      expect(await auditRows('CATEGORY_CREATED', childId)).toHaveLength(1);
+
+      // The public tree picks the child up under its root.
+      const tree = await request(app.getHttpServer()).get('/categories').expect(200);
+      const publicRoot = tree.body.find((n: { id: string }) => n.id === rootId);
+      expect(publicRoot.children.map((n: { slug: string }) => n.slug)).toEqual(['mgmt-child']);
+    });
+
+    it('POST rejects a duplicate slug (409), a bad slug or unknown field (400), an unknown parent (404) — auditing none', async () => {
+      const before = await prisma.adminAuditLog.count();
+
+      const dup = await asAdmin('post', '/admin/categories').send({ name: 'Again', slug: 'mgmt-root' }).expect(409);
+      expect(dup.body.code).toBe('CATEGORY_SLUG_TAKEN');
+
+      for (const slug of ['Mgmt Bad', 'mgmt--double', '-mgmt', 'mgmt_under']) {
+        await asAdmin('post', '/admin/categories').send({ name: 'Bad', slug }).expect(400);
+      }
+      await asAdmin('post', '/admin/categories').send({ name: '   ', slug: 'mgmt-blank' }).expect(400);
+      await asAdmin('post', '/admin/categories').send({ name: 'X', slug: 'mgmt-x', icon: 'star' }).expect(400);
+
+      const orphan = await asAdmin('post', '/admin/categories')
+        .send({ name: 'Orphan', slug: 'mgmt-orphan', parentId: '00000000-0000-0000-0000-000000000000' })
+        .expect(404);
+      expect(orphan.body.code).toBe('CATEGORY_PARENT_NOT_FOUND');
+
+      expect(await prisma.adminAuditLog.count()).toBe(before);
+    });
+
+    it('PATCH refuses cycles (itself or a descendant), empty bodies and unknown ids', async () => {
+      for (const parentId of [rootId, childId]) {
+        const res = await asAdmin('patch', `/admin/categories/${rootId}`).send({ parentId }).expect(400);
+        expect(res.body.code).toBe('CATEGORY_CYCLE');
+      }
+
+      const empty = await asAdmin('patch', `/admin/categories/${rootId}`).send({}).expect(400);
+      expect(empty.body.code).toBe('CATEGORY_UPDATE_EMPTY');
+
+      const missing = await asAdmin('patch', '/admin/categories/00000000-0000-0000-0000-000000000000')
+        .send({ name: 'X' })
+        .expect(404);
+      expect(missing.body.code).toBe('CATEGORY_NOT_FOUND');
+
+      const dup = await asAdmin('patch', `/admin/categories/${childId}`).send({ slug: 'mgmt-root' }).expect(409);
+      expect(dup.body.code).toBe('CATEGORY_SLUG_TAKEN');
+
+      expect(await auditRows('CATEGORY_UPDATED', rootId)).toHaveLength(0);
+    });
+
+    it('PATCH renames and re-slugs (audited); an identical PATCH is a no-op that audits nothing', async () => {
+      const renamed = await asAdmin('patch', `/admin/categories/${childId}`)
+        .send({ name: 'Mgmt Kid', slug: 'mgmt-kid' })
+        .expect(200);
+      expect(renamed.body).toMatchObject({ id: childId, name: 'Mgmt Kid', slug: 'mgmt-kid', parentId: rootId });
+      expect(await auditRows('CATEGORY_UPDATED', childId)).toHaveLength(1);
+
+      await asAdmin('patch', `/admin/categories/${childId}`).send({ name: 'Mgmt Kid', slug: 'mgmt-kid' }).expect(200);
+      expect(await auditRows('CATEGORY_UPDATED', childId)).toHaveLength(1);
+    });
+
+    it('PATCH moves a category with products under a parent and back to the root', async () => {
+      const moved = await asAdmin('patch', `/admin/categories/${productCategoryId}`).send({ parentId: rootId }).expect(200);
+      expect(moved.body.parentId).toBe(rootId);
+
+      const counts = await asAdmin('get', '/admin/categories').expect(200);
+      expect(counts.body.find((c: { id: string }) => c.id === rootId).childCount).toBe(2);
+
+      const back = await asAdmin('patch', `/admin/categories/${productCategoryId}`).send({ parentId: null }).expect(200);
+      expect(back.body.parentId).toBeNull();
+      expect(await auditRows('CATEGORY_UPDATED', productCategoryId)).toHaveLength(2);
     });
   });
 });

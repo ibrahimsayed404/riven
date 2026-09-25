@@ -231,6 +231,22 @@ Auth: ADMIN. Body: `{ "reason" }`. 200. Errors: 400 · 404.
 Full category tree (roots with nested `children`). Use the `id` as `categoryId` when creating products.
 Auth: none. 200 → `[{ id, name, slug, children: [...] }]`
 
+### GET /admin/categories
+Flat list (not paginated; the taxonomy is small), alphabetical, with usage counts.
+Auth: ADMIN. 200 → `[{ id, name, slug, parentId, productCount, childCount }]` (`productCount` excludes soft-deleted products).
+
+### POST /admin/categories
+Creates a category. Audit CATEGORY_CREATED.
+Auth: ADMIN. Body: `{ "name" (1–60, trimmed), "slug" (lowercase words joined by single hyphens, e.g. "maxi-dresses", <=60), "parentId"? (uuid; omit for a root) }`
+201 → category `{ id, name, slug, parentId }`. Errors: 400 (validation, unknown field) · 404 CATEGORY_PARENT_NOT_FOUND · 409 CATEGORY_SLUG_TAKEN.
+
+### PATCH /admin/categories/:id
+Rename, re-slug and/or move. `parentId: null` moves it to the root; omitting a field leaves it unchanged. Audit CATEGORY_UPDATED — an identical PATCH is a 200 no-op with no audit row.
+A slug change or a move re-indexes the search documents of every product in the category and its sub-categories (their `categorySlug`/`categoryPath` change); a rename alone doesn't need to.
+Auth: ADMIN. Body: `{ "name"?, "slug"?, "parentId"?: uuid | null }` (at least one).
+200 → category. Errors: 400 CATEGORY_UPDATE_EMPTY · 400 CATEGORY_CYCLE (under itself or a descendant) · 404 CATEGORY_NOT_FOUND · 404 CATEGORY_PARENT_NOT_FOUND · 409 CATEGORY_SLUG_TAKEN.
+Delete is not built (specs/admin-module-spec2.md B3: products reference categories with RESTRICT).
+
 ---
 
 ## 6. Cart (`/cart`) — SHOPPER only
