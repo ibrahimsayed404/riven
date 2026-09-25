@@ -392,6 +392,16 @@ Any bazaar regardless of status, owner or soft-delete.
 Auth: ADMIN. 200 → bazaar + `location`, `organizer { id, name, verified }`, `applicationCounts { PENDING, ACCEPTED, REJECTED }`, `hasLayout`. Errors: 404 BAZAAR_NOT_FOUND.
 Admin edit/cancel of a bazaar is not built yet (specs/admin-module-spec2.md B7).
 
+### GET /admin/applications
+Every booth application on every bazaar, newest first — no organizer or vendor scope.
+Auth: ADMIN. Query: `bazaarId?` (uuid), `vendorId?` (uuid), `status?` (PENDING|ACCEPTED|REJECTED), `page`, `limit`.
+200 → `{ data: [{ id, bazaarId, vendorId, applicationStatus, appliedAt, decidedAt, bazaar { id, name, status, startDate }, vendor { id, name, verified }, booth { id, label } | null }], meta }`. Errors: 400 (bad enum/uuid, unknown query field).
+
+### GET /admin/applications/:id
+One application, same shape as a list row; includes applications on soft-deleted bazaars.
+Auth: ADMIN. 200. Errors: 404 APPLICATION_NOT_FOUND.
+Read-only: accepting/rejecting stays with the organizer (`PATCH /organizers/me/bazaars/:id/applications/:applicationId/accept|reject`); admin decisions are specs/admin-module-spec2.md B5.
+
 ---
 
 ## 10. Booth layouts (`/admin/bazaars/:bazaarId/layout`, `/admin/booths`, public layout)

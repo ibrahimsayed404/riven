@@ -55,6 +55,22 @@ export type AdminBazaarDetail = AdminBazaarRow & {
   hasLayout: boolean;
 };
 
+// Admin application row: the listing plus enough of both sides — and the booth,
+// if one is assigned — to render without a second request. /admin/* only.
+const adminApplicationSelect = {
+  id: true,
+  bazaarId: true,
+  vendorId: true,
+  applicationStatus: true,
+  appliedAt: true,
+  decidedAt: true,
+  bazaar: { select: { id: true, name: true, status: true, startDate: true } },
+  vendor: { select: { id: true, name: true, verified: true } },
+  booth: { select: { id: true, label: true } },
+} satisfies Prisma.BoothListingSelect;
+
+export type AdminApplication = Prisma.BoothListingGetPayload<{ select: typeof adminApplicationSelect }>;
+
 @Injectable()
 export class BazaarsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -589,6 +605,41 @@ export class BazaarsRepository {
 
     const { boothLayout, ...rest } = bazaar;
     return { ...rest, location: locations.get(id) ?? null, applicationCounts, hasLayout: boothLayout !== null };
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A4) ---
+
+  /** Every application on every bazaar — no organizer or vendor scope. */
+  findApplicationsForAdmin(params: {
+    bazaarId?: string;
+    vendorId?: string;
+    status?: ApplicationStatus;
+    page: number;
+    limit: number;
+  }): Promise<{ data: AdminApplication[]; total: number }> {
+    const where: Prisma.BoothListingWhereInput = {};
+    if (params.bazaarId) where.bazaarId = params.bazaarId;
+    if (params.vendorId) where.vendorId = params.vendorId;
+    if (params.status) where.applicationStatus = params.status;
+
+    return this.prisma.$transaction(async (tx) => {
+      const total = await tx.boothListing.count({ where });
+      const data = await tx.boothListing.findMany({
+        where,
+        select: adminApplicationSelect,
+        orderBy: { appliedAt: 'desc' },
+        skip: (params.page - 1) * params.limit,
+        take: params.limit,
+      });
+      return { data, total };
+    });
+  }
+
+  findApplicationByIdForAdmin(id: string): Promise<AdminApplication | null> {
+    return this.prisma.boothListing.findUnique({
+      where: { id },
+      select: adminApplicationSelect,
+    });
   }
 
   /** One GROUP BY, not one count per status. Excludes soft-deleted bazaars. */

@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { ApplicationStatus, BazaarStatus, Prisma, ScheduleType } from '@prisma/client';
 
 import {
+  AdminApplication,
   AdminBazaarDetail,
   BazaarsRepository,
   BazaarWithLocation,
@@ -277,6 +278,27 @@ export class BazaarsService {
       throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' });
     }
     return bazaar;
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A4): read-only; admin decisions are Open Item B5 ---
+
+  async listApplicationsForAdmin(params: {
+    bazaarId?: string;
+    vendorId?: string;
+    status?: ApplicationStatus;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.bazaarsRepository.findApplicationsForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
+  }
+
+  async getApplicationForAdmin(id: string): Promise<AdminApplication> {
+    const application = await this.bazaarsRepository.findApplicationByIdForAdmin(id);
+    if (!application) {
+      throw new NotFoundException({ code: 'APPLICATION_NOT_FOUND', message: 'Application not found.' });
+    }
+    return application;
   }
 
   async findById(id: string): Promise<BazaarWithLocation | null> {
