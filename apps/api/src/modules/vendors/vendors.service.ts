@@ -12,6 +12,8 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 import { pageMeta } from '../../common/dto/pagination-query.dto';
+import { changedFields } from '../../common/changed-fields';
+import { AdminUpdateVendorDto } from './dto/admin-update-vendor.dto';
 
 const vendorProfileNotFound = () =>
   new NotFoundException({ code: 'VENDOR_PROFILE_NOT_FOUND', message: 'Vendor profile not found.' });
@@ -115,6 +117,40 @@ export class VendorsService {
       this.vendorsRepository.countProductsByApprovalStatus(vendor.id),
     ]);
     return { ...vendor, location, productCounts };
+  }
+
+  /**
+   * Admin edit (specs/admin-module-spec3.md B2): text and image fields only.
+   * Verification is never touched — a verified vendor stays verified.
+   */
+  async updateVendorForAdmin(adminId: string, id: string, dto: AdminUpdateVendorDto) {
+    const vendor = await this.vendorsRepository.findByIdForAdmin(id);
+    if (!vendor || vendor.deletedAt) {
+      throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
+    }
+
+    const { businessName, ...rest } = dto;
+    const changes = changedFields(vendor, { name: businessName, ...rest });
+    if (Object.keys(changes).length === 0) {
+      return this.getVendorForAdmin(id);
+    }
+
+    await this.vendorsRepository.update(id, changes);
+
+    // Product documents carry vendorName, so a rename must re-index them too.
+    await this.searchIndexQueue.enqueueMany([
+      { type: 'VENDOR', id },
+      ...(changes.name !== undefined ? [{ type: 'VENDOR_PRODUCTS' as const, vendorId: id }] : []),
+    ]);
+
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.VENDOR_EDITED,
+      targetType: AdminTargetType.VENDOR,
+      targetId: id,
+    });
+
+    return this.getVendorForAdmin(id);
   }
 
   async listForAdmin(params: {

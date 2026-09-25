@@ -19,6 +19,9 @@ export type SearchSyncJob =
   // carries a stale categorySlug/categoryPath. One job per category of the moved
   // subtree; the enqueuer resolves the subtree, this fans out that category's products.
   | { type: 'CATEGORY_PRODUCTS'; categoryId: string }
+  // An organizer was verified, rejected or deleted: their bazaars' visibility
+  // flips without a bazaar row changing (spec3 B8b); fans out BAZAAR jobs.
+  | { type: 'ORGANIZER_BAZAARS'; organizerId: string }
   // Backfill one whole index from Postgres (first deploy, recovery).
   | { type: 'REINDEX'; index: SearchIndexName };
 
@@ -39,6 +42,8 @@ export function searchSyncJobId(job: SearchSyncJob): string {
       return `VENDOR_PRODUCTS${JOB_ID_SEPARATOR}${job.vendorId}`;
     case 'CATEGORY_PRODUCTS':
       return `CATEGORY_PRODUCTS${JOB_ID_SEPARATOR}${job.categoryId}`;
+    case 'ORGANIZER_BAZAARS':
+      return `ORGANIZER_BAZAARS${JOB_ID_SEPARATOR}${job.organizerId}`;
     case 'REINDEX':
       return `REINDEX${JOB_ID_SEPARATOR}${job.index}`;
     default:

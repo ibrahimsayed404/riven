@@ -59,7 +59,9 @@ describe('subtreeIds', () => {
 
 // specs/admin-module-spec2.md A7 — admin create / update.
 describe('CategoriesService (admin writes)', () => {
-  let repo: jest.Mocked<Pick<CategoriesRepository, 'findAll' | 'findById' | 'create' | 'update' | 'findAllForAdmin'>>;
+  let repo: jest.Mocked<
+    Pick<CategoriesRepository, 'findAll' | 'findById' | 'create' | 'update' | 'findAllForAdmin' | 'deleteIfUnused' | 'countUsage'>
+  >;
   let audit: { record: jest.Mock };
   let queue: { enqueueMany: jest.Mock };
   let service: CategoriesService;
@@ -68,7 +70,15 @@ describe('CategoriesService (admin writes)', () => {
   const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' });
 
   beforeEach(() => {
-    repo = { findAll: jest.fn(), findById: jest.fn(), create: jest.fn(), update: jest.fn(), findAllForAdmin: jest.fn() };
+    repo = {
+      findAll: jest.fn(),
+      findById: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      findAllForAdmin: jest.fn(),
+      deleteIfUnused: jest.fn(),
+      countUsage: jest.fn(),
+    };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     queue = { enqueueMany: jest.fn().mockResolvedValue(undefined) };
     service = new CategoriesService(
@@ -203,6 +213,53 @@ describe('CategoriesService (admin writes)', () => {
       await expect(service.updateCategory('admin-1', 'dresses', { slug: 'women' })).rejects.toMatchObject({
         status: 409,
         response: { code: 'CATEGORY_SLUG_TAKEN' },
+      });
+    });
+  });
+
+  describe('deleteCategory (specs/admin-module-spec3.md B3b)', () => {
+    it('deletes an unused category and audits CATEGORY_DELETED; no search work', async () => {
+      repo.deleteIfUnused.mockResolvedValue({ kind: 'ok' });
+
+      await service.deleteCategory('admin-1', 'kids');
+
+      expect(audit.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: AdminAction.CATEGORY_DELETED,
+        targetType: AdminTargetType.CATEGORY,
+        targetId: 'kids',
+      });
+      expect(queue.enqueueMany).not.toHaveBeenCalled();
+    });
+
+    it('409 CATEGORY_IN_USE with the counts when products or sub-categories remain; nothing audited', async () => {
+      repo.deleteIfUnused.mockResolvedValue({ kind: 'in_use', productCount: 3, childCount: 1 });
+
+      await expect(service.deleteCategory('admin-1', 'women')).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'CATEGORY_IN_USE', details: { productCount: 3, childCount: 1 } },
+      });
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('a lost race (FK violation P2003) is the same 409, with fresh counts', async () => {
+      repo.deleteIfUnused.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Foreign key constraint failed', { code: 'P2003', clientVersion: 'test' }),
+      );
+      repo.countUsage.mockResolvedValue({ productCount: 1, childCount: 0 });
+
+      await expect(service.deleteCategory('admin-1', 'kids')).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'CATEGORY_IN_USE', details: { productCount: 1, childCount: 0 } },
+      });
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('404 CATEGORY_NOT_FOUND for an unknown category', async () => {
+      repo.deleteIfUnused.mockResolvedValue({ kind: 'not_found' });
+      await expect(service.deleteCategory('admin-1', 'gone')).rejects.toMatchObject({
+        status: 404,
+        response: { code: 'CATEGORY_NOT_FOUND' },
       });
     });
   });

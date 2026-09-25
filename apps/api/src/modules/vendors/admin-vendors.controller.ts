@@ -8,6 +8,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { AdminListVendorsQueryDto } from './dto/admin-list-vendors-query.dto';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
+import { AdminUpdateVendorDto } from './dto/admin-update-vendor.dto';
 import { VendorsService } from './vendors.service';
 
 @Controller('admin/vendors')
@@ -31,6 +32,16 @@ export class AdminVendorsController {
   @Get(':id')
   getVendor(@Param('id') id: string) {
     return this.vendorsService.getVendorForAdmin(id);
+  }
+
+  /** Text and images only; verification is untouched (specs/admin-module-spec3.md B2). */
+  @Patch(':id')
+  updateVendor(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: AdminUpdateVendorDto,
+  ) {
+    return this.vendorsService.updateVendorForAdmin(admin.id, id, dto);
   }
 
   @Patch(':id/verify')

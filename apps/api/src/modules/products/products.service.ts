@@ -6,6 +6,8 @@ import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { DEFAULT_PAGE_SIZE, pageMeta } from '../../common/dto/pagination-query.dto';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { ProductSearchDocument, toPriceNumber } from '../../infra/search/search-documents';
+import { changedFields } from '../../common/changed-fields';
+import { AdminUpdateProductDto } from './dto/admin-update-product.dto';
 
 @Injectable()
 export class ProductsService {
@@ -46,6 +48,58 @@ export class ProductsService {
       throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
     }
     return product;
+  }
+
+  /**
+   * Admin edit (specs/admin-module-spec3.md B2): title, description and images
+   * only. Unlike the vendor's own edit, this never resets approval — an APPROVED
+   * product stays APPROVED (admin is the reviewer).
+   */
+  async updateProductForAdmin(adminId: string, id: string, dto: AdminUpdateProductDto) {
+    const product = await this.productsRepository.findByIdForAdmin(id);
+    if (!product || product.deletedAt) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+
+    const changes = changedFields(product, dto);
+    if (Object.keys(changes).length === 0) {
+      return product;
+    }
+
+    await this.productsRepository.updateContentForAdmin(id, changes);
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.PRODUCT_EDITED,
+      targetType: AdminTargetType.PRODUCT,
+      targetId: id,
+    });
+
+    return this.getProductForAdmin(id);
+  }
+
+  /**
+   * Admin delete (specs/admin-module-spec3.md B3a): soft delete. Cart lines are
+   * left in place — checkout already refuses them as PRODUCT_UNAVAILABLE, since
+   * PUBLIC_PRODUCT_WHERE excludes deleted products. Already deleted = no-op.
+   */
+  async deleteProductForAdmin(adminId: string, id: string): Promise<void> {
+    const product = await this.productsRepository.findModerationState(id);
+    if (!product) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+    if (product.deletedAt) {
+      return;
+    }
+
+    await this.productsRepository.softDeleteForAdmin(id);
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.PRODUCT_DELETED,
+      targetType: AdminTargetType.PRODUCT,
+      targetId: id,
+    });
   }
 
   async listForAdmin(params: {

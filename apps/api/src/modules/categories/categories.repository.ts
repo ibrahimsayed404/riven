@@ -18,6 +18,11 @@ export type CategoryWriteResult =
   | { kind: 'parent_not_found' }
   | { kind: 'cycle' };
 
+export type CategoryDeleteResult =
+  | { kind: 'ok' }
+  | { kind: 'not_found' }
+  | { kind: 'in_use'; productCount: number; childCount: number };
+
 @Injectable()
 export class CategoriesRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -92,5 +97,37 @@ export class CategoriesRepository {
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
+  }
+
+  /**
+   * Admin delete (spec3 B3b). "Unused" = no product row points at it — soft-deleted
+   * ones included, since Product.categoryId is RESTRICT — and no sub-category.
+   * Counts and delete share one transaction; a product added in between still
+   * trips the FK, which the service maps to the same CATEGORY_IN_USE.
+   */
+  deleteIfUnused(id: string): Promise<CategoryDeleteResult> {
+    return this.prisma.$transaction(async (tx) => {
+      if (!(await tx.category.findUnique({ where: { id }, select: { id: true } }))) {
+        return { kind: 'not_found' };
+      }
+      const [productCount, childCount] = await Promise.all([
+        tx.product.count({ where: { categoryId: id } }),
+        tx.category.count({ where: { parentId: id } }),
+      ]);
+      if (productCount > 0 || childCount > 0) {
+        return { kind: 'in_use', productCount, childCount };
+      }
+      await tx.category.delete({ where: { id } });
+      return { kind: 'ok' };
+    });
+  }
+
+  /** Usage for a CATEGORY_IN_USE error raised by a lost race (FK violation). */
+  async countUsage(id: string): Promise<{ productCount: number; childCount: number }> {
+    const [productCount, childCount] = await Promise.all([
+      this.prisma.product.count({ where: { categoryId: id } }),
+      this.prisma.category.count({ where: { parentId: id } }),
+    ]);
+    return { productCount, childCount };
   }
 }

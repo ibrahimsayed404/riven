@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import { Prisma, Bazaar, BoothListing, BazaarStatus, ApplicationStatus, ScheduleType } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { PUBLIC_BAZAAR_WHERE, PUBLIC_ORGANIZER_SQL, PUBLIC_ORGANIZER_WHERE } from './bazaar-visibility';
 
 export type BazaarWithLocation = Omit<Bazaar, 'location'> & {
   location: { lat: number; lng: number } | null;
@@ -124,14 +125,42 @@ export class BazaarsRepository {
   /** A bazaar shoppers may rate: it has been published (running or finished) and is not deleted. */
   async isRateable(id: string): Promise<boolean> {
     const count = await this.prisma.bazaar.count({
-      where: { id, deletedAt: null, status: { in: [BazaarStatus.PUBLISHED, BazaarStatus.COMPLETED] } },
+      where: {
+        id,
+        deletedAt: null,
+        status: { in: [BazaarStatus.PUBLISHED, BazaarStatus.COMPLETED] },
+        organizer: PUBLIC_ORGANIZER_WHERE,
+      },
     });
     return count > 0;
+  }
+
+  /** The organizer half of the visibility rule, for callers that already hold a bazaar row. */
+  async hasPublicOrganizer(organizerId: string): Promise<boolean> {
+    const count = await this.prisma.organizer.count({ where: { id: organizerId, ...PUBLIC_ORGANIZER_WHERE } });
+    return count > 0;
+  }
+
+  /** Every bazaar of an organizer, any status, keyset-paged — for the ORGANIZER_BAZAARS fan-out. */
+  async listIdsByOrganizer(organizerId: string, cursor: string | null, take: number): Promise<IdPage> {
+    const where: Prisma.BazaarWhereInput = { organizerId };
+    const rows = await this.prisma.bazaar.findMany({
+      where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: take + 1,
+    });
+    const hasMore = rows.length > take;
+    const ids = rows.slice(0, take).map((row) => row.id);
+    return { ids, nextCursor: hasMore ? ids[ids.length - 1] : null };
   }
 
   async findPublicById(id: string): Promise<BazaarPublicDetail | null> {
     const bazaar = await this.findById(id);
     if (!bazaar || bazaar.status !== BazaarStatus.PUBLISHED || bazaar.deletedAt) {
+      return null;
+    }
+    if (!(await this.hasPublicOrganizer(bazaar.organizerId))) {
       return null;
     }
 
@@ -210,6 +239,7 @@ export class BazaarsRepository {
     const conditions = [
       Prisma.sql`"status" = 'PUBLISHED'::"BazaarStatus"`,
       Prisma.sql`"deletedAt" IS NULL`,
+      PUBLIC_ORGANIZER_SQL, // spec3 B8b: a rejected or deleted organizer hides their bazaars
     ];
 
     if (filters.scheduleType) {
@@ -285,6 +315,7 @@ export class BazaarsRepository {
     const conditions = [
       Prisma.sql`"status" = 'PUBLISHED'::"BazaarStatus"`,
       Prisma.sql`"deletedAt" IS NULL`,
+      PUBLIC_ORGANIZER_SQL, // spec3 B8b: a rejected or deleted organizer hides their bazaars
     ];
 
     if (filters.scheduleType) {
@@ -404,7 +435,7 @@ export class BazaarsRepository {
 
   /** Publicly visible bazaar ids, keyset-paged, for reindexing. */
   async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
-    const where: Prisma.BazaarWhereInput = { status: BazaarStatus.PUBLISHED, deletedAt: null };
+    const where: Prisma.BazaarWhereInput = PUBLIC_BAZAAR_WHERE;
     const rows = await this.prisma.bazaar.findMany({
       where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
       select: { id: true },
@@ -640,6 +671,19 @@ export class BazaarsRepository {
       where: { id },
       select: adminApplicationSelect,
     });
+  }
+
+  /**
+   * Admin decision (spec3 B5): PENDING → status only. The status guard lives in
+   * the WHERE, so a concurrent organizer decision can't be overwritten — the
+   * loser sees 0 rows and the service reports a conflict. Returns rows moved.
+   */
+  async transitionApplication(id: string, status: 'ACCEPTED' | 'REJECTED'): Promise<number> {
+    const { count } = await this.prisma.boothListing.updateMany({
+      where: { id, applicationStatus: ApplicationStatus.PENDING },
+      data: { applicationStatus: status, decidedAt: new Date() },
+    });
+    return count;
   }
 
   /** One GROUP BY, not one count per status. Excludes soft-deleted bazaars. */

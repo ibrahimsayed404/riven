@@ -193,6 +193,12 @@ Auth: ADMIN. 200 → vendor. Errors: 404.
 ### PATCH /admin/vendors/:id/reject
 Rejects (or revokes a verified vendor). Products vanish from public reads.
 Auth: ADMIN. Body: `{ "reason" (1–1000) }`. 200 → vendor. Errors: 400 · 404.
+**This is also how admin suspends a vendor** (specs/admin-module-spec3.md B1): rejecting a verified vendor hides the shop and its products, removes them from search, and checkout refuses them; `verify` lifts it.
+
+### PATCH /admin/vendors/:id
+Admin edit of **text and images only** (spec3 B2). Verification is never touched — a verified vendor stays verified. Only changed fields are written; an unchanged body is a 200 no-op with no audit. A name change also re-indexes the vendor's products (their documents carry the vendor name). Audit VENDOR_EDITED.
+Auth: ADMIN. Body (all optional): `{ "businessName" (1–120), "description" (<=2000), "brandStory" (<=5000), "returnPolicy" (<=5000), "shippingPolicy" (<=5000), "logo" (URL), "logoUrl", "bannerUrl", "coverMedia": URL[] (<=10) }`. Any other field (category, vendorType, verified, …) → 400.
+200 → the admin vendor detail. Errors: 400 · 404 VENDOR_NOT_FOUND (also soft-deleted).
 
 ---
 
@@ -222,6 +228,16 @@ Auth: ADMIN. 200 → product. Errors: 404.
 ### PATCH /admin/products/:id/reject
 Sets REJECTED with a reason the vendor sees on `GET /vendors/me/products/:id`.
 Auth: ADMIN. Body: `{ "reason" }`. 200. Errors: 400 · 404.
+Reject is also the only way to hide a product — there is no separate hide switch (spec3 B4).
+
+### PATCH /admin/products/:id
+Admin edit of **title, description and images only** (spec3 B2). Unlike a vendor edit, **approval is not reset**: an APPROVED product stays APPROVED. Only changed fields are written; unchanged = 200 no-op, no audit. Re-indexes the product. Audit PRODUCT_EDITED.
+Auth: ADMIN. Body (all optional): `{ "title" (1–200), "description" (<=5000), "images": URL[] (<=10) }`. Price, category, isActive, approvalStatus → 400.
+200 → the admin product detail. Errors: 400 · 404 PRODUCT_NOT_FOUND (also soft-deleted).
+
+### DELETE /admin/products/:id
+**Soft delete** (spec3 B3a): the row stays for order history; the product disappears from public reads and search. Cart lines are **not** removed — checkout refuses them as `PRODUCT_UNAVAILABLE`. Deleting an already-deleted product is a 204 no-op. Audit PRODUCT_DELETED.
+Auth: ADMIN. 204. Errors: 404 PRODUCT_NOT_FOUND.
 
 ---
 
@@ -245,7 +261,11 @@ Rename, re-slug and/or move. `parentId: null` moves it to the root; omitting a f
 A slug change or a move re-indexes the search documents of every product in the category and its sub-categories (their `categorySlug`/`categoryPath` change); a rename alone doesn't need to.
 Auth: ADMIN. Body: `{ "name"?, "slug"?, "parentId"?: uuid | null }` (at least one).
 200 → category. Errors: 400 CATEGORY_UPDATE_EMPTY · 400 CATEGORY_CYCLE (under itself or a descendant) · 404 CATEGORY_NOT_FOUND · 404 CATEGORY_PARENT_NOT_FOUND · 409 CATEGORY_SLUG_TAKEN.
-Delete is not built (specs/admin-module-spec2.md B3: products reference categories with RESTRICT).
+
+### DELETE /admin/categories/:id
+Only an **unused** category (spec3 B3b): no products reference it — **soft-deleted products count** — and it has no sub-categories. Nothing is moved or cascaded; move them first. Audit CATEGORY_DELETED.
+Auth: ADMIN. 204. Errors: 404 CATEGORY_NOT_FOUND · 409 CATEGORY_IN_USE with `details: { productCount, childCount }`.
+Note: `GET /admin/categories` shows `productCount` *without* soft-deleted products, so a category listed with 0 can still be in use.
 
 ---
 
@@ -329,7 +349,10 @@ Auth: ADMIN. Query: `status?` (OrderStatus), `vendorId?`, `userId?`, `orderGroup
 ### GET /admin/orders/:id
 Any order, plus its `items` and the group's payment record: `orderGroup { id, createdAt, paidAt, paidAmountCents, paymobOrderId, paymobIntentId, paymobTransactionId }` — the Paymob ids appear on this admin route only, for payment support.
 Auth: ADMIN. 200. Errors: 404 ORDER_NOT_FOUND.
-Read-only: admin status changes, cancel and refund are not built (specs/admin-module-spec2.md B6; refunds need the Payments spec).
+
+### PATCH /admin/orders/:id/cancel
+Cancels an **unpaid** order (spec3 B6) — the same rule as the shopper's cancel. It is **group-level**: every PENDING order of that checkout is cancelled (one payment covers the group) and their stock is restored. Already CANCELLED = 200 no-op. Audit ORDER_CANCELLED, one row per cancelled order. **No refunds**: a PAID order is refused.
+Auth: ADMIN. 200 → `{ ...order, cancelledOrderIds: [...] }`. Errors: 400 ORDER_NOT_CANCELLABLE (PAID or later) · 404 ORDER_NOT_FOUND · 409 ORDER_STATE_CHANGED (paid while in flight).
 
 ---
 
@@ -337,6 +360,7 @@ Read-only: admin status changes, cancel and refund are not built (specs/admin-mo
 
 ### GET /bazaars
 Published bazaars, optionally near a point.
+**Visibility rule** (same on detail, discovery, search, apply and ratings): a bazaar is public only if it is PUBLISHED, not deleted, **and its organizer is verified and not deleted** (spec3 B8b). Rejecting an organizer hides their bazaars; re-verifying brings them back — the bazaar's status is never changed.
 Auth: none. Query: `lat?` (-90..90), `lng?` (-180..180), `radiusKm?` (0.1–150; all three together for proximity), `scheduleType?`, `page` (>=1), `limit` (1–100, default 20).
 200 → `{ data: [bazaar + location {lat,lng}], meta }`
 
@@ -416,7 +440,10 @@ Auth: ADMIN. Query: `status?` (DRAFT|PUBLISHED|CANCELLED|COMPLETED), `organizerI
 ### GET /admin/bazaars/:id
 Any bazaar regardless of status, owner or soft-delete.
 Auth: ADMIN. 200 → bazaar + `location`, `organizer { id, name, verified }`, `applicationCounts { PENDING, ACCEPTED, REJECTED }`, `hasLayout`. Errors: 404 BAZAAR_NOT_FOUND.
-Admin edit/cancel of a bazaar is not built yet (specs/admin-module-spec2.md B7).
+
+### PATCH /admin/bazaars/:id/cancel
+Cancels any organizer's bazaar under **the organizer's own rule** (spec3 B7): any status except COMPLETED. Already CANCELLED = 200 no-op. Removes it from public reads and search; applications and booths are untouched; nobody is notified (no notifications system yet). Audit BAZAAR_CANCELLED.
+Auth: ADMIN. 200 → admin bazaar detail. Errors: 400 BAZAAR_COMPLETED · 404 BAZAAR_NOT_FOUND (also soft-deleted).
 
 ### GET /admin/applications
 Every booth application on every bazaar, newest first — no organizer or vendor scope.
@@ -426,7 +453,11 @@ Auth: ADMIN. Query: `bazaarId?` (uuid), `vendorId?` (uuid), `status?` (PENDING|A
 ### GET /admin/applications/:id
 One application, same shape as a list row; includes applications on soft-deleted bazaars.
 Auth: ADMIN. 200. Errors: 404 APPLICATION_NOT_FOUND.
-Read-only: accepting/rejecting stays with the organizer (`PATCH /organizers/me/bazaars/:id/applications/:applicationId/accept|reject`); admin decisions are specs/admin-module-spec2.md B5.
+
+### PATCH /admin/applications/:id/accept · PATCH /admin/applications/:id/reject
+Admin decides a **PENDING** application (spec3 B5), for any organizer's bazaar. Allowed: PENDING → ACCEPTED, PENDING → REJECTED. **No reversals** (ACCEPTED ↔ REJECTED). Repeating the decision it already has = 200 no-op. Accept fires the same booth-listing-accepted event as the organizer's accept. Audit APPLICATION_ACCEPTED / APPLICATION_REJECTED.
+Auth: ADMIN. Reject body: `{ "reason"? (1–1000) }` — stored in the audit log only. 200 → application.
+Errors: 400 APPLICATION_NOT_PENDING (already decided the other way) · 404 APPLICATION_NOT_FOUND · 409 APPLICATION_STATE_CHANGED (the organizer decided it while in flight).
 
 ---
 
@@ -463,6 +494,8 @@ Auth: ADMIN. Body: `{ "boothListingId": "<application id>" }`
 
 ### PATCH /admin/booths/:id/unassign
 Frees the booth. Auth: ADMIN. 200. Errors: 404.
+
+All booth-layout writes above are audited (spec3 B8c): layout create/update → BOOTH_LAYOUT_CREATED/UPDATED on the bazaar; booth create/update/delete/assign/unassign → BOOTH_* on the booth. Unassigning an already-free booth is a no-op with no audit.
 
 ### GET /bazaars/:bazaarId/layout
 Public map for a PUBLISHED bazaar: every booth with `vendor: { vendorId, businessName, logo } | null` (revoked/deleted vendors show as empty).
@@ -503,7 +536,7 @@ Query: `q`, `scheduleType?`, `upcomingOnly?` (default true), geo, `page`, `limit
 ### POST /admin/search/reindex
 Queues a full rebuild of one or all indexes from Postgres.
 Auth: ADMIN. Body: `{ "types"?: ["products","vendors","bazaars"] }` (omit = all).
-202 → `{ queued: [...] }`.
+202 → `{ enqueued: [...] }`. Audited: one SEARCH_REINDEX_REQUESTED row per index (spec3 B8c).
 
 ---
 
@@ -545,7 +578,15 @@ Public list of ratings for a target. Query: `targetType`, `targetId`, `limit`, `
 Moderation queue over every rating, newest first. Page-based (not a cursor like the public list).
 Auth: ADMIN. Query: `targetType?` (VENDOR|BAZAAR|PRODUCT|EVENT), `targetId?`, `userId?` (reviewer; uuids), `hasComment?` (true|false — an empty comment counts as none), `maxScore?` (1–5, inclusive: `maxScore=2` = the low ratings), `page`, `limit`.
 200 → `{ data: [{ id, targetType, targetId, score, comment, orderId, createdAt, updatedAt, user { id, name, email, isActive } }], meta }`. Errors: 400 (bad enum/uuid/boolean, score out of range, unknown query field).
-Useful view: `?hasComment=true&maxScore=2`. Read-only — deleting a rating or clearing its comment is specs/admin-module-spec2.md B3.
+Useful view: `?hasComment=true&maxScore=2`.
+
+### DELETE /admin/ratings/:id
+Removes a fake rating entirely — score and comment (spec3 B3c). Hard delete (ratings have no soft delete); the rating summary recomputes on read. Audit RATING_DELETED.
+Auth: ADMIN. 204. Errors: 404 RATING_NOT_FOUND.
+
+### PATCH /admin/ratings/:id/clear-comment
+Removes abusive text but **keeps the score** (spec3 B3c). A comment that's already empty is a 200 no-op. Audit RATING_COMMENT_CLEARED.
+Auth: ADMIN. 200 → rating (`comment: null`). Errors: 404 RATING_NOT_FOUND.
 
 ---
 

@@ -59,9 +59,10 @@ Each meaningful unit of work should land via PR, even when reviewing your own wo
 pnpm install
 pnpm lint
 pnpm typecheck
+pnpm --filter @riven/api test:unit   # no services needed
 ```
 
-Expand this list as apps and packages add real lint/typecheck scripts.
+E2E (`test:e2e`, or the full `test`) wipes the configured database — run it only against a throwaway database, never the one you use for manual testing. CI runs everything (lint, typecheck, unit, e2e) on every PR.
 
 ## What not to commit
 

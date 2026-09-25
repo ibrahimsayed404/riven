@@ -45,6 +45,7 @@ describe('Admin management — pass 2 (e2e)', () => {
     await prisma.order.deleteMany();
     await prisma.orderGroup.deleteMany();
     await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany(); // Cart.userId is RESTRICT: before users
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     // Only this suite's categories (A7 creates some); other suites upsert their own.
@@ -66,7 +67,7 @@ describe('Admin management — pass 2 (e2e)', () => {
   }
 
   /** ADMIN → expected status; VENDOR / ORGANIZER / SHOPPER → 403; no token → 401. */
-  function authMatrix(method: 'get' | 'post' | 'patch', path: () => string) {
+  function authMatrix(method: 'get' | 'post' | 'patch' | 'delete', path: () => string) {
     it(`${method.toUpperCase()} → 401 without a token`, () => {
       return request(app.getHttpServer())[method](path()).expect(401);
     });
@@ -89,7 +90,7 @@ describe('Admin management — pass 2 (e2e)', () => {
     return rows[0].id;
   }
 
-  function asAdmin(method: 'get' | 'post' | 'patch', path: string) {
+  function asAdmin(method: 'get' | 'post' | 'patch' | 'delete', path: string) {
     return request(app.getHttpServer())[method](path).set('Authorization', `Bearer ${tokens.admin}`);
   }
 
@@ -742,6 +743,463 @@ describe('Admin management — pass 2 (e2e)', () => {
       const back = await asAdmin('patch', `/admin/categories/${productCategoryId}`).send({ parentId: null }).expect(200);
       expect(back.body.parentId).toBeNull();
       expect(await auditRows('CATEGORY_UPDATED', productCategoryId)).toHaveLength(2);
+    });
+  });
+
+  // ===========================================================================
+  // Part B — specs/admin-module-spec3.md
+  // ===========================================================================
+
+  /** Audit rows for one action on one target, straight from the table. */
+  const auditFor = (action: string, targetId: string) =>
+    prisma.adminAuditLog.findMany({ where: { action: action as never, targetId } });
+
+  // --- B2 -------------------------------------------------------------------
+
+  describe('PATCH /admin/vendors/:id (B2)', () => {
+    authMatrix('patch', () => `/admin/vendors/${vendorId}`);
+
+    it('edits text/images of a VERIFIED vendor without touching verification; repeat = no audit', async () => {
+      await prisma.vendor.update({ where: { id: vendorId }, data: { verified: true } });
+      try {
+        const res = await asAdmin('patch', `/admin/vendors/${vendorId}`)
+          .send({ businessName: 'Mgmt Shop Renamed', brandStory: 'Handmade since 2020' })
+          .expect(200);
+        expect(res.body).toMatchObject({ id: vendorId, name: 'Mgmt Shop Renamed', brandStory: 'Handmade since 2020', verified: true });
+        expect(await auditFor('VENDOR_EDITED', vendorId)).toHaveLength(1);
+
+        await asAdmin('patch', `/admin/vendors/${vendorId}`).send({ businessName: 'Mgmt Shop Renamed' }).expect(200);
+        expect(await auditFor('VENDOR_EDITED', vendorId)).toHaveLength(1);
+      } finally {
+        await prisma.vendor.update({ where: { id: vendorId }, data: { verified: false, name: 'Mgmt Shop', brandStory: null } });
+      }
+    });
+
+    it('400 on fields outside the text/image scope (category, verified, vendorType)', async () => {
+      for (const body of [{ category: 'FOOD' }, { verified: true }, { vendorType: 'BOTH' }]) {
+        await asAdmin('patch', `/admin/vendors/${vendorId}`).send(body).expect(400);
+      }
+    });
+
+    it('404 VENDOR_NOT_FOUND for an unknown vendor', async () => {
+      const res = await asAdmin('patch', '/admin/vendors/00000000-0000-0000-0000-000000000000')
+        .send({ description: 'x' })
+        .expect(404);
+      expect(res.body.code).toBe('VENDOR_NOT_FOUND');
+    });
+  });
+
+  describe('PATCH /admin/products/:id (B2)', () => {
+    authMatrix('patch', () => `/admin/products/${productId}`);
+
+    it('edits an APPROVED product and it stays APPROVED (no re-review); repeat = no audit', async () => {
+      await prisma.product.update({ where: { id: productId }, data: { approvalStatus: 'APPROVED' } });
+      try {
+        const res = await asAdmin('patch', `/admin/products/${productId}`)
+          .send({ title: 'Hidden (fixed typo)', images: ['https://cdn.example.com/p.jpg'] })
+          .expect(200);
+        expect(res.body).toMatchObject({
+          id: productId,
+          title: 'Hidden (fixed typo)',
+          images: ['https://cdn.example.com/p.jpg'],
+          approvalStatus: 'APPROVED',
+        });
+        expect(await auditFor('PRODUCT_EDITED', productId)).toHaveLength(1);
+
+        await asAdmin('patch', `/admin/products/${productId}`).send({ title: 'Hidden (fixed typo)' }).expect(200);
+        expect(await auditFor('PRODUCT_EDITED', productId)).toHaveLength(1);
+      } finally {
+        await prisma.product.update({ where: { id: productId }, data: { approvalStatus: 'PENDING', title: 'Hidden', images: [] } });
+      }
+    });
+
+    it('400 on fields outside the text/image scope (price, category, isActive, approvalStatus)', async () => {
+      for (const body of [{ basePrice: 1 }, { categoryId: productCategoryId }, { isActive: true }, { approvalStatus: 'APPROVED' }]) {
+        await asAdmin('patch', `/admin/products/${productId}`).send(body).expect(400);
+      }
+    });
+
+    it('404 PRODUCT_NOT_FOUND for an unknown product', async () => {
+      const res = await asAdmin('patch', '/admin/products/00000000-0000-0000-0000-000000000000')
+        .send({ title: 'x' })
+        .expect(404);
+      expect(res.body.code).toBe('PRODUCT_NOT_FOUND');
+    });
+
+    it('the owner route is unchanged: a vendor edit still resets the product to PENDING', async () => {
+      // Owner routes need a verified vendor; flip it for this check only.
+      await prisma.vendor.update({ where: { id: vendorId }, data: { verified: true } });
+      await prisma.product.update({ where: { id: productId }, data: { approvalStatus: 'APPROVED', isActive: true } });
+      try {
+        await request(app.getHttpServer())
+          .patch(`/vendors/me/products/${productId}`)
+          .set('Authorization', `Bearer ${tokens.vendor}`)
+          .send({ description: 'vendor edit' })
+          .expect(200);
+        const row = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+        expect(row.approvalStatus).toBe('PENDING');
+      } finally {
+        await prisma.vendor.update({ where: { id: vendorId }, data: { verified: false } });
+        await prisma.product.update({ where: { id: productId }, data: { description: 'D', isActive: false } });
+      }
+    });
+  });
+
+  // --- B3 -------------------------------------------------------------------
+
+  describe('DELETE /admin/products/:id (B3a)', () => {
+    authMatrix('delete', () => `/admin/products/${productId}`);
+
+    it('soft-deletes (row kept, cart line kept), audits once; repeat is a no-op', async () => {
+      const variant = await prisma.productVariant.findUniqueOrThrow({ where: { sku: 'MGMT-A' } });
+      const cart = await prisma.cart.create({ data: { userId: shopperId } });
+      const line = await prisma.cartItem.create({ data: { cartId: cart.id, productId, variantId: variant.id, quantity: 1 } });
+      try {
+        await asAdmin('delete', `/admin/products/${productId}`).expect(204);
+
+        const row = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+        expect(row.deletedAt).not.toBeNull();
+        // Decided behaviour: carts are not touched; checkout refuses the line (PUBLIC_PRODUCT_WHERE).
+        expect(await prisma.cartItem.findUnique({ where: { id: line.id } })).not.toBeNull();
+        expect(await auditFor('PRODUCT_DELETED', productId)).toHaveLength(1);
+
+        await asAdmin('delete', `/admin/products/${productId}`).expect(204);
+        expect(await auditFor('PRODUCT_DELETED', productId)).toHaveLength(1);
+
+        const edit = await asAdmin('patch', `/admin/products/${productId}`).send({ title: 'x' }).expect(404);
+        expect(edit.body.code).toBe('PRODUCT_NOT_FOUND');
+      } finally {
+        await prisma.cartItem.delete({ where: { id: line.id } });
+        await prisma.cart.delete({ where: { id: cart.id } });
+        await prisma.product.update({ where: { id: productId }, data: { deletedAt: null } });
+      }
+    });
+
+    it('404 PRODUCT_NOT_FOUND for an unknown product', async () => {
+      const res = await asAdmin('delete', '/admin/products/00000000-0000-0000-0000-000000000000').expect(404);
+      expect(res.body.code).toBe('PRODUCT_NOT_FOUND');
+    });
+  });
+
+  describe('DELETE /admin/categories/:id (B3b)', () => {
+    authMatrix('delete', () => `/admin/categories/${productCategoryId}`);
+
+    it('409 CATEGORY_IN_USE while it has products — a soft-deleted product still counts', async () => {
+      await prisma.product.update({ where: { id: productId }, data: { deletedAt: new Date() } });
+      try {
+        const res = await asAdmin('delete', `/admin/categories/${productCategoryId}`).expect(409);
+        expect(res.body).toMatchObject({ code: 'CATEGORY_IN_USE', details: { productCount: 1, childCount: 0 } });
+      } finally {
+        await prisma.product.update({ where: { id: productId }, data: { deletedAt: null } });
+      }
+    });
+
+    it('409 while it has sub-categories; deletes (204, audited) once empty', async () => {
+      const parent = await prisma.category.create({ data: { name: 'Mgmt Parent', slug: 'mgmt-del-parent' } });
+      const child = await prisma.category.create({ data: { name: 'Mgmt Child', slug: 'mgmt-del-child', parentId: parent.id } });
+
+      const busy = await asAdmin('delete', `/admin/categories/${parent.id}`).expect(409);
+      expect(busy.body.details).toEqual({ productCount: 0, childCount: 1 });
+
+      await asAdmin('delete', `/admin/categories/${child.id}`).expect(204);
+      await asAdmin('delete', `/admin/categories/${parent.id}`).expect(204);
+
+      expect(await prisma.category.findUnique({ where: { id: parent.id } })).toBeNull();
+      expect(await auditFor('CATEGORY_DELETED', parent.id)).toHaveLength(1);
+      expect(await auditFor('CATEGORY_DELETED', child.id)).toHaveLength(1);
+    });
+
+    it('404 CATEGORY_NOT_FOUND for an unknown category', async () => {
+      const res = await asAdmin('delete', '/admin/categories/00000000-0000-0000-0000-000000000000').expect(404);
+      expect(res.body.code).toBe('CATEGORY_NOT_FOUND');
+    });
+  });
+
+  describe('admin rating moderation (B3c)', () => {
+    authMatrix('delete', () => `/admin/ratings/${highSilentRatingId}`);
+    authMatrix('patch', () => `/admin/ratings/${lowCommentedRatingId}/clear-comment`);
+
+    it('clear-comment removes the text and keeps the score; repeat is a no-op', async () => {
+      const res = await asAdmin('patch', `/admin/ratings/${lowCommentedRatingId}/clear-comment`).expect(200);
+      expect(res.body).toMatchObject({ id: lowCommentedRatingId, score: 1, comment: null });
+      expect(await auditFor('RATING_COMMENT_CLEARED', lowCommentedRatingId)).toHaveLength(1);
+
+      await asAdmin('patch', `/admin/ratings/${lowCommentedRatingId}/clear-comment`).expect(200);
+      expect(await auditFor('RATING_COMMENT_CLEARED', lowCommentedRatingId)).toHaveLength(1);
+    });
+
+    it('delete removes the rating entirely and audits it', async () => {
+      await asAdmin('delete', `/admin/ratings/${highSilentRatingId}`).expect(204);
+      expect(await prisma.rating.findUnique({ where: { id: highSilentRatingId } })).toBeNull();
+      expect(await auditFor('RATING_DELETED', highSilentRatingId)).toHaveLength(1);
+
+      const again = await asAdmin('delete', `/admin/ratings/${highSilentRatingId}`).expect(404);
+      expect(again.body.code).toBe('RATING_NOT_FOUND');
+    });
+  });
+
+  // --- B5 -------------------------------------------------------------------
+
+  describe('admin decisions on applications (B5)', () => {
+    authMatrix('patch', () => `/admin/applications/${pendingApplicationId}/accept`);
+    authMatrix('patch', () => `/admin/applications/${pendingApplicationId}/reject`);
+
+    it('accepts a PENDING application once; no reversal; repeat is a no-op', async () => {
+      try {
+        const res = await asAdmin('patch', `/admin/applications/${pendingApplicationId}/accept`).expect(200);
+        expect(res.body).toMatchObject({ id: pendingApplicationId, applicationStatus: 'ACCEPTED' });
+        expect(res.body.decidedAt).not.toBeNull();
+        expect(await auditFor('APPLICATION_ACCEPTED', pendingApplicationId)).toHaveLength(1);
+
+        await asAdmin('patch', `/admin/applications/${pendingApplicationId}/accept`).expect(200);
+        expect(await auditFor('APPLICATION_ACCEPTED', pendingApplicationId)).toHaveLength(1);
+
+        const reversal = await asAdmin('patch', `/admin/applications/${pendingApplicationId}/reject`).send({}).expect(400);
+        expect(reversal.body.code).toBe('APPLICATION_NOT_PENDING');
+      } finally {
+        await prisma.boothListing.update({
+          where: { id: pendingApplicationId },
+          data: { applicationStatus: 'PENDING', decidedAt: null },
+        });
+      }
+    });
+
+    it('a REJECTED application cannot be accepted', async () => {
+      const res = await asAdmin('patch', `/admin/applications/${rejectedApplicationId}/accept`).expect(400);
+      expect(res.body.code).toBe('APPLICATION_NOT_PENDING');
+      expect(await auditFor('APPLICATION_ACCEPTED', rejectedApplicationId)).toHaveLength(0);
+    });
+
+    it('rejects a PENDING application; the reason is kept in the audit log', async () => {
+      const app2 = await prisma.boothListing.create({ data: { bazaarId: draftBazaarId, vendorId } });
+      try {
+        const res = await asAdmin('patch', `/admin/applications/${app2.id}/reject`)
+          .send({ reason: 'Stall type not allowed at this bazaar' })
+          .expect(200);
+        expect(res.body.applicationStatus).toBe('REJECTED');
+        const [row] = await auditFor('APPLICATION_REJECTED', app2.id);
+        expect(row.reason).toBe('Stall type not allowed at this bazaar');
+      } finally {
+        await prisma.boothListing.delete({ where: { id: app2.id } });
+      }
+    });
+
+    it('400 on an empty reason or unknown field; 404 on an unknown application', async () => {
+      await asAdmin('patch', `/admin/applications/${pendingApplicationId}/reject`).send({ reason: '' }).expect(400);
+      await asAdmin('patch', `/admin/applications/${pendingApplicationId}/reject`).send({ status: 'X' }).expect(400);
+      const res = await asAdmin('patch', '/admin/applications/00000000-0000-0000-0000-000000000000/accept').expect(404);
+      expect(res.body.code).toBe('APPLICATION_NOT_FOUND');
+    });
+
+    it('the organizer route is unchanged: another organizer still cannot decide it', async () => {
+      await request(app.getHttpServer())
+        .patch(`/organizers/me/bazaars/${publishedBazaarId}/applications/${pendingApplicationId}/accept`)
+        .set('Authorization', `Bearer ${otherOrganizerToken}`)
+        .expect((r) => expect([403, 404]).toContain(r.status));
+      const row = await prisma.boothListing.findUniqueOrThrow({ where: { id: pendingApplicationId } });
+      expect(row.applicationStatus).toBe('PENDING');
+    });
+  });
+
+  // --- B6 -------------------------------------------------------------------
+
+  describe('PATCH /admin/orders/:id/cancel (B6)', () => {
+    authMatrix('patch', () => `/admin/orders/${paidOrderId}/cancel`);
+
+    it('cancels the whole unpaid checkout, restores stock, audits one row per order', async () => {
+      const variant = await prisma.productVariant.findUniqueOrThrow({ where: { sku: 'MGMT-A' } });
+      const group = await prisma.orderGroup.create({ data: { userId: shopperId } });
+      const line = (quantity: number) => ({
+        create: [{ productId, variantId: variant.id, titleSnapshot: 'Hidden', priceSnapshot: 10, quantity }],
+      });
+      const first = await prisma.order.create({
+        data: { orderGroupId: group.id, vendorId, userId: shopperId, status: 'PENDING', subtotal: 20, items: line(2) },
+      });
+      const second = await prisma.order.create({
+        data: { orderGroupId: group.id, vendorId, userId: shopperId, status: 'PENDING', subtotal: 10, items: line(1) },
+      });
+      try {
+        const res = await asAdmin('patch', `/admin/orders/${first.id}/cancel`).expect(200);
+        expect(res.body).toMatchObject({ id: first.id, status: 'CANCELLED' });
+        expect(res.body.cancelledOrderIds.sort()).toEqual([first.id, second.id].sort());
+
+        const siblings = await prisma.order.findMany({ where: { orderGroupId: group.id } });
+        expect(siblings.map((o) => o.status)).toEqual(['CANCELLED', 'CANCELLED']);
+        const after = await prisma.productVariant.findUniqueOrThrow({ where: { id: variant.id } });
+        expect(after.stockQuantity).toBe(variant.stockQuantity + 3);
+        expect(await auditFor('ORDER_CANCELLED', first.id)).toHaveLength(1);
+        expect(await auditFor('ORDER_CANCELLED', second.id)).toHaveLength(1);
+
+        // Repeat on a now-CANCELLED order: 200 no-op, no extra audit, no second restock.
+        const again = await asAdmin('patch', `/admin/orders/${first.id}/cancel`).expect(200);
+        expect(again.body.cancelledOrderIds).toEqual([]);
+        expect(await auditFor('ORDER_CANCELLED', first.id)).toHaveLength(1);
+        expect((await prisma.productVariant.findUniqueOrThrow({ where: { id: variant.id } })).stockQuantity).toBe(
+          variant.stockQuantity + 3,
+        );
+      } finally {
+        await prisma.productVariant.update({ where: { id: variant.id }, data: { stockQuantity: variant.stockQuantity } });
+      }
+    });
+
+    it('400 ORDER_NOT_CANCELLABLE for a PAID order — no refunds', async () => {
+      const res = await asAdmin('patch', `/admin/orders/${paidOrderId}/cancel`).expect(400);
+      expect(res.body.code).toBe('ORDER_NOT_CANCELLABLE');
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: paidOrderId } })).status).toBe('PAID');
+      expect(await auditFor('ORDER_CANCELLED', paidOrderId)).toHaveLength(0);
+    });
+
+    it('404 ORDER_NOT_FOUND for an unknown order', async () => {
+      const res = await asAdmin('patch', '/admin/orders/00000000-0000-0000-0000-000000000000/cancel').expect(404);
+      expect(res.body.code).toBe('ORDER_NOT_FOUND');
+    });
+  });
+
+  // --- B7 -------------------------------------------------------------------
+
+  describe('PATCH /admin/bazaars/:id/cancel (B7)', () => {
+    authMatrix('patch', () => `/admin/bazaars/${publishedBazaarId}/cancel`);
+
+    it("cancels another organizer's PUBLISHED bazaar, hides it, audits once; repeat is a no-op", async () => {
+      const id = await insertBazaar('Mgmt Cancel Me', BazaarStatus.PUBLISHED);
+
+      const res = await asAdmin('patch', `/admin/bazaars/${id}/cancel`).expect(200);
+      expect(res.body).toMatchObject({ id, status: 'CANCELLED' });
+      await request(app.getHttpServer()).get(`/bazaars/${id}`).expect(404);
+      expect(await auditFor('BAZAAR_CANCELLED', id)).toHaveLength(1);
+
+      await asAdmin('patch', `/admin/bazaars/${id}/cancel`).expect(200);
+      expect(await auditFor('BAZAAR_CANCELLED', id)).toHaveLength(1);
+    });
+
+    it('a DRAFT bazaar can be cancelled too (organizer rule: anything but COMPLETED)', async () => {
+      const id = await insertBazaar('Mgmt Draft Cancel', BazaarStatus.DRAFT);
+      const res = await asAdmin('patch', `/admin/bazaars/${id}/cancel`).expect(200);
+      expect(res.body.status).toBe('CANCELLED');
+    });
+
+    it('400 BAZAAR_COMPLETED for a finished bazaar; 404 for soft-deleted or unknown', async () => {
+      const done = await insertBazaar('Mgmt Done', BazaarStatus.COMPLETED);
+      const completed = await asAdmin('patch', `/admin/bazaars/${done}/cancel`).expect(400);
+      expect(completed.body.code).toBe('BAZAAR_COMPLETED');
+
+      for (const id of [deletedBazaarId, '00000000-0000-0000-0000-000000000000']) {
+        const res = await asAdmin('patch', `/admin/bazaars/${id}/cancel`).expect(404);
+        expect(res.body.code).toBe('BAZAAR_NOT_FOUND');
+      }
+    });
+
+    it('the organizer route is unchanged: another organizer still cannot cancel it', async () => {
+      await request(app.getHttpServer())
+        .patch(`/organizers/me/bazaars/${publishedBazaarId}/cancel`)
+        .set('Authorization', `Bearer ${otherOrganizerToken}`)
+        .expect((r) => expect([403, 404]).toContain(r.status));
+      const row = await prisma.bazaar.findUniqueOrThrow({ where: { id: publishedBazaarId } });
+      expect(row.status).toBe('PUBLISHED');
+    });
+  });
+
+  // --- B8b ------------------------------------------------------------------
+
+  describe('bazaar visibility follows the organizer (B8b)', () => {
+    /** Is the PUBLISHED fixture bazaar visible on every public read (detail, list, discovery)? */
+    async function publicEverywhere(): Promise<boolean[]> {
+      const detail = await request(app.getHttpServer()).get(`/bazaars/${publishedBazaarId}`);
+      const list = await request(app.getHttpServer()).get('/bazaars').query({ limit: 100 }).expect(200);
+      const nearby = await request(app.getHttpServer())
+        .get('/discovery/bazaars')
+        .query({ lat: 30.05, lng: 31.2, radiusKm: 5, limit: 50 })
+        .expect(200);
+      return [
+        detail.status === 200,
+        list.body.data.some((b: { id: string }) => b.id === publishedBazaarId),
+        nearby.body.data.some((b: { id: string }) => b.id === publishedBazaarId),
+      ];
+    }
+
+    it('hidden while unverified, shown on verify, hidden on reject, restored on re-verify — status never changes', async () => {
+      try {
+        // Fixture organizer is unverified: its PUBLISHED bazaar is hidden everywhere.
+        expect(await publicEverywhere()).toEqual([false, false, false]);
+
+        await asAdmin('patch', `/admin/organizers/${organizerId}/verify`).expect(200);
+        expect(await publicEverywhere()).toEqual([true, true, true]);
+
+        await asAdmin('patch', `/admin/organizers/${organizerId}/reject`).send({ reason: 'Fraud report' }).expect(200);
+        expect(await publicEverywhere()).toEqual([false, false, false]);
+
+        await asAdmin('patch', `/admin/organizers/${organizerId}/verify`).expect(200);
+        expect(await publicEverywhere()).toEqual([true, true, true]);
+
+        const row = await prisma.bazaar.findUniqueOrThrow({ where: { id: publishedBazaarId } });
+        expect(row.status).toBe('PUBLISHED');
+      } finally {
+        await prisma.organizer.update({ where: { id: organizerId }, data: { verified: false, rejectionReason: null } });
+      }
+    });
+
+    it('a deleted organizer hides the bazaar too, and a vendor cannot apply to it', async () => {
+      await prisma.organizer.update({ where: { id: organizerId }, data: { verified: true } });
+      await prisma.vendor.update({ where: { id: vendorId }, data: { verified: true } });
+      const target = await insertBazaar('Mgmt Apply Target', BazaarStatus.PUBLISHED);
+      try {
+        await request(app.getHttpServer()).get(`/bazaars/${target}`).expect(200);
+
+        await prisma.organizer.update({ where: { id: organizerId }, data: { deletedAt: new Date() } });
+        await request(app.getHttpServer()).get(`/bazaars/${target}`).expect(404);
+
+        const apply = await request(app.getHttpServer())
+          .post(`/bazaars/${target}/apply`)
+          .set('Authorization', `Bearer ${tokens.vendor}`)
+          .expect(400);
+        expect(apply.body.code).toBe('BAZAAR_NOT_ACCEPTING_APPLICATIONS');
+      } finally {
+        await prisma.organizer.update({ where: { id: organizerId }, data: { verified: false, deletedAt: null } });
+        await prisma.vendor.update({ where: { id: vendorId }, data: { verified: false } });
+      }
+    });
+  });
+
+  // --- B8c ------------------------------------------------------------------
+
+  describe('booth-layout admin actions are audited (B8c)', () => {
+    it('layout create/update → BAZAAR rows; booth lifecycle → BOOTH rows; idempotent unassign records nothing', async () => {
+      await prisma.boothListing.update({ where: { id: pendingApplicationId }, data: { applicationStatus: 'ACCEPTED' } });
+      const grid = { rows: 4, cols: 4, cellSize: 10 };
+      try {
+        await asAdmin('post', `/admin/bazaars/${publishedBazaarId}/layout`).send({ gridConfig: grid }).expect(201);
+        await asAdmin('patch', `/admin/bazaars/${publishedBazaarId}/layout`).send({ gridConfig: { ...grid, rows: 5 } }).expect(200);
+        const booth = await asAdmin('post', `/admin/bazaars/${publishedBazaarId}/layout/booths`)
+          .send({ label: 'A-1', positionX: 0, positionY: 0, width: 1, height: 1 })
+          .expect(201);
+        const boothId = booth.body.id as string;
+
+        await asAdmin('patch', `/admin/booths/${boothId}`).send({ label: 'A-2' }).expect(200);
+        await asAdmin('patch', `/admin/booths/${boothId}/assign`).send({ boothListingId: pendingApplicationId }).expect(200);
+        await asAdmin('patch', `/admin/booths/${boothId}/unassign`).expect(200);
+        await asAdmin('patch', `/admin/booths/${boothId}/unassign`).expect(200); // no-op
+        await asAdmin('delete', `/admin/booths/${boothId}`).expect(200);
+
+        const admin = await prisma.user.findUniqueOrThrow({ where: { email: 'mgmt-admin@example.com' } });
+        const rows = await prisma.adminAuditLog.findMany({
+          where: { action: { in: ['BOOTH_LAYOUT_CREATED', 'BOOTH_LAYOUT_UPDATED', 'BOOTH_CREATED', 'BOOTH_UPDATED', 'BOOTH_ASSIGNED', 'BOOTH_UNASSIGNED', 'BOOTH_DELETED'] } },
+          orderBy: { createdAt: 'asc' },
+        });
+        expect(rows.map((r) => [r.action, r.targetType, r.targetId])).toEqual([
+          ['BOOTH_LAYOUT_CREATED', 'BAZAAR', publishedBazaarId],
+          ['BOOTH_LAYOUT_UPDATED', 'BAZAAR', publishedBazaarId],
+          ['BOOTH_CREATED', 'BOOTH', boothId],
+          ['BOOTH_UPDATED', 'BOOTH', boothId],
+          ['BOOTH_ASSIGNED', 'BOOTH', boothId],
+          ['BOOTH_UNASSIGNED', 'BOOTH', boothId],
+          ['BOOTH_DELETED', 'BOOTH', boothId],
+        ]);
+        expect(rows.every((r) => r.actorId === admin.id)).toBe(true);
+      } finally {
+        await prisma.booth.deleteMany();
+        await prisma.boothLayout.deleteMany();
+        await prisma.boothListing.update({ where: { id: pendingApplicationId }, data: { applicationStatus: 'PENDING' } });
+      }
     });
   });
 });

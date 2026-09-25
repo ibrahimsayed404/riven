@@ -3,10 +3,12 @@ import { OrderStatus } from '@prisma/client';
 
 import { OrdersRepository } from './orders.repository';
 import { OrdersService } from './orders.service';
+import { AuditService } from '../audit/audit.service';
 
 describe('OrdersService', () => {
   let service: OrdersService;
   let repository: jest.Mocked<OrdersRepository>;
+  let auditService: { record: jest.Mock };
 
   beforeEach(() => {
     repository = {
@@ -23,7 +25,8 @@ describe('OrdersService', () => {
       findManyForAdmin: jest.fn(),
       findByIdForAdmin: jest.fn(),
     } as unknown as jest.Mocked<OrdersRepository>;
-    service = new OrdersService(repository);
+    auditService = { record: jest.fn().mockResolvedValue(undefined) };
+    service = new OrdersService(repository, auditService as unknown as AuditService);
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
   afterEach(() => jest.restoreAllMocks());
@@ -186,6 +189,65 @@ describe('OrdersService', () => {
       repository.findByIdForAdmin.mockResolvedValue(null);
 
       await expect(service.getOrderForAdmin('missing')).rejects.toMatchObject({ response: { code: 'ORDER_NOT_FOUND' } });
+    });
+  });
+
+  describe('cancelOrderForAdmin (specs/admin-module-spec3.md B6)', () => {
+    const pending = { id: 'o1', orderGroupId: 'g1', status: OrderStatus.PENDING };
+
+    it('cancels the whole PENDING group and audits one row per cancelled order', async () => {
+      repository.findByIdForAdmin
+        .mockResolvedValueOnce(pending as any)
+        .mockResolvedValueOnce({ ...pending, status: OrderStatus.CANCELLED } as any);
+      repository.cancelPendingGroup.mockResolvedValue({ cancelledOrderIds: ['o1', 'o2'] });
+
+      const result = await service.cancelOrderForAdmin('admin-1', 'o1');
+
+      expect(repository.cancelPendingGroup).toHaveBeenCalledWith('g1');
+      expect(result).toMatchObject({ id: 'o1', status: OrderStatus.CANCELLED, cancelledOrderIds: ['o1', 'o2'] });
+      expect(auditService.record.mock.calls.map((c) => c[0])).toEqual([
+        { actorId: 'admin-1', action: 'ORDER_CANCELLED', targetType: 'ORDER', targetId: 'o1' },
+        { actorId: 'admin-1', action: 'ORDER_CANCELLED', targetType: 'ORDER', targetId: 'o2' },
+      ]);
+      expect(repository.cancelPendingGroup.mock.invocationCallOrder[0]).toBeLessThan(
+        auditService.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('an already CANCELLED order is a no-op', async () => {
+      repository.findByIdForAdmin.mockResolvedValue({ ...pending, status: OrderStatus.CANCELLED } as any);
+
+      await expect(service.cancelOrderForAdmin('admin-1', 'o1')).resolves.toMatchObject({ cancelledOrderIds: [] });
+      expect(repository.cancelPendingGroup).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it.each([OrderStatus.PAID, OrderStatus.FULFILLED, OrderStatus.SHIPPED, OrderStatus.DELIVERED])(
+      'refuses %s with 400 ORDER_NOT_CANCELLABLE (no refunds)',
+      async (status) => {
+        repository.findByIdForAdmin.mockResolvedValue({ ...pending, status } as any);
+        await expect(service.cancelOrderForAdmin('admin-1', 'o1')).rejects.toMatchObject({
+          status: 400,
+          response: { code: 'ORDER_NOT_CANCELLABLE' },
+        });
+        expect(repository.cancelPendingGroup).not.toHaveBeenCalled();
+      },
+    );
+
+    it('409 ORDER_STATE_CHANGED when payment lands first (order not in the cancelled set); nothing audited', async () => {
+      repository.findByIdForAdmin.mockResolvedValue(pending as any);
+      repository.cancelPendingGroup.mockResolvedValue({ cancelledOrderIds: [] });
+
+      await expect(service.cancelOrderForAdmin('admin-1', 'o1')).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'ORDER_STATE_CHANGED' },
+      });
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 ORDER_NOT_FOUND for an unknown order', async () => {
+      repository.findByIdForAdmin.mockResolvedValue(null);
+      await expect(service.cancelOrderForAdmin('admin-1', 'x')).rejects.toMatchObject({ response: { code: 'ORDER_NOT_FOUND' } });
     });
   });
 });
