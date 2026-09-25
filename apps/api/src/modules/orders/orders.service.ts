@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { OrderStatus, RatingTargetType } from '@prisma/client';
 
 import { pageMeta } from '../../common/dto/pagination-query.dto';
-import { OrdersRepository } from './orders.repository';
+import { AdminOrderDetail, OrdersRepository } from './orders.repository';
 
 // Valid forward transitions
 export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
@@ -166,5 +166,28 @@ export class OrdersService {
   /** Admin overview: orders per status, one query. */
   countByStatus(): Promise<{ status: OrderStatus; count: number }[]> {
     return this.ordersRepository.groupByStatus();
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A5): read-only; status overrides,
+  // cancel and refund are Open Item B6 ---
+
+  async listForAdmin(params: {
+    status?: OrderStatus;
+    vendorId?: string;
+    userId?: string;
+    orderGroupId?: string;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.ordersRepository.findManyForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
+  }
+
+  async getOrderForAdmin(orderId: string): Promise<AdminOrderDetail> {
+    const order = await this.ordersRepository.findByIdForAdmin(orderId);
+    if (!order) {
+      throw orderNotFound();
+    }
+    return order;
   }
 }

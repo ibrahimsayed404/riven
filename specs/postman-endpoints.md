@@ -305,6 +305,16 @@ Vendor progresses fulfilment. Allowed: PAID → FULFILLED, FULFILLED → SHIPPED
 Auth: VENDOR (owner). Body: `{ "status": "FULFILLED" | "SHIPPED" }`
 200 → order. Errors: 400 VENDOR_TRANSITION_NOT_ALLOWED (any value other than FULFILLED/SHIPPED) · 400 INVALID_ORDER_TRANSITION (wrong current state; message lists allowed next states) · 409 ORDER_STATE_CHANGED.
 
+### GET /admin/orders
+Every order of every shopper and vendor, newest first.
+Auth: ADMIN. Query: `status?` (OrderStatus), `vendorId?`, `userId?`, `orderGroupId?` (uuids), `page`, `limit`.
+200 → `{ data: [order + vendor { id, name } + user { id, name, email }], meta }` — no items in list rows. Errors: 400 (bad enum/uuid, unknown query field).
+
+### GET /admin/orders/:id
+Any order, plus its `items` and the group's payment record: `orderGroup { id, createdAt, paidAt, paidAmountCents, paymobOrderId, paymobIntentId, paymobTransactionId }` — the Paymob ids appear on this admin route only, for payment support.
+Auth: ADMIN. 200. Errors: 404 ORDER_NOT_FOUND.
+Read-only: admin status changes, cancel and refund are not built (specs/admin-module-spec2.md B6; refunds need the Payments spec).
+
 ---
 
 ## 9. Bazaars — public (`/bazaars`), organizer (`/organizers/me`), vendor applications, admin organizers
