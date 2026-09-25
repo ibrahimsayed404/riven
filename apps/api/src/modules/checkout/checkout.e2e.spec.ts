@@ -188,7 +188,7 @@ describe('Checkout and Orders (e2e)', () => {
         .get('/vendors/me/orders')
         .set('Authorization', `Bearer ${vendor1Token}`)
         .expect(200);
-      expect(list.body.total).toBe(1);
+      expect(list.body.meta.total).toBe(1);
       expect(list.body.data[0].id).toBe(createdOrderId);
       expect(list.body.data[0].user).toEqual(contact);
       expect(list.body.data[0]).not.toHaveProperty('items');

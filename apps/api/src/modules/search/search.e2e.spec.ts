@@ -9,7 +9,7 @@ import * as request from 'supertest';
 
 import { AppModule } from '../../app.module';
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { SEARCH_INDEXES } from '../../infra/search/search-index.config';
+import { SEARCH_INDEXES, SEARCH_INDEX_SETTINGS } from '../../infra/search/search-index.config';
 import { SearchIndexRegistry } from '../../infra/search/search-index.registry';
 import { SEARCH_SYNC_QUEUE } from '../../infra/search/search-sync.job';
 
@@ -139,9 +139,26 @@ describe('SearchModule (e2e)', () => {
     return id;
   }
 
+  // deleteIndex only *enqueues* a Meilisearch task; waitTask makes the drop
+  // actually happen before we go on (a missing index just yields a failed task).
   async function dropTestIndexes() {
     for (const name of SEARCH_INDEXES) {
-      await registry.client.deleteIndexIfExists(registry.uid(name));
+      await registry.client.deleteIndex(registry.uid(name)).waitTask();
+    }
+  }
+
+  /**
+   * Drop leftovers from an earlier run, then recreate each index WITH its
+   * settings. app.init() already bootstrapped (and flagged search ready), so
+   * after a bare drop nothing would re-apply settings: the first document write
+   * auto-creates an index with no filterable attributes, and every filtered
+   * search 500s ("Attribute `scheduleType` is not filterable").
+   */
+  async function resetTestIndexes() {
+    await dropTestIndexes();
+    for (const name of SEARCH_INDEXES) {
+      await registry.client.createIndex(registry.uid(name), { primaryKey: 'id' }).waitTask();
+      await registry.index(name).updateSettings(SEARCH_INDEX_SETTINGS[name]).waitTask();
     }
   }
 
@@ -174,7 +191,7 @@ describe('SearchModule (e2e)', () => {
 
     // Leftover jobs from an earlier run would race this one.
     await queue.obliterate({ force: true });
-    await dropTestIndexes();
+    await resetTestIndexes();
 
     await prisma.favorite.deleteMany();
     await prisma.productVariant.deleteMany();
@@ -421,9 +438,16 @@ describe('SearchModule (e2e)', () => {
     });
 
     it('category=<slug> matches the whole subtree', async () => {
-      const res = await request(app.getHttpServer()).get('/search/products').query({ q: 'dress', category: 'women' });
-      expect(res.status).toBe(200);
-      expect(res.body.hits.map((h: { id: string }) => h.id)).toEqual(expect.arrayContaining([ids.linen, ids.arabic]));
+      // `q` is required and no single term hits both fixtures (the Arabic one has
+      // no English text, and there are no synonyms), so check each depth separately:
+      // linen sits two levels down (women › dresses › maxi-dresses), arabic directly under women.
+      const deep = await request(app.getHttpServer()).get('/search/products').query({ q: 'dress', category: 'women' });
+      expect(deep.status).toBe(200);
+      expect(deep.body.hits.map((h: { id: string }) => h.id)).toContain(ids.linen);
+
+      const direct = await request(app.getHttpServer()).get('/search/products').query({ q: 'فستان', category: 'women' });
+      expect(direct.status).toBe(200);
+      expect(direct.body.hits.map((h: { id: string }) => h.id)).toContain(ids.arabic);
     });
 
     it('filters by size and color', async () => {
@@ -553,6 +577,47 @@ describe('SearchModule (e2e)', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ types: ['events'] });
       expect(res.status).toBe(400);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Category edits reach the index (admin-module-spec2 A7: CATEGORY_PRODUCTS fan-out)
+  // ---------------------------------------------------------------------------
+
+  describe('admin category re-slug', () => {
+    /** Polls the product's document until `check` holds — the fan-out is two async hops. */
+    async function waitForProductDoc(id: string, check: (doc: Record<string, unknown>) => boolean, timeoutMs = 15_000) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const doc = (await registry.index('products').getDocument(id)) as Record<string, unknown>;
+        if (check(doc)) return doc;
+        if (Date.now() > deadline) throw new Error(`Timed out: product ${id} document is ${JSON.stringify(doc)}`);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+
+    const patchSlug = (slug: string) =>
+      request(app.getHttpServer())
+        .patch(`/admin/categories/${maxiCategoryId}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ slug });
+
+    it('re-indexes products under the category, and category=<new slug> finds them', async () => {
+      await waitForIndexed('products', ids.linen, true);
+      try {
+        expect((await patchSlug('maxi-gowns')).status).toBe(200);
+
+        const doc = await waitForProductDoc(ids.linen, (d) => d.categorySlug === 'maxi-gowns');
+        expect(doc.categoryPath).toEqual(['women', 'dresses', 'maxi-gowns']);
+
+        const res = await request(app.getHttpServer()).get('/search/products').query({ q: 'linen', category: 'maxi-gowns' });
+        expect(res.status).toBe(200);
+        expect(res.body.hits.map((h: { id: string }) => h.id)).toContain(ids.linen);
+      } finally {
+        // beforeAll upserts by slug: leave the fixture as the next run expects it.
+        await patchSlug('maxi-dresses');
+        await waitForProductDoc(ids.linen, (d) => d.categorySlug === 'maxi-dresses');
+      }
     });
   });
 });

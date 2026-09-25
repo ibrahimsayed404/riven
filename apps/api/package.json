@@ -29,7 +29,8 @@
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "testTimeout": 30000
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1135.0",

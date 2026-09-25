@@ -190,7 +190,7 @@ describe('BazaarsModule (e2e)', () => {
       .get('/vendors/me/bazaar-applications')
       .set('Authorization', `Bearer ${vendorToken}`);
     expect(res.status).toBe(200);
-    expect(res.body.total).toBe(1);
+    expect(res.body.meta.total).toBe(1);
 
     const [row] = res.body.data;
     expect(row.bazaarId).toBe(bazaarId);
