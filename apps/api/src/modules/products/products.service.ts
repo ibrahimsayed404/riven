@@ -39,6 +39,15 @@ export class ProductsService {
 
   // --- Admin moderation (specs/admin-module-spec.md §4.3) ---
 
+  /** Admin detail (specs/admin-module-spec2.md A2): any approval state, inactive and soft-deleted included. */
+  async getProductForAdmin(id: string) {
+    const product = await this.productsRepository.findByIdForAdmin(id);
+    if (!product) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+    return product;
+  }
+
   async listForAdmin(params: {
     approvalStatus?: ApprovalStatus;
     vendorId?: string;

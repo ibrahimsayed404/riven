@@ -32,6 +32,8 @@ describe('VendorsService', () => {
       findManyForAdmin: jest.fn(),
       findPublicById: jest.fn(),
       countPendingForAdmin: jest.fn(),
+      findByIdForAdmin: jest.fn(),
+      countProductsByApprovalStatus: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -251,6 +253,36 @@ describe('VendorsService', () => {
 
       expect(vendorsRepository.findManyForAdmin).toHaveBeenCalledWith({ status: 'pending', page: 2, limit: 10 });
       expect(result.meta).toEqual({ total: 21, page: 2, limit: 10, totalPages: 3 });
+    });
+  });
+
+  describe('getVendorForAdmin', () => {
+    it('returns an unverified, soft-deleted vendor with location and product counts', async () => {
+      const deletedAt = new Date('2026-09-01T00:00:00Z');
+      vendorsRepository.findByIdForAdmin.mockResolvedValue({ id: 'v1', verified: false, deletedAt } as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue({ lat: 30, lng: 31 });
+      vendorsRepository.countProductsByApprovalStatus.mockResolvedValue({ PENDING: 2, APPROVED: 1, REJECTED: 0 });
+
+      const result = await service.getVendorForAdmin('v1');
+
+      expect(vendorsRepository.findByIdForAdmin).toHaveBeenCalledWith('v1');
+      expect(vendorsRepository.findPublicById).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        id: 'v1',
+        verified: false,
+        deletedAt,
+        location: { lat: 30, lng: 31 },
+        productCounts: { PENDING: 2, APPROVED: 1, REJECTED: 0 },
+      });
+    });
+
+    it('throws a coded 404 for an unknown id', async () => {
+      vendorsRepository.findByIdForAdmin.mockResolvedValue(null);
+
+      await expect(service.getVendorForAdmin('missing')).rejects.toMatchObject({
+        response: { code: 'VENDOR_NOT_FOUND' },
+      });
+      expect(vendorsRepository.countProductsByApprovalStatus).not.toHaveBeenCalled();
     });
   });
 

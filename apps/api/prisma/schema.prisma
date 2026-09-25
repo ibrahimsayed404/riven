@@ -155,6 +155,8 @@ enum AdminAction {
   PRODUCT_REJECTED
   USER_DEACTIVATED
   USER_REACTIVATED
+  CATEGORY_CREATED
+  CATEGORY_UPDATED
 }
 
 enum AdminTargetType {
@@ -162,6 +164,7 @@ enum AdminTargetType {
   ORGANIZER
   PRODUCT
   USER
+  CATEGORY
 }
 
 // ----------------------------------------------------------------------------

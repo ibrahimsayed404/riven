@@ -27,6 +27,12 @@ export class AdminVendorsController {
     });
   }
 
+  /** Any moderation state, soft-deleted included (specs/admin-module-spec2.md A1). */
+  @Get(':id')
+  getVendor(@Param('id') id: string) {
+    return this.vendorsService.getVendorForAdmin(id);
+  }
+
   @Patch(':id/verify')
   @HttpCode(HttpStatus.OK)
   verifyVendor(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {

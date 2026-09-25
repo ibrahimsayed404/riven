@@ -103,6 +103,20 @@ export class VendorsService {
 
   // --- Admin moderation (specs/admin-module-spec.md §3, §4.1) ---
 
+  /** Admin detail (specs/admin-module-spec2.md A1): any moderation state, soft-deleted included. */
+  async getVendorForAdmin(id: string) {
+    const vendor = await this.vendorsRepository.findByIdForAdmin(id);
+    if (!vendor) {
+      throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
+    }
+
+    const [location, productCounts] = await Promise.all([
+      this.vendorsRepository.findVendorLocation(vendor.id),
+      this.vendorsRepository.countProductsByApprovalStatus(vendor.id),
+    ]);
+    return { ...vendor, location, productCounts };
+  }
+
   async listForAdmin(params: {
     status?: VendorModerationStatus;
     search?: string;
