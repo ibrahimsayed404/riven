@@ -22,6 +22,7 @@ describe('ProductsService', () => {
       listPublicIds: jest.fn(),
       findModerationState: jest.fn(),
       findManyForAdmin: jest.fn(),
+      findByIdForAdmin: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -158,6 +159,24 @@ describe('ProductsService', () => {
 
       expect(productsRepository.findManyForAdmin).toHaveBeenCalledWith({ approvalStatus: 'PENDING', page: 1, limit: 2 });
       expect(result.meta).toEqual({ total: 5, page: 1, limit: 2, totalPages: 3 });
+    });
+  });
+
+  describe('getProductForAdmin', () => {
+    it('returns a PENDING product without the public visibility filter', async () => {
+      productsRepository.findByIdForAdmin.mockResolvedValue({ id: 'p1', approvalStatus: 'PENDING' } as any);
+
+      await expect(service.getProductForAdmin('p1')).resolves.toEqual({ id: 'p1', approvalStatus: 'PENDING' });
+      expect(productsRepository.findByIdForAdmin).toHaveBeenCalledWith('p1');
+      expect(productsRepository.findById).not.toHaveBeenCalled();
+    });
+
+    it('throws a coded 404 for an unknown id', async () => {
+      productsRepository.findByIdForAdmin.mockResolvedValue(null);
+
+      await expect(service.getProductForAdmin('missing')).rejects.toMatchObject({
+        response: { code: 'PRODUCT_NOT_FOUND' },
+      });
     });
   });
 

@@ -27,6 +27,12 @@ export class AdminProductsController {
     });
   }
 
+  /** Any approval state, inactive and soft-deleted included (specs/admin-module-spec2.md A2). */
+  @Get(':id')
+  getProduct(@Param('id') id: string) {
+    return this.productsService.getProductForAdmin(id);
+  }
+
   @Patch(':id/approve')
   @HttpCode(HttpStatus.OK)
   approveProduct(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {

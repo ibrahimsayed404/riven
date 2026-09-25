@@ -32,6 +32,28 @@ const adminProductRowSelect = {
 
 export type AdminProductRow = Prisma.ProductGetPayload<{ select: typeof adminProductRowSelect }>;
 
+// Admin detail: any approval state, inactive and soft-deleted included, every
+// variant (deletedAt flags the removed ones). /admin/* only, never public.
+const adminProductDetailSelect = {
+  ...adminProductRowSelect,
+  deletedAt: true,
+  category: { select: { id: true, name: true, slug: true } },
+  variants: {
+    select: {
+      id: true,
+      sku: true,
+      size: true,
+      color: true,
+      priceOverride: true,
+      stockQuantity: true,
+      deletedAt: true,
+    },
+    orderBy: { sku: 'asc' },
+  },
+} satisfies Prisma.ProductSelect;
+
+export type AdminProductDetail = Prisma.ProductGetPayload<{ select: typeof adminProductDetailSelect }>;
+
 export interface ProductModerationState {
   id: string;
   approvalStatus: ApprovalStatus;
@@ -189,6 +211,14 @@ export class ProductsRepository {
     return this.prisma.product.findUnique({
       where: { id },
       select: { id: true, approvalStatus: true, rejectionReason: true, deletedAt: true },
+    });
+  }
+
+  /** Admin detail: no visibility filter at all — admin sees every state. */
+  findByIdForAdmin(id: string): Promise<AdminProductDetail | null> {
+    return this.prisma.product.findUnique({
+      where: { id },
+      select: adminProductDetailSelect,
     });
   }
 

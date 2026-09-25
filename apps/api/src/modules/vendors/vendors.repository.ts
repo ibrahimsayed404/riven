@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Product, ProductVariant } from '@prisma/client';
+import { ApprovalStatus, Prisma, Product, ProductVariant } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ACTIVE_VARIANT_WHERE } from '../products/product-visibility';
@@ -78,6 +78,18 @@ const adminVendorRowSelect = {
 } satisfies Prisma.VendorSelect;
 
 export type AdminVendorRow = Prisma.VendorGetPayload<{ select: typeof adminVendorRowSelect }>;
+
+// Admin detail: the full profile in any moderation state, soft-deleted
+// included (deletedAt tells the admin). /admin/* only, never public.
+const adminVendorDetailSelect = {
+  ...vendorProfileSelect,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  owner: { select: { id: true, name: true, email: true, isActive: true } },
+} satisfies Prisma.VendorSelect;
+
+export type AdminVendorDetail = Prisma.VendorGetPayload<{ select: typeof adminVendorDetailSelect }>;
 
 /** pending = unverified with no reason; rejected = unverified with a reason. */
 export type VendorModerationStatus = 'pending' | 'verified' | 'rejected';
@@ -175,6 +187,26 @@ export class VendorsRepository {
       where: { id },
       select: { id: true, verified: true, rejectionReason: true, deletedAt: true },
     });
+  }
+
+  /** Admin detail: no verified/deletedAt filter — admin sees every state. */
+  findByIdForAdmin(id: string): Promise<AdminVendorDetail | null> {
+    return this.prisma.vendor.findUnique({
+      where: { id },
+      select: adminVendorDetailSelect,
+    });
+  }
+
+  /** Non-deleted products of one vendor, counted per approval status. */
+  async countProductsByApprovalStatus(vendorId: string): Promise<Record<ApprovalStatus, number>> {
+    const rows = await this.prisma.product.groupBy({
+      by: ['approvalStatus'],
+      where: { vendorId, deletedAt: null },
+      _count: { _all: true },
+    });
+    const counts: Record<ApprovalStatus, number> = { PENDING: 0, APPROVED: 0, REJECTED: 0 };
+    for (const row of rows) counts[row.approvalStatus] = row._count._all;
+    return counts;
   }
 
   async findManyForAdmin(params: {
