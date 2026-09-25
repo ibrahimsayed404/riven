@@ -28,6 +28,11 @@ describe('Admin management — pass 2 (e2e)', () => {
   let deletedBazaarId: string;
   let pendingApplicationId: string;
   let rejectedApplicationId: string;
+  let shopperId: string;
+  let otherShopperToken: string;
+  let paidOrderId: string;
+  let paidOrderGroupId: string;
+  let cancelledOrderId: string;
 
   async function wipe() {
     await prisma.orderItem.deleteMany();
@@ -109,7 +114,14 @@ describe('Admin management — pass 2 (e2e)', () => {
       .post('/auth/register')
       .send({ email: 'mgmt-shopper@example.com', password: 'Password123!', name: 'S', role: 'SHOPPER' })
       .expect(201);
-    tokens.shopper = await app.get(JwtService).signAsync({ sub: shopperRes.body.id, role: Role.SHOPPER });
+    shopperId = shopperRes.body.id;
+    tokens.shopper = await app.get(JwtService).signAsync({ sub: shopperId, role: Role.SHOPPER });
+
+    // A second shopper, only to prove the shopper route still hides the first one's orders.
+    const otherShopper = await prisma.user.create({
+      data: { email: 'mgmt-shopper2@example.com', passwordHash: 'hash', name: 'S2', role: Role.SHOPPER },
+    });
+    otherShopperToken = await app.get(JwtService).signAsync({ sub: otherShopper.id, role: Role.SHOPPER });
 
     otherOrganizerToken = await register('/auth/register/organizer', {
       email: 'mgmt-org2@example.com',
@@ -163,6 +175,49 @@ describe('Admin management — pass 2 (e2e)', () => {
         },
       })
     ).id;
+
+    // Two order groups for the shopper at the one vendor: a PAID one with a Paymob
+    // record, and an older CANCELLED one. Seeded directly — checkout needs Paymob.
+    const variant = await prisma.productVariant.findUniqueOrThrow({ where: { sku: 'MGMT-A' } });
+    const paidGroup = await prisma.orderGroup.create({
+      data: {
+        userId: shopperId,
+        paymobOrderId: 'pm-order-1',
+        paymobIntentId: 'pm-intent-1',
+        paymobTransactionId: 'pm-txn-1',
+        paidAmountCents: 2000,
+        paidAt: new Date(),
+      },
+    });
+    paidOrderGroupId = paidGroup.id;
+    paidOrderId = (
+      await prisma.order.create({
+        data: {
+          orderGroupId: paidGroup.id,
+          vendorId,
+          userId: shopperId,
+          status: 'PAID',
+          subtotal: 20,
+          items: {
+            create: [{ productId, variantId: variant.id, titleSnapshot: 'Hidden', priceSnapshot: 10, quantity: 2 }],
+          },
+        },
+      })
+    ).id;
+    const cancelledGroup = await prisma.orderGroup.create({ data: { userId: shopperId } });
+    cancelledOrderId = (
+      await prisma.order.create({
+        data: {
+          orderGroupId: cancelledGroup.id,
+          vendorId,
+          userId: shopperId,
+          status: 'CANCELLED',
+          subtotal: 10,
+          createdAt: new Date(Date.now() - 86_400_000),
+        },
+      })
+    ).id;
+
     // App boot + five bcrypt(12) registrations: past Jest's 5 s default on a loaded
     // machine, which failed the whole suite intermittently (2 of 7 runs, 2026-09-25).
   }, 30_000);
@@ -383,6 +438,90 @@ describe('Admin management — pass 2 (e2e)', () => {
         .get(`/organizers/me/bazaars/${publishedBazaarId}/applications`)
         .set('Authorization', `Bearer ${otherOrganizerToken}`)
         .expect((r) => expect([403, 404]).toContain(r.status));
+    });
+  });
+
+  // --- A5 -------------------------------------------------------------------
+
+  describe('GET /admin/orders', () => {
+    authMatrix('get', () => '/admin/orders');
+
+    it('lists every order, newest first, with both parties and no items', async () => {
+      const res = await asAdmin('get', '/admin/orders').expect(200);
+
+      expect(res.body.data.map((o: { id: string }) => o.id)).toEqual([paidOrderId, cancelledOrderId]);
+      expect(res.body.meta).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+      expect(res.body.data[0]).toMatchObject({
+        status: 'PAID',
+        subtotal: '20',
+        vendor: { id: vendorId, name: 'Mgmt Shop' },
+        user: { id: shopperId, email: 'mgmt-shopper@example.com' },
+      });
+      expect(res.body.data[0]).not.toHaveProperty('items');
+      expect(res.body.data[0]).not.toHaveProperty('orderGroup');
+      expect(res.body.data[0].user).not.toHaveProperty('passwordHash');
+    });
+
+    it('filters by status, vendorId, userId and orderGroupId', async () => {
+      const cancelled = await asAdmin('get', '/admin/orders?status=CANCELLED').expect(200);
+      expect(cancelled.body.data.map((o: { id: string }) => o.id)).toEqual([cancelledOrderId]);
+
+      const byGroup = await asAdmin('get', `/admin/orders?orderGroupId=${paidOrderGroupId}`).expect(200);
+      expect(byGroup.body.data.map((o: { id: string }) => o.id)).toEqual([paidOrderId]);
+
+      const byParties = await asAdmin('get', `/admin/orders?vendorId=${vendorId}&userId=${shopperId}&limit=1`).expect(200);
+      expect(byParties.body.meta).toEqual({ total: 2, page: 1, limit: 1, totalPages: 2 });
+    });
+
+    it('400 on an unknown status, a non-UUID id filter, or an unlisted query field', async () => {
+      await asAdmin('get', '/admin/orders?status=REFUNDED').expect(400);
+      await asAdmin('get', '/admin/orders?userId=abc').expect(400);
+      await asAdmin('get', '/admin/orders?bazaarId=00000000-0000-0000-0000-000000000000').expect(400);
+    });
+  });
+
+  describe('GET /admin/orders/:id', () => {
+    authMatrix('get', () => `/admin/orders/${paidOrderId}`);
+
+    it('returns items and the payment record, which only this admin route exposes', async () => {
+      const res = await asAdmin('get', `/admin/orders/${paidOrderId}`).expect(200);
+      expect(res.body).toMatchObject({
+        id: paidOrderId,
+        status: 'PAID',
+        vendor: { id: vendorId },
+        user: { id: shopperId },
+        orderGroup: {
+          id: paidOrderGroupId,
+          paidAmountCents: 2000,
+          paymobOrderId: 'pm-order-1',
+          paymobIntentId: 'pm-intent-1',
+          paymobTransactionId: 'pm-txn-1',
+        },
+      });
+      expect(res.body.items).toEqual([
+        expect.objectContaining({ productId, titleSnapshot: 'Hidden', priceSnapshot: '10', quantity: 2 }),
+      ]);
+    });
+
+    it('the shopper route still does not expose the payment record', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/orders/${paidOrderId}`)
+        .set('Authorization', `Bearer ${tokens.shopper}`)
+        .expect(200);
+      expect(res.body).not.toHaveProperty('orderGroup');
+    });
+
+    it('404 ORDER_NOT_FOUND for an unknown id', async () => {
+      const res = await asAdmin('get', '/admin/orders/00000000-0000-0000-0000-000000000000').expect(404);
+      expect(res.body.code).toBe('ORDER_NOT_FOUND');
+    });
+
+    it('ownership still holds on the shopper route: another shopper cannot read it', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/orders/${paidOrderId}`)
+        .set('Authorization', `Bearer ${otherShopperToken}`)
+        .expect(404);
+      expect(res.body.code).toBe('ORDER_NOT_FOUND');
     });
   });
 });

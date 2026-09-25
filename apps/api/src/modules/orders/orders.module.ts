@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { VendorsModule } from '../vendors/vendors.module';
+import { AdminOrdersController } from './admin-orders.controller';
 import { OrdersExpiryProcessor } from './jobs/orders-expiry.processor';
 import { ORDERS_QUEUE, OrdersJobsService } from './jobs/orders-jobs.service';
 import { OrdersController } from './orders.controller';
@@ -11,7 +12,7 @@ import { VendorOrdersController } from './vendor-orders.controller';
 
 @Module({
   imports: [VendorsModule, BullModule.registerQueue({ name: ORDERS_QUEUE })],
-  controllers: [OrdersController, VendorOrdersController],
+  controllers: [AdminOrdersController, OrdersController, VendorOrdersController],
   providers: [OrdersService, OrdersRepository, OrdersJobsService, OrdersExpiryProcessor],
   exports: [OrdersService],
 })

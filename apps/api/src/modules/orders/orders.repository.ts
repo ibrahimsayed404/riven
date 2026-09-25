@@ -8,6 +8,33 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 // include the user at all.
 const SHOPPER_CONTACT_SELECT = { id: true, name: true, email: true, phone: true } as const;
 
+// Admin list row: the order plus both parties, no items. /admin/* only.
+const ADMIN_ORDER_ROW_INCLUDE = {
+  vendor: { select: { id: true, name: true } },
+  user: { select: { id: true, name: true, email: true } },
+} satisfies Prisma.OrderInclude;
+
+// Admin detail adds the items and the group's payment record — the Paymob ids
+// are for payment support and are exposed on this admin route only.
+const ADMIN_ORDER_DETAIL_INCLUDE = {
+  ...ADMIN_ORDER_ROW_INCLUDE,
+  items: true,
+  orderGroup: {
+    select: {
+      id: true,
+      createdAt: true,
+      paidAt: true,
+      paidAmountCents: true,
+      paymobOrderId: true,
+      paymobIntentId: true,
+      paymobTransactionId: true,
+    },
+  },
+} satisfies Prisma.OrderInclude;
+
+export type AdminOrderRow = Prisma.OrderGetPayload<{ include: typeof ADMIN_ORDER_ROW_INCLUDE }>;
+export type AdminOrderDetail = Prisma.OrderGetPayload<{ include: typeof ADMIN_ORDER_DETAIL_INCLUDE }>;
+
 @Injectable()
 export class OrdersRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -172,6 +199,42 @@ export class OrdersRepository {
       },
     });
     return count > 0;
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A5): global reads, no user/vendor scope ---
+
+  async findManyForAdmin(params: {
+    status?: OrderStatus;
+    vendorId?: string;
+    userId?: string;
+    orderGroupId?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ data: AdminOrderRow[]; total: number }> {
+    const where: Prisma.OrderWhereInput = {};
+    if (params.status) where.status = params.status;
+    if (params.vendorId) where.vendorId = params.vendorId;
+    if (params.userId) where.userId = params.userId;
+    if (params.orderGroupId) where.orderGroupId = params.orderGroupId;
+
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.order.count({ where }),
+      this.prisma.order.findMany({
+        where,
+        include: ADMIN_ORDER_ROW_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        skip: (params.page - 1) * params.limit,
+        take: params.limit,
+      }),
+    ]);
+    return { data, total };
+  }
+
+  findByIdForAdmin(orderId: string): Promise<AdminOrderDetail | null> {
+    return this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: ADMIN_ORDER_DETAIL_INCLUDE,
+    });
   }
 
   /** One GROUP BY, not one count per status. Orders have no soft-delete. */
