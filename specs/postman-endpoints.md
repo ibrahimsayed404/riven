@@ -182,6 +182,10 @@ Moderation queue.
 Auth: ADMIN. Query: `status?` = pending | verified | rejected, `search?`, `page`, `limit`.
 200 → `{ data: [vendor incl. owner email, verified, rejectionReason], meta }`
 
+### GET /admin/vendors/:id
+Full vendor detail in **any** state (pending, rejected, soft-deleted); the public `GET /vendors/:id` 404s on those.
+Auth: ADMIN. 200 → vendor profile + `rejectionReason`, `deletedAt`, `owner: { id, name, email, isActive }`, `location: {lat,lng} | null`, `productCounts: { PENDING, APPROVED, REJECTED }`. Errors: 404 VENDOR_NOT_FOUND (also for a malformed id).
+
 ### PATCH /admin/vendors/:id/verify
 Marks the vendor verified → storefront and its APPROVED products become public and searchable. Clears `rejectionReason`. Idempotent. Audit VENDOR_VERIFIED.
 Auth: ADMIN. 200 → vendor. Errors: 404.
@@ -206,6 +210,10 @@ Auth: none. 200. Errors: 404 PRODUCT_NOT_FOUND (also when pending/rejected/vendo
 ### GET /admin/products
 Moderation queue for products.
 Auth: ADMIN. Query: `approvalStatus?`, `vendorId?`, `page`, `limit`. 200 → `{ data, meta }`.
+
+### GET /admin/products/:id
+Full product detail in **any** state (pending, rejected, inactive, soft-deleted); the public `GET /products/:id` 404s on those.
+Auth: ADMIN. 200 → product + `deletedAt`, `vendor: { id, name, verified }`, `category: { id, name, slug }`, `variants[]` (all of them; removed ones have `deletedAt` set). Errors: 404 PRODUCT_NOT_FOUND.
 
 ### PATCH /admin/products/:id/approve
 Sets APPROVED and indexes the product for search (visible only if the vendor is verified). Idempotent. Audit PRODUCT_APPROVED.
@@ -373,6 +381,16 @@ Organizer can now create/publish bazaars. Idempotent. Audit ORGANIZER_VERIFIED. 
 ### PATCH /admin/organizers/:id/reject
 Rejects/revokes with a reason. Existing PUBLISHED bazaars stay public (product decision pending).
 Auth: ADMIN. Body: `{ "reason" (1–1000) }`. 200. Errors: 400 · 404.
+
+### GET /admin/bazaars
+Every bazaar of every organizer, in any status, **DRAFT included** (every other route shows a DRAFT to its owner only). Newest first.
+Auth: ADMIN. Query: `status?` (DRAFT|PUBLISHED|CANCELLED|COMPLETED), `organizerId?` (uuid), `search?` (name, case-insensitive), `includeDeleted?` (default false), `page`, `limit`.
+200 → `{ data: [bazaar + location {lat,lng}, organizer { id, name, verified }], meta }`. Errors: 400 (bad enum/uuid, unknown query field).
+
+### GET /admin/bazaars/:id
+Any bazaar regardless of status, owner or soft-delete.
+Auth: ADMIN. 200 → bazaar + `location`, `organizer { id, name, verified }`, `applicationCounts { PENDING, ACCEPTED, REJECTED }`, `hasLayout`. Errors: 404 BAZAAR_NOT_FOUND.
+Admin edit/cancel of a bazaar is not built yet (specs/admin-module-spec2.md B7).
 
 ---
 

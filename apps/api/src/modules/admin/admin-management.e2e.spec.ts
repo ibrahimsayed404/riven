@@ -1,7 +1,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
-import { Role } from '@prisma/client';
+import { BazaarStatus, Role, ScheduleType } from '@prisma/client';
 import * as request from 'supertest';
 
 import { AppModule } from '../../app.module';
@@ -21,6 +21,11 @@ describe('Admin management — pass 2 (e2e)', () => {
   };
   let vendorId: string;
   let productId: string;
+  let organizerId: string;
+  let otherOrganizerToken: string;
+  let draftBazaarId: string;
+  let publishedBazaarId: string;
+  let deletedBazaarId: string;
 
   async function wipe() {
     await prisma.orderItem.deleteMany();
@@ -58,6 +63,17 @@ describe('Admin management — pass 2 (e2e)', () => {
     }
   }
 
+  /** Raw insert: Prisma Client can't write the geography column. */
+  async function insertBazaar(name: string, status: BazaarStatus, deletedAt: Date | null = null): Promise<string> {
+    const rows = await prisma.$queryRaw<{ id: string }[]>`
+      INSERT INTO "bazaars" ("id", "organizerId", "name", "scheduleType", "startDate", "status", "location", "createdAt", "updatedAt", "deletedAt")
+      VALUES (gen_random_uuid(), ${organizerId}, ${name}, ${ScheduleType.ONE_OFF}::"ScheduleType", NOW(), ${status}::"BazaarStatus",
+              ST_SetSRID(ST_MakePoint(31.2, 30.05), 4326)::geography, NOW(), NOW(), ${deletedAt})
+      RETURNING "id"
+    `;
+    return rows[0].id;
+  }
+
   function asAdmin(method: 'get' | 'post' | 'patch', path: string) {
     return request(app.getHttpServer())[method](path).set('Authorization', `Bearer ${tokens.admin}`);
   }
@@ -93,6 +109,12 @@ describe('Admin management — pass 2 (e2e)', () => {
       .expect(201);
     tokens.shopper = await app.get(JwtService).signAsync({ sub: shopperRes.body.id, role: Role.SHOPPER });
 
+    otherOrganizerToken = await register('/auth/register/organizer', {
+      email: 'mgmt-org2@example.com',
+      organizationName: 'Other Events',
+    });
+    organizerId = (await prisma.organizer.findFirstOrThrow({ where: { owner: { email: 'mgmt-org@example.com' } } })).id;
+
     vendorId = (await prisma.vendor.findFirstOrThrow({ where: { owner: { email: 'mgmt-vendor@example.com' } } })).id;
 
     // Unverified vendor → a PENDING, inactive product with a soft-deleted variant: invisible on every public route.
@@ -119,6 +141,13 @@ describe('Admin management — pass 2 (e2e)', () => {
       },
     });
     productId = product.id;
+
+    // Organizer X's bazaars: a DRAFT (owner-only everywhere else), a PUBLISHED one with a
+    // pending application, and a soft-deleted one.
+    draftBazaarId = await insertBazaar('Mgmt Draft Souq', BazaarStatus.DRAFT);
+    publishedBazaarId = await insertBazaar('Mgmt Live Souq', BazaarStatus.PUBLISHED);
+    deletedBazaarId = await insertBazaar('Mgmt Gone Souq', BazaarStatus.CANCELLED, new Date());
+    await prisma.boothListing.create({ data: { bazaarId: publishedBazaarId, vendorId } });
   });
 
   afterAll(async () => {
@@ -190,6 +219,89 @@ describe('Admin management — pass 2 (e2e)', () => {
     it('404 PRODUCT_NOT_FOUND for an unknown id', async () => {
       const res = await asAdmin('get', '/admin/products/00000000-0000-0000-0000-000000000000').expect(404);
       expect(res.body.code).toBe('PRODUCT_NOT_FOUND');
+    });
+  });
+
+  // --- A3 -------------------------------------------------------------------
+
+  describe('GET /admin/bazaars', () => {
+    authMatrix('get', () => '/admin/bazaars');
+
+    it('lists every bazaar of every organizer, DRAFT included, soft-deleted excluded by default', async () => {
+      const res = await asAdmin('get', '/admin/bazaars').expect(200);
+      const ids = res.body.data.map((b: { id: string }) => b.id);
+      expect(ids).toEqual(expect.arrayContaining([draftBazaarId, publishedBazaarId]));
+      expect(ids).not.toContain(deletedBazaarId);
+      expect(res.body.meta).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+
+      const draft = res.body.data.find((b: { id: string }) => b.id === draftBazaarId);
+      expect(draft).toMatchObject({
+        status: 'DRAFT',
+        organizer: { id: organizerId, name: 'Mgmt Events', verified: false },
+        location: { lat: 30.05, lng: 31.2 },
+      });
+    });
+
+    it('filters by status, organizerId, search and includeDeleted', async () => {
+      const byStatus = await asAdmin('get', '/admin/bazaars?status=DRAFT').expect(200);
+      expect(byStatus.body.data.map((b: { id: string }) => b.id)).toEqual([draftBazaarId]);
+
+      const bySearch = await asAdmin('get', '/admin/bazaars?search=live').expect(200);
+      expect(bySearch.body.data.map((b: { id: string }) => b.id)).toEqual([publishedBazaarId]);
+
+      const byOrganizer = await asAdmin('get', `/admin/bazaars?organizerId=${organizerId}&includeDeleted=true`).expect(200);
+      expect(byOrganizer.body.meta.total).toBe(3);
+      expect(byOrganizer.body.data.map((b: { id: string }) => b.id)).toContain(deletedBazaarId);
+    });
+
+    it('400 on an unknown status, a non-UUID organizerId, or an unlisted query field', async () => {
+      await asAdmin('get', '/admin/bazaars?status=OPEN').expect(400);
+      await asAdmin('get', '/admin/bazaars?organizerId=abc').expect(400);
+      await asAdmin('get', '/admin/bazaars?owner=me').expect(400);
+    });
+  });
+
+  describe('GET /admin/bazaars/:id', () => {
+    authMatrix('get', () => `/admin/bazaars/${draftBazaarId}`);
+
+    it('returns a DRAFT bazaar that the public route hides', async () => {
+      await request(app.getHttpServer()).get(`/bazaars/${draftBazaarId}`).expect(404);
+
+      const res = await asAdmin('get', `/admin/bazaars/${draftBazaarId}`).expect(200);
+      expect(res.body).toMatchObject({
+        id: draftBazaarId,
+        status: 'DRAFT',
+        organizer: { id: organizerId },
+        location: { lat: 30.05, lng: 31.2 },
+        applicationCounts: { PENDING: 0, ACCEPTED: 0, REJECTED: 0 },
+        hasLayout: false,
+      });
+    });
+
+    it('counts applications and returns soft-deleted bazaars', async () => {
+      const live = await asAdmin('get', `/admin/bazaars/${publishedBazaarId}`).expect(200);
+      expect(live.body.applicationCounts).toEqual({ PENDING: 1, ACCEPTED: 0, REJECTED: 0 });
+
+      const gone = await asAdmin('get', `/admin/bazaars/${deletedBazaarId}`).expect(200);
+      expect(gone.body.deletedAt).not.toBeNull();
+    });
+
+    it('does not shadow the booth-layout route under the same prefix', async () => {
+      const res = await asAdmin('get', `/admin/bazaars/${draftBazaarId}/layout`);
+      expect(res.body.code).not.toBe('BAZAAR_NOT_FOUND');
+      expect(res.body).not.toHaveProperty('applicationCounts');
+    });
+
+    it('404 BAZAAR_NOT_FOUND for an unknown id', async () => {
+      const res = await asAdmin('get', '/admin/bazaars/00000000-0000-0000-0000-000000000000').expect(404);
+      expect(res.body.code).toBe('BAZAAR_NOT_FOUND');
+    });
+
+    it('ownership still holds on the organizer route: another organizer cannot read it', async () => {
+      await request(app.getHttpServer())
+        .get(`/organizers/me/bazaars/${draftBazaarId}`)
+        .set('Authorization', `Bearer ${otherOrganizerToken}`)
+        .expect((r) => expect([403, 404]).toContain(r.status));
     });
   });
 });
