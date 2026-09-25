@@ -24,14 +24,32 @@ pnpm monorepo + Turborepo. **Only `apps/api` exists** (NestJS + Prisma + Postgre
 ```
 apps/api/src/
   main.ts, app.module.ts
-  common/{filters,validators}/
-  infra/{prisma,config,queue,paymob}/
-  modules/{auth,users,vendors,products,cart,checkout,orders,bazaars,booths}/
+  common/{dto,events,filters,guards,validators}/, money.ts
+  infra/{config,paymob,prisma,queue,search,storage}/
+  modules/{admin,audit,auth,bazaars,booths,cart,categories,checkout,discovery,media,orders,products,search,social,users,vendors}/
 ```
 
 Merged modules: auth, users, vendors, products, cart, checkout, orders, bazaars, booths, discovery, social, search, categories, media, audit, admin. Specced but not built: payments, notifications. No spec yet: events.
 
 `modules/admin/` is cross-cutting only (`GET /admin/overview`, `GET /admin/audit-log`); approval endpoints stay in their domain modules (`admin-vendors.controller.ts`, …). `modules/audit/` is a leaf module every domain module may import to write audit rows — keeping it out of `admin/` avoids a Vendors → Admin → Vendors cycle. See `specs/admin-module-spec.md`.
+
+**Admin surface (pass 2, `specs/admin-module-spec2.md`).** Admin gets dedicated `/admin/*` routes, never a bypass in `RolesGuard` — owner routes (`/vendors/me/*`, `/cart`, `/organizers/me/*`) resolve data from `currentUser.id` and must keep their ownership checks. Each `admin-*.controller.ts` lives in its domain module and calls `*ForAdmin` service/repository methods that look up globally by id:
+
+| Route prefix | Controller | Admin can |
+|---|---|---|
+| `/admin/users` | `users/admin-users.controller.ts` | list, view, deactivate, reactivate |
+| `/admin/vendors` | `vendors/admin-vendors.controller.ts` | list, view (any state), verify, reject |
+| `/admin/products` | `products/admin-products.controller.ts` | list, view (any state), approve, reject |
+| `/admin/organizers` | `bazaars/admin-organizers.controller.ts` | list, verify, reject |
+| `/admin/bazaars` | `bazaars/admin-bazaars.controller.ts` | list and view every bazaar, DRAFT included |
+| `/admin/bazaars/:id/layout`, `/admin/booths` | `booths/admin-booths.controller.ts` | booth layout CRUD, assign/unassign |
+| `/admin/applications` | `bazaars/admin-applications.controller.ts` | list, view (read-only) |
+| `/admin/orders` | `orders/admin-orders.controller.ts` | list, view incl. Paymob record (read-only) |
+| `/admin/ratings` | `social/admin-ratings.controller.ts` | moderation list (read-only) |
+| `/admin/categories` | `categories/admin-categories.controller.ts` | list, create, update (audited; re-indexes search) |
+| `/admin/search/reindex`, `/admin/overview`, `/admin/audit-log` | `search/`, `admin/` | reindex, dashboard counts, audit trail |
+
+Admin writes beyond these — vendor suspend, product edit/delete, application decisions, order cancel/refund, bazaar cancel, rating/category delete — are **Open Items for Ibrahim** (spec2 Part B). Don't build them without a decision.
 
 ## Read before starting work
 
@@ -84,9 +102,11 @@ Controllers are split by audience, not merged: `public-bazaars.controller.ts`, `
 
 **Paymob has one webhook route** (`infra/paymob`). A module that takes payments implements `PaymobWebhookHandler`, registers with `PaymobWebhookDispatcher` in `onModuleInit`, uses a prefixed `special_reference`, and matches only on signed ids.
 
+**Search sync goes through `SearchIndexQueue`** (global, `infra/search`), enqueued after the commit. Jobs carry ids only; the processor re-reads the database and decides eligibility per entity. When a write changes *other* entities' search documents without touching their rows, enqueue a fan-out job instead of per-product jobs: `VENDOR_PRODUCTS` (vendor verified/deleted) and `CATEGORY_PRODUCTS` (category slug or parent changed — one job per category of the subtree). Job ids must not contain `:` (BullMQ rejects it).
+
 **Lint is real now:** `pnpm --filter @riven/api lint` (ESLint 9, `eslint.config.mjs`) fails on `console.*`, on `PrismaService` outside `*.repository.ts`/`infra/`, and on importing another module's repository. `no-explicit-any` is a warning.
 
-**Admin writes are audited by hand, not by magic.** A new admin action is recorded only if you add an `AdminAction` enum value (migration) **and** call `auditService.record()` in the service method, after the domain write. `actorId` always comes from `@CurrentUser()`, never the body. Audit is best-effort: `record()` logs failures and never fails the request (`specs/admin-module-spec.md` §5). Moderation transitions are idempotent — a no-op repeat writes nothing and records nothing.
+**Admin writes are audited by hand, not by magic.** A new admin action is recorded only if you add an `AdminAction` enum value — plus an `AdminTargetType` value if the target kind is new (one migration; enum-only migrations can be hand-written as `ALTER TYPE "public"."X" ADD VALUE 'Y';`) — **and** call `auditService.record()` in the service method, after the domain write. `actorId` always comes from `@CurrentUser()`, never the body. Audit is best-effort: `record()` logs failures and never fails the request (`specs/admin-module-spec.md` §5). Moderation transitions are idempotent — a no-op repeat writes nothing and records nothing.
 
 ## Process
 
