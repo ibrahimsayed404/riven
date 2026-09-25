@@ -159,6 +159,10 @@ export class ProductsService {
     return this.productsRepository.listIdsByVendor(vendorId, cursor, take);
   }
 
+  listProductIdsByCategory(categoryId: string, cursor: string | null, take: number): Promise<IdPage> {
+    return this.productsRepository.listIdsByCategory(categoryId, cursor, take);
+  }
+
   listPublicProductIds(cursor: string | null, take: number): Promise<IdPage> {
     return this.productsRepository.listPublicIds(cursor, take);
   }

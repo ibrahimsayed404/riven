@@ -15,6 +15,10 @@ export type SearchSyncJob =
   // Vendor verification / soft-delete flips visibility of every product of that
   // vendor without touching a product row; this fans out PRODUCT jobs in batches.
   | { type: 'VENDOR_PRODUCTS'; vendorId: string }
+  // A category's slug or parent changed: every product filed directly under it
+  // carries a stale categorySlug/categoryPath. One job per category of the moved
+  // subtree; the enqueuer resolves the subtree, this fans out that category's products.
+  | { type: 'CATEGORY_PRODUCTS'; categoryId: string }
   // Backfill one whole index from Postgres (first deploy, recovery).
   | { type: 'REINDEX'; index: SearchIndexName };
 
@@ -33,6 +37,8 @@ export function searchSyncJobId(job: SearchSyncJob): string {
   switch (job.type) {
     case 'VENDOR_PRODUCTS':
       return `VENDOR_PRODUCTS${JOB_ID_SEPARATOR}${job.vendorId}`;
+    case 'CATEGORY_PRODUCTS':
+      return `CATEGORY_PRODUCTS${JOB_ID_SEPARATOR}${job.categoryId}`;
     case 'REINDEX':
       return `REINDEX${JOB_ID_SEPARATOR}${job.index}`;
     default:
