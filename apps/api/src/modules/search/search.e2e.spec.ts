@@ -578,6 +578,25 @@ describe('SearchModule (e2e)', () => {
         .send({ types: ['events'] });
       expect(res.status).toBe(400);
     });
+
+    it('audits one SEARCH_REINDEX_REQUESTED row per index, with the acting admin (spec3 B8c)', async () => {
+      const before = await prisma.adminAuditLog.count({ where: { action: 'SEARCH_REINDEX_REQUESTED' } });
+
+      const res = await request(app.getHttpServer())
+        .post('/admin/search/reindex')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ types: ['vendors'] });
+      expect(res.status).toBe(202);
+
+      const rows = await prisma.adminAuditLog.findMany({
+        where: { action: 'SEARCH_REINDEX_REQUESTED' },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(rows).toHaveLength(before + 1);
+      expect(rows[0]).toMatchObject({ targetType: 'SEARCH_INDEX', targetId: 'vendors' });
+      const admin = await prisma.user.findFirstOrThrow({ where: { role: Role.ADMIN, email: { contains: 'search' } } });
+      expect(rows[0].actorId).toBe(admin.id);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -617,6 +636,44 @@ describe('SearchModule (e2e)', () => {
         // beforeAll upserts by slug: leave the fixture as the next run expects it.
         await patchSlug('maxi-dresses');
         await waitForProductDoc(ids.linen, (d) => d.categorySlug === 'maxi-dresses');
+      }
+    });
+
+    // spec3 B2: product documents carry vendorName, so an admin vendor rename must
+    // fan out to the vendor's products (VENDOR_PRODUCTS), not just re-index the vendor.
+    it('admin vendor rename updates vendorName on the vendor\'s product documents', async () => {
+      await waitForIndexed('products', ids.linen, true);
+      const renameTo = (businessName: string) =>
+        request(app.getHttpServer())
+          .patch(`/admin/vendors/${verifiedVendorId}`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({ businessName });
+      try {
+        expect((await renameTo('Nour Studio')).status).toBe(200);
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Studio');
+      } finally {
+        await renameTo('Nour Atelier');
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Atelier');
+      }
+    });
+
+    // spec3 B8b: organizer.verified gates bazaar visibility; reject/verify fan out
+    // ORGANIZER_BAZAARS so the documents follow without the bazaar row changing.
+    it('organizer reject removes their bazaar documents; re-verify restores them', async () => {
+      await waitForIndexed('bazaars', ids.bazaarNear, true);
+      const moderate = (verb: 'verify' | 'reject') =>
+        request(app.getHttpServer())
+          .patch(`/admin/organizers/${organizerId}/${verb}`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(verb === 'reject' ? { reason: 'Fraud report' } : {});
+      try {
+        expect((await moderate('reject')).status).toBe(200);
+        await waitForIndexed('bazaars', ids.bazaarNear, false);
+        await waitForIndexed('bazaars', ids.bazaarFar, false);
+      } finally {
+        expect((await moderate('verify')).status).toBe(200);
+        await waitForIndexed('bazaars', ids.bazaarNear, true);
+        await waitForIndexed('bazaars', ids.bazaarFar, true);
       }
     });
   });

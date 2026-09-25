@@ -5,6 +5,7 @@ import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { DomainEvents } from '../../common/events/domain-events.service';
+import { AuditService } from '../audit/audit.service';
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { BazaarStatus, ScheduleType, ApplicationStatus } from '@prisma/client';
 
@@ -15,6 +16,7 @@ describe('BazaarsService', () => {
   let vendorsService: jest.Mocked<VendorsService>;
   let searchIndexQueue: jest.Mocked<SearchIndexQueue>;
   let domainEvents: { emit: jest.Mock };
+  let auditService: { record: jest.Mock };
 
   const mockOrganizer = {
     id: 'org-1',
@@ -78,6 +80,9 @@ describe('BazaarsService', () => {
             findByIdForAdmin: jest.fn(),
             findApplicationsForAdmin: jest.fn(),
             findApplicationByIdForAdmin: jest.fn(),
+            transitionApplication: jest.fn(),
+            // B8b: existing tests assume a public (verified, not deleted) organizer.
+            hasPublicOrganizer: jest.fn().mockResolvedValue(true),
           },
         },
         {
@@ -97,6 +102,7 @@ describe('BazaarsService', () => {
           },
         },
         { provide: DomainEvents, useValue: { emit: jest.fn() } },
+        { provide: AuditService, useValue: { record: jest.fn().mockResolvedValue(undefined) } },
       ],
     }).compile();
 
@@ -106,6 +112,7 @@ describe('BazaarsService', () => {
     vendorsService = module.get(VendorsService);
     searchIndexQueue = module.get(SearchIndexQueue);
     domainEvents = module.get(DomainEvents);
+    auditService = module.get(AuditService);
   });
 
   describe('createBazaar', () => {
@@ -182,6 +189,14 @@ describe('BazaarsService', () => {
   });
 
   describe('getSearchDocument', () => {
+    it('returns null for a PUBLISHED bazaar whose organizer is rejected or deleted (spec3 B8b)', async () => {
+      bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.PUBLISHED });
+      bazaarsRepo.hasPublicOrganizer.mockResolvedValue(false);
+
+      await expect(service.getSearchDocument('bazaar-1')).resolves.toBeNull();
+      expect(bazaarsRepo.hasPublicOrganizer).toHaveBeenCalledWith('org-1');
+    });
+
     it('returns null unless the bazaar is PUBLISHED and not deleted', async () => {
       bazaarsRepo.findById.mockResolvedValueOnce({ ...mockBazaar, status: BazaarStatus.DRAFT });
       await expect(service.getSearchDocument('bazaar-1')).resolves.toBeNull();
@@ -238,6 +253,18 @@ describe('BazaarsService', () => {
       bazaarsRepo.createApplication.mockRejectedValue({ code: 'P2002', meta: { target: ['bazaarId_vendorId'] } });
 
       await expect(service.applyToBazaar('owner-2', 'bazaar-1')).rejects.toThrow(ConflictException);
+    });
+
+    it('refuses a PUBLISHED bazaar whose organizer is rejected or deleted (spec3 B8b)', async () => {
+      vendorsService.getMyProfile.mockResolvedValue(mockVendor as any);
+      bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.PUBLISHED });
+      bazaarsRepo.hasPublicOrganizer.mockResolvedValue(false);
+
+      await expect(service.applyToBazaar('owner-2', 'bazaar-1')).rejects.toMatchObject({
+        response: { code: 'BAZAAR_NOT_ACCEPTING_APPLICATIONS' },
+      });
+      expect(bazaarsRepo.hasPublicOrganizer).toHaveBeenCalledWith('org-1');
+      expect(bazaarsRepo.createApplication).not.toHaveBeenCalled();
     });
 
     it('should throw BadRequestException if bazaar is not published', async () => {
@@ -307,6 +334,136 @@ describe('BazaarsService', () => {
       await expect(service.getApplicationForAdmin('missing')).rejects.toMatchObject({
         response: { code: 'APPLICATION_NOT_FOUND' },
       });
+    });
+  });
+
+  describe('decideApplicationForAdmin (specs/admin-module-spec3.md B5)', () => {
+    const pending = { id: 'app-1', bazaarId: 'b1', vendorId: 'v1', applicationStatus: ApplicationStatus.PENDING };
+
+    it('accepts a PENDING application via the guarded transition, emits the event, audits after', async () => {
+      bazaarsRepo.findApplicationByIdForAdmin
+        .mockResolvedValueOnce(pending as any)
+        .mockResolvedValueOnce({ ...pending, applicationStatus: ApplicationStatus.ACCEPTED } as any);
+      bazaarsRepo.transitionApplication.mockResolvedValue(1);
+
+      const result = await service.decideApplicationForAdmin('admin-1', 'app-1', 'ACCEPTED');
+
+      expect(result.applicationStatus).toBe(ApplicationStatus.ACCEPTED);
+      expect(bazaarsRepo.transitionApplication).toHaveBeenCalledWith('app-1', 'ACCEPTED');
+      expect(domainEvents.emit.mock.calls[0][0]).toMatchObject({ boothListingId: 'app-1', bazaarId: 'b1', vendorId: 'v1' });
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'APPLICATION_ACCEPTED',
+        targetType: 'APPLICATION',
+        targetId: 'app-1',
+        reason: null,
+      });
+      expect(bazaarsRepo.transitionApplication.mock.invocationCallOrder[0]).toBeLessThan(
+        auditService.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('rejects a PENDING application with the reason in the audit and no event', async () => {
+      bazaarsRepo.findApplicationByIdForAdmin.mockResolvedValue(pending as any);
+      bazaarsRepo.transitionApplication.mockResolvedValue(1);
+
+      await service.decideApplicationForAdmin('admin-1', 'app-1', 'REJECTED', 'Duplicate stall');
+
+      expect(domainEvents.emit).not.toHaveBeenCalled();
+      expect(auditService.record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'APPLICATION_REJECTED', reason: 'Duplicate stall' }),
+      );
+    });
+
+    it('repeating the decision it already has is a no-op', async () => {
+      bazaarsRepo.findApplicationByIdForAdmin.mockResolvedValue({ ...pending, applicationStatus: ApplicationStatus.ACCEPTED } as any);
+
+      await service.decideApplicationForAdmin('admin-1', 'app-1', 'ACCEPTED');
+
+      expect(bazaarsRepo.transitionApplication).not.toHaveBeenCalled();
+      expect(domainEvents.emit).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [ApplicationStatus.ACCEPTED, 'REJECTED'],
+      [ApplicationStatus.REJECTED, 'ACCEPTED'],
+    ] as const)('no reversals: %s → %s is 400 APPLICATION_NOT_PENDING', async (from, to) => {
+      bazaarsRepo.findApplicationByIdForAdmin.mockResolvedValue({ ...pending, applicationStatus: from } as any);
+
+      await expect(service.decideApplicationForAdmin('admin-1', 'app-1', to)).rejects.toMatchObject({
+        status: 400,
+        response: { code: 'APPLICATION_NOT_PENDING' },
+      });
+      expect(bazaarsRepo.transitionApplication).not.toHaveBeenCalled();
+    });
+
+    it('a lost race (0 rows moved) is 409 APPLICATION_STATE_CHANGED with nothing audited', async () => {
+      bazaarsRepo.findApplicationByIdForAdmin.mockResolvedValue(pending as any);
+      bazaarsRepo.transitionApplication.mockResolvedValue(0);
+
+      await expect(service.decideApplicationForAdmin('admin-1', 'app-1', 'ACCEPTED')).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'APPLICATION_STATE_CHANGED' },
+      });
+      expect(domainEvents.emit).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cancelBazaarForAdmin (specs/admin-module-spec3.md B7)', () => {
+    it.each([BazaarStatus.DRAFT, BazaarStatus.PUBLISHED])(
+      'cancels a %s bazaar of any organizer, re-indexes, audits after the write',
+      async (status) => {
+        bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status } as any);
+        bazaarsRepo.findByIdForAdmin.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.CANCELLED } as any);
+
+        await service.cancelBazaarForAdmin('admin-1', 'bazaar-1');
+
+        expect(organizersService.getOrganizerByOwnerId).not.toHaveBeenCalled();
+        expect(bazaarsRepo.updateStatus).toHaveBeenCalledWith('bazaar-1', BazaarStatus.CANCELLED);
+        expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'BAZAAR', id: 'bazaar-1' });
+        expect(auditService.record).toHaveBeenCalledWith({
+          actorId: 'admin-1',
+          action: 'BAZAAR_CANCELLED',
+          targetType: 'BAZAAR',
+          targetId: 'bazaar-1',
+        });
+        expect(bazaarsRepo.updateStatus.mock.invocationCallOrder[0]).toBeLessThan(
+          auditService.record.mock.invocationCallOrder[0],
+        );
+      },
+    );
+
+    it('400 BAZAAR_COMPLETED for a finished bazaar (the organizer rule)', async () => {
+      bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.COMPLETED } as any);
+
+      await expect(service.cancelBazaarForAdmin('admin-1', 'bazaar-1')).rejects.toMatchObject({
+        status: 400,
+        response: { code: 'BAZAAR_COMPLETED' },
+      });
+      expect(bazaarsRepo.updateStatus).not.toHaveBeenCalled();
+    });
+
+    it('an already CANCELLED bazaar is a no-op', async () => {
+      bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.CANCELLED } as any);
+      bazaarsRepo.findByIdForAdmin.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.CANCELLED } as any);
+
+      await service.cancelBazaarForAdmin('admin-1', 'bazaar-1');
+
+      expect(bazaarsRepo.updateStatus).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 BAZAAR_NOT_FOUND for a missing or soft-deleted bazaar', async () => {
+      for (const found of [null, { ...mockBazaar, deletedAt: new Date() }]) {
+        bazaarsRepo.findById.mockResolvedValueOnce(found as any);
+        await expect(service.cancelBazaarForAdmin('admin-1', 'bazaar-1')).rejects.toMatchObject({
+          response: { code: 'BAZAAR_NOT_FOUND' },
+        });
+      }
+      expect(bazaarsRepo.updateStatus).not.toHaveBeenCalled();
     });
   });
 });

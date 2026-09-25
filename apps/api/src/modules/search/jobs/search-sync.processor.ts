@@ -59,6 +59,9 @@ export class SearchSyncProcessor extends WorkerHost {
         case 'CATEGORY_PRODUCTS':
           await this.fanOutCategoryProducts(data.categoryId);
           return;
+        case 'ORGANIZER_BAZAARS':
+          await this.fanOutOrganizerBazaars(data.organizerId);
+          return;
         case 'REINDEX':
           await this.reindex(data.index);
           return;
@@ -117,6 +120,15 @@ export class SearchSyncProcessor extends WorkerHost {
       (ids) => this.queue.enqueueMany(ids.map((id) => ({ type: 'PRODUCT' as const, id }))),
     );
     this.logger.log(`search-sync: fanned out ${total} product jobs for category ${categoryId}`);
+  }
+
+  /** One BAZAAR job per bazaar of the organizer (any status); each decides its own eligibility. */
+  private async fanOutOrganizerBazaars(organizerId: string): Promise<void> {
+    const total = await this.forEachPage(
+      (cursor) => this.bazaarsService.listBazaarIdsByOrganizer(organizerId, cursor, SEARCH_SYNC_BATCH_SIZE),
+      (ids) => this.queue.enqueueMany(ids.map((id) => ({ type: 'BAZAAR' as const, id }))),
+    );
+    this.logger.log(`search-sync: fanned out ${total} bazaar jobs for organizer ${organizerId}`);
   }
 
   private async reindex(index: SearchIndexName): Promise<void> {

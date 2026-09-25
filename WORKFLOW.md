@@ -15,7 +15,7 @@ This project is built in small, fully-verified steps. No exceptions, no shortcut
 4. **Commit locally. Do not push.** Every unit of work is committed with a conventional commit message (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`) but held locally until reviewed.
 5. **Review the real diff before approving.** Read the actual changed lines, not just the description of them. Check the evidence against the original requirement specifically — does it actually prove what it claims to prove?
 6. **Only push after explicit approval.** Nothing reaches `main` without this step.
-7. **CI must be green.** Every push triggers lint + typecheck in a clean environment — this catches anything a local machine's cached state might hide (e.g. a missing `prisma generate` step that only breaks in a truly clean install).
+7. **CI must be green.** Every push runs lint + typecheck + `check:env`, then unit tests, then migrations + e2e against throwaway Postgres/Redis/Meilisearch containers — in a clean environment, which catches anything a local machine's cached state might hide (e.g. a missing `prisma generate` step that only breaks in a truly clean install).
 
 ## Why this matters
 

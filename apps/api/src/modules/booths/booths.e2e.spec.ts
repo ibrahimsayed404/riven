@@ -27,7 +27,16 @@ describe('BoothsModule (e2e)', () => {
 
     prisma = app.get(PrismaService);
 
-    // Clean up
+    // Clean up — in FK order, including the catalog/order rows other suites
+    // (e.g. search.e2e) leave behind, so this suite doesn't depend on run order.
+    await prisma.rating.deleteMany();
+    await prisma.orderItem.deleteMany();
+    await prisma.order.deleteMany();
+    await prisma.orderGroup.deleteMany();
+    await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany();
+    await prisma.productVariant.deleteMany();
+    await prisma.product.deleteMany();
     await prisma.booth.deleteMany();
     await prisma.boothLayout.deleteMany();
     await prisma.boothListing.deleteMany();

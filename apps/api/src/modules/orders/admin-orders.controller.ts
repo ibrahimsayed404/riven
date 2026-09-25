@@ -1,15 +1,17 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { DEFAULT_PAGE_SIZE } from '../../common/dto/pagination-query.dto';
 import { AdminListOrdersQueryDto } from './dto/admin-list-orders-query.dto';
 import { OrdersService } from './orders.service';
 
-// specs/admin-module-spec2.md A5. Read-only: admin status changes, cancel and
-// refund are Open Item B6 (refunds need the Payments spec first).
+// specs/admin-module-spec2.md A5 (reads) + spec3 B6: admin may cancel unpaid
+// orders only. No refunds (they need the Payments spec) and no other status changes.
 @Controller('admin/orders')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.ADMIN)
@@ -32,5 +34,11 @@ export class AdminOrdersController {
   @Get(':id')
   getOrder(@Param('id') id: string) {
     return this.ordersService.getOrderForAdmin(id);
+  }
+
+  /** Group-level, PENDING only; restores stock (specs/admin-module-spec3.md B6). */
+  @Patch(':id/cancel')
+  cancelOrder(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+    return this.ordersService.cancelOrderForAdmin(admin.id, id);
   }
 }

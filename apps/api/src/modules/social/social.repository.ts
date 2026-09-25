@@ -169,4 +169,19 @@ export class SocialRepository {
     ]);
     return { data, total };
   }
+
+  // --- Admin moderation writes (spec3 B3c) ---
+
+  findRatingByIdForAdmin(id: string): Promise<AdminRatingRow | null> {
+    return this.prisma.rating.findUnique({ where: { id }, select: ADMIN_RATING_SELECT });
+  }
+
+  /** Hard delete: Rating has no deletedAt; summaries are aggregated at read time. */
+  async deleteRating(id: string): Promise<void> {
+    await this.prisma.rating.delete({ where: { id } });
+  }
+
+  clearRatingComment(id: string): Promise<AdminRatingRow> {
+    return this.prisma.rating.update({ where: { id }, data: { comment: null }, select: ADMIN_RATING_SELECT });
+  }
 }

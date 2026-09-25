@@ -3,11 +3,13 @@ import { OrganizersService } from './organizers.service';
 import { OrganizersRepository } from './organizers.repository';
 import { NotFoundException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
+import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 
 describe('OrganizersService', () => {
   let service: OrganizersService;
   let repository: jest.Mocked<OrganizersRepository>;
   let auditService: jest.Mocked<AuditService>;
+  let searchIndexQueue: { enqueue: jest.Mock };
 
   const mockOrganizer = {
     id: 'org-1',
@@ -32,15 +34,60 @@ describe('OrganizersService', () => {
             update: jest.fn(),
             findModerationState: jest.fn(),
             findManyForAdmin: jest.fn(),
+            softDeleteByOwner: jest.fn(),
           },
         },
         { provide: AuditService, useValue: { record: jest.fn().mockResolvedValue(undefined) } },
+        { provide: SearchIndexQueue, useValue: { enqueue: jest.fn().mockResolvedValue(undefined) } },
       ],
     }).compile();
 
     service = module.get<OrganizersService>(OrganizersService);
     repository = module.get(OrganizersRepository);
     auditService = module.get(AuditService);
+    searchIndexQueue = module.get(SearchIndexQueue);
+  });
+
+  describe('bazaar visibility follows the organizer (specs/admin-module-spec3.md B8b)', () => {
+    const state = (verified: boolean, rejectionReason: string | null) => ({ id: 'org-1', verified, rejectionReason, deletedAt: null });
+
+    it('reject of a verified organizer fans out ORGANIZER_BAZAARS (hides their bazaars)', async () => {
+      repository.findModerationState.mockResolvedValue(state(true, null));
+      repository.update.mockResolvedValue({ ...mockOrganizer, verified: false, rejectionReason: 'Fraud' } as any);
+
+      await service.rejectOrganizer('admin-1', 'org-1', 'Fraud');
+
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'ORGANIZER_BAZAARS', organizerId: 'org-1' });
+    });
+
+    it('verify of a rejected organizer fans out too (restores their bazaars)', async () => {
+      repository.findModerationState.mockResolvedValue(state(false, 'Fraud'));
+      repository.update.mockResolvedValue({ ...mockOrganizer, verified: true, rejectionReason: null } as any);
+
+      await service.verifyOrganizer('admin-1', 'org-1');
+
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'ORGANIZER_BAZAARS', organizerId: 'org-1' });
+    });
+
+    it('a reason-only change (already rejected) writes and audits but re-indexes nothing', async () => {
+      repository.findModerationState.mockResolvedValue(state(false, 'Old reason'));
+      repository.update.mockResolvedValue({ ...mockOrganizer, verified: false, rejectionReason: 'New reason' } as any);
+
+      await service.rejectOrganizer('admin-1', 'org-1', 'New reason');
+
+      expect(repository.update).toHaveBeenCalled();
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('soft-deleting the organizer fans out; no organizer row = nothing to do', async () => {
+      repository.softDeleteByOwner.mockResolvedValueOnce('org-1').mockResolvedValueOnce(null);
+
+      await service.softDeleteByOwner('owner-1');
+      await service.softDeleteByOwner('owner-2');
+
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledTimes(1);
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'ORGANIZER_BAZAARS', organizerId: 'org-1' });
+    });
   });
 
   it('should be defined', () => {

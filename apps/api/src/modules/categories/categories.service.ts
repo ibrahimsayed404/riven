@@ -3,7 +3,12 @@ import { AdminAction, AdminTargetType, Category, Prisma } from '@prisma/client';
 
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { AuditService } from '../audit/audit.service';
-import { AdminCategoryRow, CategoriesRepository, CategoryWriteResult } from './categories.repository';
+import {
+  AdminCategoryRow,
+  CategoriesRepository,
+  CategoryDeleteResult,
+  CategoryWriteResult,
+} from './categories.repository';
 
 export type CategoryNode = {
   id: string;
@@ -97,6 +102,34 @@ export class CategoriesService {
     return updated;
   }
 
+  /**
+   * Admin delete (specs/admin-module-spec3.md B3b): only an unused category
+   * (no products — soft-deleted included — and no sub-categories). No auto-move,
+   * no cascade; a new category has no products, so no search work either.
+   */
+  async deleteCategory(adminId: string, id: string): Promise<void> {
+    let result: CategoryDeleteResult;
+    try {
+      result = await this.categoriesRepository.deleteIfUnused(id);
+    } catch (error) {
+      // A product created between the count and the delete trips the RESTRICT FK.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2003') {
+        throw categoryInUse(await this.categoriesRepository.countUsage(id));
+      }
+      throw error;
+    }
+
+    if (result.kind === 'not_found') throw categoryNotFound();
+    if (result.kind === 'in_use') throw categoryInUse(result);
+
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.CATEGORY_DELETED,
+      targetType: AdminTargetType.CATEGORY,
+      targetId: id,
+    });
+  }
+
   /** Runs a checked write and turns its outcome, or a slug collision, into a coded HTTP error. */
   private async write(run: () => Promise<CategoryWriteResult>): Promise<Category> {
     let result: CategoryWriteResult;
@@ -126,6 +159,13 @@ export class CategoriesService {
 }
 
 const categoryNotFound = () => new NotFoundException({ code: 'CATEGORY_NOT_FOUND', message: 'Category not found.' });
+
+const categoryInUse = (usage: { productCount: number; childCount: number }) =>
+  new ConflictException({
+    code: 'CATEGORY_IN_USE',
+    message: 'Category still has products (including deleted ones) or sub-categories; move them first.',
+    details: { productCount: usage.productCount, childCount: usage.childCount },
+  });
 
 export function buildTree(rows: Category[]): CategoryNode[] {
   const nodes = new Map<string, CategoryNode>();

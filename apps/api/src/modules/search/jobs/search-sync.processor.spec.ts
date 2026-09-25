@@ -22,7 +22,7 @@ describe('SearchSyncProcessor', () => {
     Pick<ProductsService, 'getSearchDocument' | 'listProductIdsByVendor' | 'listProductIdsByCategory' | 'listPublicProductIds'>
   >;
   let vendorsService: jest.Mocked<Pick<VendorsService, 'getSearchDocument' | 'listPublicVendorIds'>>;
-  let bazaarsService: jest.Mocked<Pick<BazaarsService, 'getSearchDocument' | 'listPublicBazaarIds'>>;
+  let bazaarsService: jest.Mocked<Pick<BazaarsService, 'getSearchDocument' | 'listPublicBazaarIds' | 'listBazaarIdsByOrganizer'>>;
   let processor: SearchSyncProcessor;
 
   beforeEach(() => {
@@ -42,7 +42,7 @@ describe('SearchSyncProcessor', () => {
       listPublicProductIds: jest.fn(),
     };
     vendorsService = { getSearchDocument: jest.fn(), listPublicVendorIds: jest.fn() };
-    bazaarsService = { getSearchDocument: jest.fn(), listPublicBazaarIds: jest.fn() };
+    bazaarsService = { getSearchDocument: jest.fn(), listPublicBazaarIds: jest.fn(), listBazaarIdsByOrganizer: jest.fn() };
 
     processor = new SearchSyncProcessor(
       { index: indexFor } as unknown as SearchIndexRegistry,
@@ -102,6 +102,23 @@ describe('SearchSyncProcessor', () => {
     ]);
     expect(enqueueMany).toHaveBeenNthCalledWith(2, [{ type: 'PRODUCT', id: 'p3' }]);
     // The fan-out itself never touches Meilisearch.
+    expect(addDocuments).not.toHaveBeenCalled();
+  });
+
+  it('fans ORGANIZER_BAZAARS out into BAZAAR jobs, following the cursor (spec3 B8b)', async () => {
+    bazaarsService.listBazaarIdsByOrganizer
+      .mockResolvedValueOnce({ ids: ['b1', 'b2'], nextCursor: 'b2' })
+      .mockResolvedValueOnce({ ids: ['b3'], nextCursor: null });
+
+    await processor.process(job({ type: 'ORGANIZER_BAZAARS', organizerId: 'org-1' }));
+
+    expect(bazaarsService.listBazaarIdsByOrganizer).toHaveBeenNthCalledWith(1, 'org-1', null, SEARCH_SYNC_BATCH_SIZE);
+    expect(bazaarsService.listBazaarIdsByOrganizer).toHaveBeenNthCalledWith(2, 'org-1', 'b2', SEARCH_SYNC_BATCH_SIZE);
+    expect(enqueueMany).toHaveBeenNthCalledWith(1, [
+      { type: 'BAZAAR', id: 'b1' },
+      { type: 'BAZAAR', id: 'b2' },
+    ]);
+    expect(enqueueMany).toHaveBeenNthCalledWith(2, [{ type: 'BAZAAR', id: 'b3' }]);
     expect(addDocuments).not.toHaveBeenCalled();
   });
 

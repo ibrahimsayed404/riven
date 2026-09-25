@@ -256,6 +256,71 @@ describe('VendorsService', () => {
     });
   });
 
+  describe('updateVendorForAdmin (specs/admin-module-spec3.md B2)', () => {
+    const verified = {
+      id: 'v1',
+      name: 'Old Shop',
+      description: 'Desc',
+      coverMedia: ['a.jpg'],
+      verified: true,
+      rejectionReason: null,
+      deletedAt: null,
+    };
+
+    beforeEach(() => {
+      vendorsRepository.findByIdForAdmin.mockResolvedValue(verified as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue(null);
+      vendorsRepository.countProductsByApprovalStatus.mockResolvedValue({ PENDING: 0, APPROVED: 0, REJECTED: 0 });
+    });
+
+    it('maps businessName to name, writes only changes, never touches verification, and re-indexes products on rename', async () => {
+      await service.updateVendorForAdmin('admin-1', 'v1', { businessName: 'New Shop', description: 'Desc' });
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('v1', { name: 'New Shop' });
+      const written = vendorsRepository.update.mock.calls[0][1] as Record<string, unknown>;
+      expect(written).not.toHaveProperty('verified');
+      expect(written).not.toHaveProperty('rejectionReason');
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([
+        { type: 'VENDOR', id: 'v1' },
+        { type: 'VENDOR_PRODUCTS', vendorId: 'v1' },
+      ]);
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'VENDOR_EDITED',
+        targetType: 'VENDOR',
+        targetId: 'v1',
+      });
+      expect(vendorsRepository.update.mock.invocationCallOrder[0]).toBeLessThan(
+        auditService.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('a non-name edit re-indexes the vendor only', async () => {
+      await service.updateVendorForAdmin('admin-1', 'v1', { coverMedia: ['b.jpg'] });
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('v1', { coverMedia: ['b.jpg'] });
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([{ type: 'VENDOR', id: 'v1' }]);
+    });
+
+    it('is a no-op when nothing changes: no write, no search job, no audit', async () => {
+      await service.updateVendorForAdmin('admin-1', 'v1', { businessName: 'Old Shop', coverMedia: ['a.jpg'] });
+
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 VENDOR_NOT_FOUND for a missing or soft-deleted vendor', async () => {
+      for (const found of [null, { ...verified, deletedAt: new Date() }]) {
+        vendorsRepository.findByIdForAdmin.mockResolvedValueOnce(found as any);
+        await expect(service.updateVendorForAdmin('admin-1', 'v1', { description: 'X' })).rejects.toMatchObject({
+          response: { code: 'VENDOR_NOT_FOUND' },
+        });
+      }
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getVendorForAdmin', () => {
     it('returns an unverified, soft-deleted vendor with location and product counts', async () => {
       const deletedAt = new Date('2026-09-01T00:00:00Z');

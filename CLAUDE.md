@@ -13,7 +13,7 @@ A discovery platform connecting shoppers, local brands/vendors, and bazaar/event
 
 > **When reading specs:** `specs/riven-spec.md` §1 still says "Not e-commerce — no cart, no checkout for products." That was overridden by `specs/fashion-marketplace-addendum.md` and is contradicted by merged code. `specs/payments-module-spec.md` §1 repeats the outdated claim. Treat `riven-spec.md` as the base vision and the addendum as authoritative where they conflict.
 
-Four roles, one per account, no multi-role: `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`. `role` is set at registration and immutable; public registration must reject `role: ADMIN` **in the service layer**, not just the DTO enum. Approval-gated visibility is platform-wide — vendors, organizers and products are invisible to shoppers until an admin approves, and editing a product resets it to `PENDING`.
+Four roles, one per account, no multi-role: `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`. `role` is set at registration and immutable; public registration must reject `role: ADMIN` **in the service layer**, not just the DTO enum. Approval-gated visibility is platform-wide — vendors, organizers and products are invisible to shoppers until an admin approves, and a vendor editing a product resets it to `PENDING` (an admin edit of text/images does not — spec3 B2).
 
 Ibrahim is the product decision-maker. Each module spec ends with an "Open Items" list — those go back to him rather than being resolved unilaterally.
 
@@ -33,23 +33,25 @@ Merged modules: auth, users, vendors, products, cart, checkout, orders, bazaars,
 
 `modules/admin/` is cross-cutting only (`GET /admin/overview`, `GET /admin/audit-log`); approval endpoints stay in their domain modules (`admin-vendors.controller.ts`, …). `modules/audit/` is a leaf module every domain module may import to write audit rows — keeping it out of `admin/` avoids a Vendors → Admin → Vendors cycle. See `specs/admin-module-spec.md`.
 
-**Admin surface (pass 2, `specs/admin-module-spec2.md`).** Admin gets dedicated `/admin/*` routes, never a bypass in `RolesGuard` — owner routes (`/vendors/me/*`, `/cart`, `/organizers/me/*`) resolve data from `currentUser.id` and must keep their ownership checks. Each `admin-*.controller.ts` lives in its domain module and calls `*ForAdmin` service/repository methods that look up globally by id:
+**Admin surface (pass 2 + Part B: `specs/admin-module-spec2.md`, `specs/admin-module-spec3.md`).** Admin gets dedicated `/admin/*` routes, never a bypass in `RolesGuard` — owner routes (`/vendors/me/*`, `/cart`, `/organizers/me/*`) resolve data from `currentUser.id` and must keep their ownership checks. Each `admin-*.controller.ts` lives in its domain module and calls `*ForAdmin` service/repository methods that look up globally by id:
 
 | Route prefix | Controller | Admin can |
 |---|---|---|
 | `/admin/users` | `users/admin-users.controller.ts` | list, view, deactivate, reactivate |
-| `/admin/vendors` | `vendors/admin-vendors.controller.ts` | list, view (any state), verify, reject |
-| `/admin/products` | `products/admin-products.controller.ts` | list, view (any state), approve, reject |
+| `/admin/vendors` | `vendors/admin-vendors.controller.ts` | list, view (any state), verify, reject (= suspend), edit text/images |
+| `/admin/products` | `products/admin-products.controller.ts` | list, view (any state), approve, reject, edit text/images (stays APPROVED), soft delete |
 | `/admin/organizers` | `bazaars/admin-organizers.controller.ts` | list, verify, reject |
-| `/admin/bazaars` | `bazaars/admin-bazaars.controller.ts` | list and view every bazaar, DRAFT included |
-| `/admin/bazaars/:id/layout`, `/admin/booths` | `booths/admin-booths.controller.ts` | booth layout CRUD, assign/unassign |
-| `/admin/applications` | `bazaars/admin-applications.controller.ts` | list, view (read-only) |
-| `/admin/orders` | `orders/admin-orders.controller.ts` | list, view incl. Paymob record (read-only) |
-| `/admin/ratings` | `social/admin-ratings.controller.ts` | moderation list (read-only) |
-| `/admin/categories` | `categories/admin-categories.controller.ts` | list, create, update (audited; re-indexes search) |
-| `/admin/search/reindex`, `/admin/overview`, `/admin/audit-log` | `search/`, `admin/` | reindex, dashboard counts, audit trail |
+| `/admin/bazaars` | `bazaars/admin-bazaars.controller.ts` | list and view every bazaar, DRAFT included; cancel (organizer rule) |
+| `/admin/bazaars/:id/layout`, `/admin/booths` | `booths/admin-booths.controller.ts` | booth layout CRUD, assign/unassign (audited) |
+| `/admin/applications` | `bazaars/admin-applications.controller.ts` | list, view, accept/reject PENDING only (no reversals) |
+| `/admin/orders` | `orders/admin-orders.controller.ts` | list, view incl. Paymob record, cancel unpaid (group-level, restocks); no refunds |
+| `/admin/ratings` | `social/admin-ratings.controller.ts` | moderation list, delete, clear comment |
+| `/admin/categories` | `categories/admin-categories.controller.ts` | list, create, update, delete if unused (audited; re-indexes search) |
+| `/admin/search/reindex`, `/admin/overview`, `/admin/audit-log` | `search/`, `admin/` | reindex (audited), dashboard counts, audit trail |
 
-Admin writes beyond these — vendor suspend, product edit/delete, application decisions, order cancel/refund, bazaar cancel, rating/category delete — are **Open Items for Ibrahim** (spec2 Part B). Don't build them without a decision.
+Every admin write is audited and every no-op records nothing. The exact rules (editable fields, what "unused category" means, allowed transitions) are in spec3 §1 — follow them, don't re-decide. **Still not built, by decision:** refunds (need a Payments spec), a separate vendor-suspend state and a product hide switch (reject covers both), application reversals, status overrides on paid orders.
+
+**Bazaar visibility** mirrors products (`bazaars/bazaar-visibility.ts`): public only if PUBLISHED, not deleted, **and the organizer is verified and not deleted**. Use `PUBLIC_BAZAAR_WHERE` / `PUBLIC_ORGANIZER_SQL` / `hasPublicOrganizer` in any new public bazaar read.
 
 ## Read before starting work
 
@@ -102,7 +104,7 @@ Controllers are split by audience, not merged: `public-bazaars.controller.ts`, `
 
 **Paymob has one webhook route** (`infra/paymob`). A module that takes payments implements `PaymobWebhookHandler`, registers with `PaymobWebhookDispatcher` in `onModuleInit`, uses a prefixed `special_reference`, and matches only on signed ids.
 
-**Search sync goes through `SearchIndexQueue`** (global, `infra/search`), enqueued after the commit. Jobs carry ids only; the processor re-reads the database and decides eligibility per entity. When a write changes *other* entities' search documents without touching their rows, enqueue a fan-out job instead of per-product jobs: `VENDOR_PRODUCTS` (vendor verified/deleted) and `CATEGORY_PRODUCTS` (category slug or parent changed — one job per category of the subtree). Job ids must not contain `:` (BullMQ rejects it).
+**Search sync goes through `SearchIndexQueue`** (global, `infra/search`), enqueued after the commit. Jobs carry ids only; the processor re-reads the database and decides eligibility per entity. When a write changes *other* entities' search documents without touching their rows, enqueue a fan-out job instead of per-product jobs: `VENDOR_PRODUCTS` (vendor verified/deleted/renamed), `CATEGORY_PRODUCTS` (category slug or parent changed — one job per category of the subtree) and `ORGANIZER_BAZAARS` (organizer verified/rejected/deleted). Job ids must not contain `:` (BullMQ rejects it).
 
 **Lint is real now:** `pnpm --filter @riven/api lint` (ESLint 9, `eslint.config.mjs`) fails on `console.*`, on `PrismaService` outside `*.repository.ts`/`infra/`, and on importing another module's repository. `no-explicit-any` is a warning.
 

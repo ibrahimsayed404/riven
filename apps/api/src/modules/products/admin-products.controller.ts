@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Query, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -9,6 +9,7 @@ import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { ProductsService } from './products.service';
 import { AdminListProductsQueryDto } from './dto/admin-list-products-query.dto';
 import { RejectProductDto } from './dto/reject-product.dto';
+import { AdminUpdateProductDto } from './dto/admin-update-product.dto';
 
 @Controller('admin/products')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -31,6 +32,23 @@ export class AdminProductsController {
   @Get(':id')
   getProduct(@Param('id') id: string) {
     return this.productsService.getProductForAdmin(id);
+  }
+
+  /** Text and images only; approval state is untouched (specs/admin-module-spec3.md B2). */
+  @Patch(':id')
+  updateProduct(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: AdminUpdateProductDto,
+  ) {
+    return this.productsService.updateProductForAdmin(admin.id, id, dto);
+  }
+
+  /** Soft delete; repeating it is a no-op (specs/admin-module-spec3.md B3a). */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteProduct(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+    return this.productsService.deleteProductForAdmin(admin.id, id);
   }
 
   @Patch(':id/approve')

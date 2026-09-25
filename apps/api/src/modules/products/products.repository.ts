@@ -228,6 +228,25 @@ export class ProductsRepository {
   }
 
   /**
+   * Admin content edit (spec3 B2). The parameter type is the whole allow-list:
+   * approvalStatus, price, category and isActive cannot reach this write.
+   */
+  /**
+   * Admin delete (spec3 B3a): soft delete only — order_items point at the
+   * product. Variants are left alone, exactly like the vendor's own delete.
+   */
+  async softDeleteForAdmin(id: string): Promise<void> {
+    await this.prisma.product.update({ where: { id }, data: { deletedAt: new Date() } });
+  }
+
+  async updateContentForAdmin(
+    id: string,
+    data: { title?: string; description?: string; images?: string[] },
+  ): Promise<void> {
+    await this.prisma.product.update({ where: { id }, data });
+  }
+
+  /**
    * Admin queue. Deliberately NOT built on visibilityFilter: that hides
    * PENDING/REJECTED rows and products of unverified vendors, which is exactly
    * what the queue exists to show. Soft-deleted rows are always excluded;

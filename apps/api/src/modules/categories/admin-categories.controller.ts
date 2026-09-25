@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -32,5 +32,12 @@ export class AdminCategoriesController {
   @HttpCode(HttpStatus.OK)
   updateCategory(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     return this.categoriesService.updateCategory(admin.id, id, dto);
+  }
+
+  /** Only when unused: 409 CATEGORY_IN_USE otherwise (specs/admin-module-spec3.md B3b). */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteCategory(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+    return this.categoriesService.deleteCategory(admin.id, id);
   }
 }

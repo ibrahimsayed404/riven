@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { FavorableType, FollowableType, RatingTargetType } from '@prisma/client';
 
+import { AuditService } from '../audit/audit.service';
 import { BazaarsService } from '../bazaars/bazaars.service';
 import { OrdersService } from '../orders/orders.service';
 import { ProductsService } from '../products/products.service';
@@ -17,6 +18,7 @@ describe('SocialService', () => {
   let vendorsService: { getVendorById: jest.Mock };
   let bazaarsService: { getPublicBazaarById: jest.Mock; isRateable: jest.Mock };
   let productsService: { getProductById: jest.Mock };
+  let auditService: { record: jest.Mock };
 
   const userId = 'user-1';
 
@@ -33,11 +35,15 @@ describe('SocialService', () => {
       aggregateRatings: jest.fn(),
       findRatings: jest.fn(),
       findRatingsForAdmin: jest.fn(),
+      findRatingByIdForAdmin: jest.fn(),
+      deleteRating: jest.fn(),
+      clearRatingComment: jest.fn(),
     } as unknown as jest.Mocked<SocialRepository>;
     ordersService = { verifyDeliveredPurchase: jest.fn() };
     vendorsService = { getVendorById: jest.fn().mockResolvedValue({ id: 'vendor-1' }) };
     bazaarsService = { getPublicBazaarById: jest.fn().mockResolvedValue({ id: 'bazaar-1' }), isRateable: jest.fn().mockResolvedValue(true) };
     productsService = { getProductById: jest.fn().mockResolvedValue({ id: 'prod-1' }) };
+    auditService = { record: jest.fn().mockResolvedValue(undefined) };
 
     service = new SocialService(
       repo,
@@ -45,6 +51,7 @@ describe('SocialService', () => {
       vendorsService as unknown as VendorsService,
       bazaarsService as unknown as BazaarsService,
       productsService as unknown as ProductsService,
+      auditService as unknown as AuditService,
     );
   });
 
@@ -228,6 +235,51 @@ describe('SocialService', () => {
       expect(repo.findRatingsForAdmin).toHaveBeenCalledWith(params);
       expect(repo.findRatings).not.toHaveBeenCalled();
       expect(result).toEqual({ data: [{ id: 'r1' }], meta: { total: 7, page: 2, limit: 5, totalPages: 2 } });
+    });
+  });
+
+  describe('admin rating moderation (specs/admin-module-spec3.md B3c)', () => {
+    const rating = { id: 'r1', score: 1, comment: 'Rude seller' };
+
+    it('deleteRatingForAdmin hard-deletes, then audits RATING_DELETED', async () => {
+      repo.findRatingByIdForAdmin.mockResolvedValue(rating as any);
+
+      await service.deleteRatingForAdmin('admin-1', 'r1');
+
+      expect(repo.deleteRating).toHaveBeenCalledWith('r1');
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'RATING_DELETED',
+        targetType: 'RATING',
+        targetId: 'r1',
+      });
+      expect(repo.deleteRating.mock.invocationCallOrder[0]).toBeLessThan(auditService.record.mock.invocationCallOrder[0]);
+    });
+
+    it('clearRatingCommentForAdmin nulls the comment, keeps the score, audits RATING_COMMENT_CLEARED', async () => {
+      repo.findRatingByIdForAdmin.mockResolvedValue(rating as any);
+      repo.clearRatingComment.mockResolvedValue({ ...rating, comment: null } as any);
+
+      await expect(service.clearRatingCommentForAdmin('admin-1', 'r1')).resolves.toMatchObject({ score: 1, comment: null });
+      expect(repo.deleteRating).not.toHaveBeenCalled();
+      expect(auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'RATING_COMMENT_CLEARED' }));
+    });
+
+    it('clearing an empty or null comment is a no-op: no write, no audit', async () => {
+      for (const comment of [null, '']) {
+        repo.findRatingByIdForAdmin.mockResolvedValueOnce({ ...rating, comment } as any);
+        await service.clearRatingCommentForAdmin('admin-1', 'r1');
+      }
+      expect(repo.clearRatingComment).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 RATING_NOT_FOUND on both actions, with nothing written', async () => {
+      repo.findRatingByIdForAdmin.mockResolvedValue(null);
+      await expect(service.deleteRatingForAdmin('admin-1', 'x')).rejects.toMatchObject({ response: { code: 'RATING_NOT_FOUND' } });
+      await expect(service.clearRatingCommentForAdmin('admin-1', 'x')).rejects.toMatchObject({ response: { code: 'RATING_NOT_FOUND' } });
+      expect(repo.deleteRating).not.toHaveBeenCalled();
+      expect(repo.clearRatingComment).not.toHaveBeenCalled();
     });
   });
 });
