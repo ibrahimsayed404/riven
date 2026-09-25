@@ -261,10 +261,7 @@ describe('Admin management — pass 2 (e2e)', () => {
         },
       })
     ).id;
-
-    // App boot + five bcrypt(12) registrations: past Jest's 5 s default on a loaded
-    // machine, which failed the whole suite intermittently (2 of 7 runs, 2026-09-25).
-  }, 30_000);
+  });
 
   afterAll(async () => {
     await wipe();
