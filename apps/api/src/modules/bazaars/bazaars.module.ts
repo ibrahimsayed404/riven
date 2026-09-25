@@ -13,6 +13,7 @@ import { VendorBazaarApplicationsController } from './vendor-bazaar-applications
 import { PublicBazaarsController } from './public-bazaars.controller';
 import { OrganizerBazaarsController } from './organizer-bazaars.controller';
 import { AdminOrganizersController } from './admin-organizers.controller';
+import { AdminBazaarsController } from './admin-bazaars.controller';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { AdminOrganizersController } from './admin-organizers.controller';
     AuditModule,
   ],
   controllers: [
+    AdminBazaarsController,
     AdminOrganizersController,
     OrganizerBazaarsController,
     PublicBazaarsController,

@@ -62,7 +62,7 @@ Admins can moderate the approval queues (pass 1), but they can't *see* most of t
 
 - **Query** (`AdminListBazaarsQueryDto`): `status?: BazaarStatus`, `organizerId?: uuid`, `search?` (name, case-insensitive), `includeDeleted?` (default false), `page`, `limit`. Ordered by `createdAt desc`.
 - **Any status and any organizer**, including `DRAFT`. This is the key difference from the organizer and public routes.
-- **Detail:** the existing `BazaarWithLocation` shape (read through the repository's raw PostGIS query), plus `organizer: { id, organizationName, verified }`, `applicationCounts: { PENDING, ACCEPTED, REJECTED }` and `hasLayout: boolean`.
+- **Detail:** the existing `BazaarWithLocation` shape (read through the repository's raw PostGIS query), plus `organizer: { id, name, verified }` (the `Organizer` column is `name`; `organizationName` is only the registration field), `applicationCounts: { PENDING, ACCEPTED, REJECTED }` and `hasLayout: boolean`.
 - **Routing check:** `admin-booths.controller.ts` already owns `admin/bazaars/:bazaarId/layout…`. The new `GET admin/bazaars/:id` doesn't collide with it; verify this in the e2e test.
 - Errors: 404 `BAZAAR_NOT_FOUND`.
 

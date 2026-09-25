@@ -74,6 +74,8 @@ describe('BazaarsService', () => {
             findApplication: jest.fn(),
             findApplicationById: jest.fn(),
             updateApplicationStatus: jest.fn(),
+            findManyForAdmin: jest.fn(),
+            findByIdForAdmin: jest.fn(),
           },
         },
         {
@@ -247,6 +249,33 @@ describe('BazaarsService', () => {
       vendorsService.getMyProfile.mockResolvedValue({ ...mockVendor, verified: false } as any);
 
       await expect(service.applyToBazaar('owner-2', 'bazaar-1')).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe('admin reads (specs/admin-module-spec2.md A3)', () => {
+    it('listForAdmin passes filters through with no ownership scope and wraps { data, meta }', async () => {
+      bazaarsRepo.findManyForAdmin.mockResolvedValue({ data: [{ id: 'b1', status: 'DRAFT' }] as any, total: 41 });
+
+      const params = { status: 'DRAFT' as const, organizerId: 'org-9', search: 'souq', includeDeleted: true, page: 3, limit: 20 };
+      const result = await service.listForAdmin(params);
+
+      expect(bazaarsRepo.findManyForAdmin).toHaveBeenCalledWith(params);
+      expect(organizersService.getOrganizerByOwnerId).not.toHaveBeenCalled();
+      expect(result.meta).toEqual({ total: 41, page: 3, limit: 20, totalPages: 3 });
+    });
+
+    it('getBazaarForAdmin returns a DRAFT bazaar without resolving an owner', async () => {
+      const detail = { id: 'b1', status: 'DRAFT', applicationCounts: { PENDING: 1, ACCEPTED: 0, REJECTED: 0 }, hasLayout: false };
+      bazaarsRepo.findByIdForAdmin.mockResolvedValue(detail as any);
+
+      await expect(service.getBazaarForAdmin('b1')).resolves.toBe(detail);
+      expect(organizersService.getOrganizerByOwnerId).not.toHaveBeenCalled();
+    });
+
+    it('getBazaarForAdmin throws a coded 404 for an unknown id', async () => {
+      bazaarsRepo.findByIdForAdmin.mockResolvedValue(null);
+
+      await expect(service.getBazaarForAdmin('missing')).rejects.toMatchObject({ response: { code: 'BAZAAR_NOT_FOUND' } });
     });
   });
 });

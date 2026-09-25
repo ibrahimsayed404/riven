@@ -1,7 +1,14 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ApplicationStatus, BazaarStatus, Prisma, ScheduleType } from '@prisma/client';
 
-import { BazaarsRepository, BazaarWithLocation, BazaarPublicDetail, BazaarWithDistance, IdPage } from './bazaars.repository';
+import {
+  AdminBazaarDetail,
+  BazaarsRepository,
+  BazaarWithLocation,
+  BazaarPublicDetail,
+  BazaarWithDistance,
+  IdPage,
+} from './bazaars.repository';
 import { OrganizersService } from './organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
@@ -249,6 +256,28 @@ export class BazaarsService {
   }
 
   // --- Internal Passthrough for Other Modules ---
+
+  // --- Admin (specs/admin-module-spec2.md A3): global reads, no ownership scope ---
+
+  async listForAdmin(params: {
+    status?: BazaarStatus;
+    organizerId?: string;
+    search?: string;
+    includeDeleted: boolean;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.bazaarsRepository.findManyForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
+  }
+
+  async getBazaarForAdmin(id: string): Promise<AdminBazaarDetail> {
+    const bazaar = await this.bazaarsRepository.findByIdForAdmin(id);
+    if (!bazaar) {
+      throw new NotFoundException({ code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' });
+    }
+    return bazaar;
+  }
 
   async findById(id: string): Promise<BazaarWithLocation | null> {
     return this.bazaarsRepository.findById(id);
