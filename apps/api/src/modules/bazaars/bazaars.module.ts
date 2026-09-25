@@ -14,6 +14,7 @@ import { PublicBazaarsController } from './public-bazaars.controller';
 import { OrganizerBazaarsController } from './organizer-bazaars.controller';
 import { AdminOrganizersController } from './admin-organizers.controller';
 import { AdminBazaarsController } from './admin-bazaars.controller';
+import { AdminApplicationsController } from './admin-applications.controller';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { AdminBazaarsController } from './admin-bazaars.controller';
     AuditModule,
   ],
   controllers: [
+    AdminApplicationsController,
     AdminBazaarsController,
     AdminOrganizersController,
     OrganizerBazaarsController,

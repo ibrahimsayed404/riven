@@ -76,6 +76,8 @@ describe('BazaarsService', () => {
             updateApplicationStatus: jest.fn(),
             findManyForAdmin: jest.fn(),
             findByIdForAdmin: jest.fn(),
+            findApplicationsForAdmin: jest.fn(),
+            findApplicationByIdForAdmin: jest.fn(),
           },
         },
         {
@@ -276,6 +278,35 @@ describe('BazaarsService', () => {
       bazaarsRepo.findByIdForAdmin.mockResolvedValue(null);
 
       await expect(service.getBazaarForAdmin('missing')).rejects.toMatchObject({ response: { code: 'BAZAAR_NOT_FOUND' } });
+    });
+  });
+
+  describe('admin application reads (specs/admin-module-spec2.md A4)', () => {
+    it('listApplicationsForAdmin passes filters through with no owner lookup and wraps { data, meta }', async () => {
+      bazaarsRepo.findApplicationsForAdmin.mockResolvedValue({ data: [{ id: 'app-1' }] as any, total: 3 });
+
+      const params = { bazaarId: 'b1', vendorId: 'v1', status: ApplicationStatus.PENDING, page: 1, limit: 2 };
+      const result = await service.listApplicationsForAdmin(params);
+
+      expect(bazaarsRepo.findApplicationsForAdmin).toHaveBeenCalledWith(params);
+      expect(organizersService.getOrganizerByOwnerId).not.toHaveBeenCalled();
+      expect(vendorsService.getMyProfile).not.toHaveBeenCalled();
+      expect(result.meta).toEqual({ total: 3, page: 1, limit: 2, totalPages: 2 });
+    });
+
+    it('getApplicationForAdmin returns the application', async () => {
+      const application = { id: 'app-1', applicationStatus: ApplicationStatus.ACCEPTED, booth: { id: 'booth-1', label: 'A-1' } };
+      bazaarsRepo.findApplicationByIdForAdmin.mockResolvedValue(application as any);
+
+      await expect(service.getApplicationForAdmin('app-1')).resolves.toBe(application);
+    });
+
+    it('getApplicationForAdmin throws a coded 404 for an unknown id', async () => {
+      bazaarsRepo.findApplicationByIdForAdmin.mockResolvedValue(null);
+
+      await expect(service.getApplicationForAdmin('missing')).rejects.toMatchObject({
+        response: { code: 'APPLICATION_NOT_FOUND' },
+      });
     });
   });
 });

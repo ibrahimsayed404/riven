@@ -26,6 +26,8 @@ describe('Admin management — pass 2 (e2e)', () => {
   let draftBazaarId: string;
   let publishedBazaarId: string;
   let deletedBazaarId: string;
+  let pendingApplicationId: string;
+  let rejectedApplicationId: string;
 
   async function wipe() {
     await prisma.orderItem.deleteMany();
@@ -147,8 +149,23 @@ describe('Admin management — pass 2 (e2e)', () => {
     draftBazaarId = await insertBazaar('Mgmt Draft Souq', BazaarStatus.DRAFT);
     publishedBazaarId = await insertBazaar('Mgmt Live Souq', BazaarStatus.PUBLISHED);
     deletedBazaarId = await insertBazaar('Mgmt Gone Souq', BazaarStatus.CANCELLED, new Date());
-    await prisma.boothListing.create({ data: { bazaarId: publishedBazaarId, vendorId } });
-  });
+    pendingApplicationId = (await prisma.boothListing.create({ data: { bazaarId: publishedBazaarId, vendorId } })).id;
+    // Older and already decided, on the soft-deleted bazaar (the A3 draft-bazaar
+    // counts stay at zero): ordering and the status filter need a second row.
+    rejectedApplicationId = (
+      await prisma.boothListing.create({
+        data: {
+          bazaarId: deletedBazaarId,
+          vendorId,
+          applicationStatus: 'REJECTED',
+          appliedAt: new Date(Date.now() - 86_400_000),
+          decidedAt: new Date(),
+        },
+      })
+    ).id;
+    // App boot + five bcrypt(12) registrations: past Jest's 5 s default on a loaded
+    // machine, which failed the whole suite intermittently (2 of 7 runs, 2026-09-25).
+  }, 30_000);
 
   afterAll(async () => {
     await wipe();
@@ -300,6 +317,70 @@ describe('Admin management — pass 2 (e2e)', () => {
     it('ownership still holds on the organizer route: another organizer cannot read it', async () => {
       await request(app.getHttpServer())
         .get(`/organizers/me/bazaars/${draftBazaarId}`)
+        .set('Authorization', `Bearer ${otherOrganizerToken}`)
+        .expect((r) => expect([403, 404]).toContain(r.status));
+    });
+  });
+
+  // --- A4 -------------------------------------------------------------------
+
+  describe('GET /admin/applications', () => {
+    authMatrix('get', () => '/admin/applications');
+
+    it('lists applications across every bazaar, newest first, with both sides embedded', async () => {
+      const res = await asAdmin('get', '/admin/applications').expect(200);
+
+      expect(res.body.data.map((a: { id: string }) => a.id)).toEqual([pendingApplicationId, rejectedApplicationId]);
+      expect(res.body.meta).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+      expect(res.body.data[0]).toMatchObject({
+        applicationStatus: 'PENDING',
+        decidedAt: null,
+        bazaar: { id: publishedBazaarId, name: 'Mgmt Live Souq', status: 'PUBLISHED' },
+        vendor: { id: vendorId, name: 'Mgmt Shop', verified: false },
+        booth: null,
+      });
+    });
+
+    it('filters by status, bazaarId and vendorId', async () => {
+      const rejected = await asAdmin('get', '/admin/applications?status=REJECTED').expect(200);
+      expect(rejected.body.data.map((a: { id: string }) => a.id)).toEqual([rejectedApplicationId]);
+
+      const byBazaar = await asAdmin('get', `/admin/applications?bazaarId=${publishedBazaarId}`).expect(200);
+      expect(byBazaar.body.data.map((a: { id: string }) => a.id)).toEqual([pendingApplicationId]);
+
+      const byVendor = await asAdmin('get', `/admin/applications?vendorId=${vendorId}&limit=1`).expect(200);
+      expect(byVendor.body.meta).toEqual({ total: 2, page: 1, limit: 1, totalPages: 2 });
+    });
+
+    it('400 on an unknown status, a non-UUID id filter, or an unlisted query field', async () => {
+      await asAdmin('get', '/admin/applications?status=APPROVED').expect(400);
+      await asAdmin('get', '/admin/applications?bazaarId=abc').expect(400);
+      await asAdmin('get', '/admin/applications?organizerId=00000000-0000-0000-0000-000000000000').expect(400);
+    });
+  });
+
+  describe('GET /admin/applications/:id', () => {
+    authMatrix('get', () => `/admin/applications/${pendingApplicationId}`);
+
+    it('returns one application, including one on a soft-deleted bazaar', async () => {
+      const res = await asAdmin('get', `/admin/applications/${rejectedApplicationId}`).expect(200);
+      expect(res.body).toMatchObject({
+        id: rejectedApplicationId,
+        applicationStatus: 'REJECTED',
+        bazaar: { id: deletedBazaarId, status: 'CANCELLED' },
+        vendor: { id: vendorId },
+      });
+      expect(res.body.decidedAt).not.toBeNull();
+    });
+
+    it('404 APPLICATION_NOT_FOUND for an unknown id', async () => {
+      const res = await asAdmin('get', '/admin/applications/00000000-0000-0000-0000-000000000000').expect(404);
+      expect(res.body.code).toBe('APPLICATION_NOT_FOUND');
+    });
+
+    it('ownership still holds on the organizer route: another organizer cannot list these applications', async () => {
+      await request(app.getHttpServer())
+        .get(`/organizers/me/bazaars/${publishedBazaarId}/applications`)
         .set('Authorization', `Bearer ${otherOrganizerToken}`)
         .expect((r) => expect([403, 404]).toContain(r.status));
     });
