@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { FavorableType, FollowableType } from '@prisma/client';
+import { FavorableType, FollowableType, RatingTargetType } from '@prisma/client';
 
+import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { BazaarsService } from '../bazaars/bazaars.service';
 import { OrdersService } from '../orders/orders.service';
 import { ProductsService } from '../products/products.service';
@@ -163,6 +164,23 @@ export class SocialService {
       })),
       nextCursor,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Admin (specs/admin-module-spec2.md A6) — read-only; delete / clear-comment is Open Item B3
+  // ---------------------------------------------------------------------------
+
+  async listRatingsForAdmin(params: {
+    targetType?: RatingTargetType;
+    targetId?: string;
+    userId?: string;
+    hasComment?: boolean;
+    maxScore?: number;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.socialRepository.findRatingsForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
   }
 
   // ---------------------------------------------------------------------------

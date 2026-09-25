@@ -33,8 +33,13 @@ describe('Admin management — pass 2 (e2e)', () => {
   let paidOrderId: string;
   let paidOrderGroupId: string;
   let cancelledOrderId: string;
+  let otherShopperId: string;
+  let lowCommentedRatingId: string;
+  let highSilentRatingId: string;
+  let emptyCommentRatingId: string;
 
   async function wipe() {
+    await prisma.rating.deleteMany(); // Rating.orderId is RESTRICT: before orders
     await prisma.orderItem.deleteMany();
     await prisma.order.deleteMany();
     await prisma.orderGroup.deleteMany();
@@ -121,6 +126,7 @@ describe('Admin management — pass 2 (e2e)', () => {
     const otherShopper = await prisma.user.create({
       data: { email: 'mgmt-shopper2@example.com', passwordHash: 'hash', name: 'S2', role: Role.SHOPPER },
     });
+    otherShopperId = otherShopper.id;
     otherShopperToken = await app.get(JwtService).signAsync({ sub: otherShopper.id, role: Role.SHOPPER });
 
     otherOrganizerToken = await register('/auth/register/organizer', {
@@ -214,6 +220,40 @@ describe('Admin management — pass 2 (e2e)', () => {
           status: 'CANCELLED',
           subtotal: 10,
           createdAt: new Date(Date.now() - 86_400_000),
+        },
+      })
+    ).id;
+
+    // Three ratings, newest first: a 1-star with a comment (the moderation target),
+    // a silent 5-star, and a 2-star whose comment is '' — which must count as none.
+    const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+    lowCommentedRatingId = (
+      await prisma.rating.create({
+        data: {
+          userId: shopperId,
+          targetType: 'VENDOR',
+          targetId: vendorId,
+          score: 1,
+          comment: 'Rude seller',
+          orderId: paidOrderId,
+          createdAt: minutesAgo(1),
+        },
+      })
+    ).id;
+    highSilentRatingId = (
+      await prisma.rating.create({
+        data: { userId: shopperId, targetType: 'PRODUCT', targetId: productId, score: 5, createdAt: minutesAgo(2) },
+      })
+    ).id;
+    emptyCommentRatingId = (
+      await prisma.rating.create({
+        data: {
+          userId: otherShopperId,
+          targetType: 'BAZAAR',
+          targetId: publishedBazaarId,
+          score: 2,
+          comment: '',
+          createdAt: minutesAgo(3),
         },
       })
     ).id;
@@ -522,6 +562,68 @@ describe('Admin management — pass 2 (e2e)', () => {
         .set('Authorization', `Bearer ${otherShopperToken}`)
         .expect(404);
       expect(res.body.code).toBe('ORDER_NOT_FOUND');
+    });
+  });
+
+  // --- A6 -------------------------------------------------------------------
+
+  describe('GET /admin/ratings', () => {
+    authMatrix('get', () => '/admin/ratings');
+
+    const ids = (res: request.Response) => res.body.data.map((r: { id: string }) => r.id);
+
+    it('lists every rating newest first, with the reviewer the public list hides', async () => {
+      const res = await asAdmin('get', '/admin/ratings').expect(200);
+
+      expect(ids(res)).toEqual([lowCommentedRatingId, highSilentRatingId, emptyCommentRatingId]);
+      expect(res.body.meta).toEqual({ total: 3, page: 1, limit: 20, totalPages: 1 });
+      expect(res.body.data[0]).toMatchObject({
+        targetType: 'VENDOR',
+        targetId: vendorId,
+        score: 1,
+        comment: 'Rude seller',
+        orderId: paidOrderId,
+        user: { id: shopperId, email: 'mgmt-shopper@example.com', isActive: true },
+      });
+      expect(res.body.data[0].user).not.toHaveProperty('passwordHash');
+    });
+
+    it('hasComment treats an empty comment as none; maxScore is inclusive; filters combine', async () => {
+      expect(ids(await asAdmin('get', '/admin/ratings?hasComment=true').expect(200))).toEqual([lowCommentedRatingId]);
+      expect(ids(await asAdmin('get', '/admin/ratings?hasComment=false').expect(200))).toEqual([
+        highSilentRatingId,
+        emptyCommentRatingId,
+      ]);
+      expect(ids(await asAdmin('get', '/admin/ratings?maxScore=2').expect(200))).toEqual([
+        lowCommentedRatingId,
+        emptyCommentRatingId,
+      ]);
+      expect(ids(await asAdmin('get', '/admin/ratings?hasComment=true&maxScore=2').expect(200))).toEqual([
+        lowCommentedRatingId,
+      ]);
+    });
+
+    it('filters by targetType, targetId and userId', async () => {
+      expect(ids(await asAdmin('get', '/admin/ratings?targetType=PRODUCT').expect(200))).toEqual([highSilentRatingId]);
+      expect(ids(await asAdmin('get', `/admin/ratings?targetId=${vendorId}`).expect(200))).toEqual([lowCommentedRatingId]);
+      expect(ids(await asAdmin('get', `/admin/ratings?userId=${otherShopperId}`).expect(200))).toEqual([
+        emptyCommentRatingId,
+      ]);
+    });
+
+    it('400 on out-of-range score, non-boolean hasComment, bad enum, non-UUID, or an unlisted field', async () => {
+      for (const query of ['maxScore=0', 'maxScore=6', 'hasComment=yes', 'targetType=SHOP', 'userId=abc', 'cursor=x']) {
+        await asAdmin('get', `/admin/ratings?${query}`).expect(400);
+      }
+    });
+
+    it('the public ratings list still shows only the reviewer name', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/social/ratings?targetType=VENDOR&targetId=${vendorId}`)
+        .expect(200);
+      expect(res.body.data[0]).toMatchObject({ id: lowCommentedRatingId, reviewerName: 'S' });
+      expect(res.body.data[0]).not.toHaveProperty('user');
+      expect(JSON.stringify(res.body)).not.toContain('mgmt-shopper@example.com');
     });
   });
 });

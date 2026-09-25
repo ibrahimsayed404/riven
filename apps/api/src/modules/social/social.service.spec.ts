@@ -32,6 +32,7 @@ describe('SocialService', () => {
       upsertRating: jest.fn(),
       aggregateRatings: jest.fn(),
       findRatings: jest.fn(),
+      findRatingsForAdmin: jest.fn(),
     } as unknown as jest.Mocked<SocialRepository>;
     ordersService = { verifyDeliveredPurchase: jest.fn() };
     vendorsService = { getVendorById: jest.fn().mockResolvedValue({ id: 'vendor-1' }) };
@@ -206,6 +207,27 @@ describe('SocialService', () => {
         response: { code: 'INVALID_CURSOR' },
       });
       await expect(service.getRatings({ targetType: RatingTargetType.VENDOR, targetId: 'v', cursor: '!!!' })).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('listRatingsForAdmin (specs/admin-module-spec2.md A6)', () => {
+    it('passes every filter through and wraps the page in { data, meta } — no keyset cursor', async () => {
+      repo.findRatingsForAdmin.mockResolvedValue({ data: [{ id: 'r1' }] as any, total: 7 });
+
+      const params = {
+        targetType: RatingTargetType.PRODUCT,
+        targetId: 'p1',
+        userId: 'u1',
+        hasComment: true,
+        maxScore: 2,
+        page: 2,
+        limit: 5,
+      };
+      const result = await service.listRatingsForAdmin(params);
+
+      expect(repo.findRatingsForAdmin).toHaveBeenCalledWith(params);
+      expect(repo.findRatings).not.toHaveBeenCalled();
+      expect(result).toEqual({ data: [{ id: 'r1' }], meta: { total: 7, page: 2, limit: 5, totalPages: 2 } });
     });
   });
 });

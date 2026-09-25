@@ -523,7 +523,13 @@ Auth: SHOPPER. Body: `{ "targetType": VENDOR|BAZAAR|PRODUCT, "targetId", "score"
 Public average and count. Query: `targetType`, `targetId`. 200 → `{ average, count }`.
 
 ### GET /social/ratings
-Public list of ratings for a target. Query: `targetType`, `targetId`, `limit`, `cursor?`. 200 → `{ data: [{ id, score, comment, userId, createdAt }], nextCursor }`.
+Public list of ratings for a target. Query: `targetType`, `targetId`, `limit`, `cursor?`. 200 → `{ data: [{ id, targetType, targetId, score, comment, createdAt, reviewerName }], nextCursor }` — the reviewer's name only; no user id or email.
+
+### GET /admin/ratings
+Moderation queue over every rating, newest first. Page-based (not a cursor like the public list).
+Auth: ADMIN. Query: `targetType?` (VENDOR|BAZAAR|PRODUCT|EVENT), `targetId?`, `userId?` (reviewer; uuids), `hasComment?` (true|false — an empty comment counts as none), `maxScore?` (1–5, inclusive: `maxScore=2` = the low ratings), `page`, `limit`.
+200 → `{ data: [{ id, targetType, targetId, score, comment, orderId, createdAt, updatedAt, user { id, name, email, isActive } }], meta }`. Errors: 400 (bad enum/uuid/boolean, score out of range, unknown query field).
+Useful view: `?hasComment=true&maxScore=2`. Read-only — deleting a rating or clearing its comment is specs/admin-module-spec2.md B3.
 
 ---
 
