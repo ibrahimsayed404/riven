@@ -1,6 +1,6 @@
 # Admin Module Spec — Pass 2 (management surface)
 
-**Status:** Draft for review. **No code until approved.** Part B needs Ibrahim.
+**Status:** **Part A implemented and merged** (2026-09-25): Task 1 and 2 in PR #8, then A3 #9, A4 #10, A5 #11, A6 #12, A7 #13, docs in this change. **Part B is still open for Ibrahim, and nothing in it is built.** Deviations found during implementation are marked inline in A1–A9. Reports: `report/2026-09-25T*_admin-*.md`.
 **Builds on:** `specs/admin-module-spec.md` (pass 1: moderation queues, audit log, overview). Nothing in pass 1 is changed here.
 **Written against:** `apps/api/prisma/schema.prisma` on `main` @ `456a06f`.
 **Scope:** Admin reads across every domain, and category management (Part A). Every other admin write is listed in Part B with options, and waits for a decision.
@@ -150,16 +150,16 @@ No new tables or columns. Part B decisions add their own enum values in their ow
 
 ### A10. Tasks — each is one reviewed unit, with staged diffs (repository/service → controllers/DTOs → tests)
 
-| # | Task | Migration |
-|---|---|---|
-| 1 | A8 enum migration | yes |
-| 2 | A1 + A2: vendor and product detail for admin | — |
-| 3 | A3: admin bazaars list and detail | — |
-| 4 | A4: admin applications list and detail | — |
-| 5 | A5: admin orders list and detail | — |
-| 6 | A6: admin ratings list | — |
-| 7 | A7: categories list, create and update, plus search re-index | — |
-| 8 | Docs: `specs/postman-endpoints.md` and the CLAUDE.md module list | — |
+| # | Task | Migration | Done |
+|---|---|---|---|
+| 1 | A8 enum migration | yes | PR #8 (`20260925000000_admin_category_audit_actions`) |
+| 2 | A1 + A2: vendor and product detail for admin | — | PR #8 |
+| 3 | A3: admin bazaars list and detail | — | PR #9 |
+| 4 | A4: admin applications list and detail | — | PR #10 |
+| 5 | A5: admin orders list and detail | — | PR #11 |
+| 6 | A6: admin ratings list | — | PR #12 |
+| 7 | A7: categories list, create and update, plus search re-index | — | PR #13 |
+| 8 | Docs: `specs/postman-endpoints.md` (kept current per task) and the CLAUDE.md module list | — | this change |
 
 ### A11. Tests per task
 
