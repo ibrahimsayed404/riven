@@ -133,6 +133,7 @@ pnpm --filter @riven/api prisma generate
 pnpm --filter @riven/api prisma migrate dev
 pnpm --filter @riven/api start:dev
 pnpm --filter @riven/api test
+pnpm --filter @riven/api smoke                    # live HTTP run over every route (see Gotchas)
 pnpm typecheck
 ```
 
@@ -140,6 +141,7 @@ pnpm typecheck
 
 - **Postgres is on host port 5433**, not 5432 — deliberate, to avoid colliding with a local Postgres install.
 - **`test` wipes the database.** Unit and e2e specs run together (`testRegex: .*\.spec\.ts$`), and the e2e specs `deleteMany()` users, vendors, bazaars and booths against the configured database. There is no separate test DB. The seed script (`pnpm --filter @riven/api prisma db seed`, `prisma/seed.ts`) only upserts the placeholder category tree — safe to re-run. It does **not** create an ADMIN user: the first admin is still a manual DB insert (`specs/admin-module-spec.md` Open Item 1).
+- **`smoke`** (`apps/api/scripts/smoke-live.mjs`) builds the API, boots it on port 3100 against `<db>_test` (it refuses any other database) with `NODE_ENV=test`, Redis database 1 and Paymob off, then walks all routes in real order and checks every status code and the key behaviour (stock, audit rows, visibility, search documents). It fails if a controller route is left untested, so **a new endpoint needs a step in the script**. It wipes nothing, since each run's data is unique, but it shares `<db>_test` with the e2e suites, so don't run both at once.
 - **CI** runs lint + typecheck + `check:env`, then unit tests, then `prisma migrate deploy` + e2e against throwaway postgis/redis/meilisearch containers (`.github/workflows/ci.yml`). Locally: `test:unit` needs no services; `test:e2e` and `test` wipe the configured database.
 - **Env vars are Zod-validated at boot** (`infra/config/env.validation.ts`), including `S3_*` (required) and `PAYMOB_*` (optional, but must be well-formed when set). `pnpm --filter @riven/api check:env` verifies `.env.example` still lists every required key.
 - **`apps/api/prisma/schema.prisma` is the source of truth**; `specs/schema.prisma` is now an empty pointer to it (it used to be a copy that drifted).

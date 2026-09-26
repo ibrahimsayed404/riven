@@ -109,6 +109,41 @@ describe('VendorsService', () => {
     });
   });
 
+  describe('updateMyProfile', () => {
+    beforeEach(() => {
+      vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', name: 'Nour' } as any);
+      vendorsRepository.update.mockResolvedValue({ id: 'vendor-1' } as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue(null);
+    });
+
+    it('a rename also re-indexes the products, whose documents carry vendorName', async () => {
+      await service.updateMyProfile('owner-1', { businessName: 'Nour Atelier' });
+
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([
+        { type: 'VENDOR', id: 'vendor-1' },
+        { type: 'VENDOR_PRODUCTS', vendorId: 'vendor-1' },
+      ]);
+    });
+
+    it.each([
+      ['another field', { description: 'Linen' }],
+      ['the same name', { businessName: 'Nour' }],
+    ])('%s re-indexes the vendor only', async (_label, dto) => {
+      await service.updateMyProfile('owner-1', dto);
+
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([{ type: 'VENDOR', id: 'vendor-1' }]);
+    });
+
+    it('404s with VENDOR_PROFILE_NOT_FOUND when the owner has no vendor profile', async () => {
+      vendorsRepository.findByOwnerId.mockResolvedValue(null);
+
+      await expect(service.updateMyProfile('owner-1', { businessName: 'X' })).rejects.toMatchObject({
+        response: { code: 'VENDOR_PROFILE_NOT_FOUND' },
+      });
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateMyLocation', () => {
     // Rate limiting moved to the route (@Throttle + UserThrottlerGuard); the
     // service just writes and re-indexes (fix.js ROBUST-01).

@@ -60,7 +60,13 @@ export class VendorsService {
       hasFixedLocation: updateDto.hasFixedLocation,
     });
 
-    await this.searchIndexQueue.enqueue({ type: 'VENDOR', id: vendor.id });
+    // Product documents carry vendorName, so a rename must re-index them too
+    // (same rule as the admin edit, updateVendorForAdmin).
+    const renamed = updateDto.businessName !== undefined && updateDto.businessName !== vendor.name;
+    await this.searchIndexQueue.enqueueMany([
+      { type: 'VENDOR', id: vendor.id },
+      ...(renamed ? [{ type: 'VENDOR_PRODUCTS' as const, vendorId: vendor.id }] : []),
+    ]);
 
     const location = await this.vendorsRepository.findVendorLocation(vendor.id);
     return { ...updated, location };

@@ -75,7 +75,6 @@ describe('BazaarsService', () => {
             createApplication: jest.fn(),
             findApplication: jest.fn(),
             findApplicationById: jest.fn(),
-            updateApplicationStatus: jest.fn(),
             findManyForAdmin: jest.fn(),
             findByIdForAdmin: jest.fn(),
             findApplicationsForAdmin: jest.fn(),
@@ -145,6 +144,150 @@ describe('BazaarsService', () => {
       };
 
       await expect(service.createBazaar('owner-1', dto)).rejects.toThrow(ForbiddenException);
+    });
+
+    const dated = (startDate: string, endDate?: string) => ({
+      name: 'Test Bazaar', lat: 10, lng: 10, scheduleType: ScheduleType.ONE_OFF, startDate, endDate,
+    });
+
+    it('refuses an endDate before startDate with 400 BAZAAR_END_BEFORE_START, nothing written', async () => {
+      organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer);
+
+      await expect(
+        service.createBazaar('owner-1', dated('2026-10-10T10:00:00.000Z', '2026-10-05T10:00:00.000Z')),
+      ).rejects.toMatchObject({ status: 400, response: { code: 'BAZAAR_END_BEFORE_START' } });
+      expect(bazaarsRepo.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['no endDate (single-day event)', undefined],
+      ['endDate equal to startDate', '2026-10-10T10:00:00.000Z'],
+      ['endDate after startDate', '2026-10-11T20:00:00.000Z'],
+    ])('accepts %s', async (_label, endDate) => {
+      organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer);
+      bazaarsRepo.create.mockResolvedValue(mockBazaar);
+
+      await service.createBazaar('owner-1', dated('2026-10-10T10:00:00.000Z', endDate));
+
+      expect(bazaarsRepo.create).toHaveBeenCalled();
+    });
+  });
+
+  describe('updateMyBazaar: date order', () => {
+    const stored = {
+      ...mockBazaar,
+      startDate: new Date('2026-10-10T10:00:00.000Z'),
+      endDate: new Date('2026-10-11T20:00:00.000Z'),
+    };
+
+    beforeEach(() => {
+      organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer);
+      bazaarsRepo.findById.mockResolvedValue(stored);
+      bazaarsRepo.update.mockResolvedValue(stored);
+    });
+
+    it.each([
+      ['a new endDate before the stored startDate', { endDate: '2026-10-01T00:00:00.000Z' }],
+      ['a new startDate after the stored endDate', { startDate: '2026-10-20T00:00:00.000Z' }],
+      ['both new and backwards', { startDate: '2026-10-20T00:00:00.000Z', endDate: '2026-10-19T00:00:00.000Z' }],
+    ])('refuses %s', async (_label, data) => {
+      await expect(service.updateMyBazaar('owner-1', 'bazaar-1', data)).rejects.toMatchObject({
+        response: { code: 'BAZAAR_END_BEFORE_START' },
+      });
+      expect(bazaarsRepo.update).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a field that is not a date', { description: 'Food and music' }],
+      ['clearing endDate', { endDate: null }],
+      ['moving both dates forward in order', { startDate: '2026-11-01T10:00:00.000Z', endDate: '2026-11-02T10:00:00.000Z' }],
+    ])('allows %s', async (_label, data) => {
+      await service.updateMyBazaar('owner-1', 'bazaar-1', data as any);
+
+      expect(bazaarsRepo.update).toHaveBeenCalledWith('bazaar-1', data);
+    });
+  });
+
+  describe('cancelBazaar (organizer)', () => {
+    beforeEach(() => organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer));
+
+    it('cancels a PUBLISHED bazaar and re-indexes it', async () => {
+      bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.PUBLISHED });
+      bazaarsRepo.updateStatus.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.CANCELLED });
+
+      await service.cancelBazaar('owner-1', 'bazaar-1');
+
+      expect(bazaarsRepo.updateStatus).toHaveBeenCalledWith('bazaar-1', BazaarStatus.CANCELLED);
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'BAZAAR', id: 'bazaar-1' });
+    });
+
+    it('an already CANCELLED bazaar is a 200 no-op: nothing written or re-indexed', async () => {
+      const cancelled = { ...mockBazaar, status: BazaarStatus.CANCELLED };
+      bazaarsRepo.findById.mockResolvedValue(cancelled);
+
+      await expect(service.cancelBazaar('owner-1', 'bazaar-1')).resolves.toBe(cancelled);
+      expect(bazaarsRepo.updateStatus).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('a COMPLETED bazaar is 400 BAZAAR_COMPLETED', async () => {
+      bazaarsRepo.findById.mockResolvedValue({ ...mockBazaar, status: BazaarStatus.COMPLETED });
+
+      await expect(service.cancelBazaar('owner-1', 'bazaar-1')).rejects.toMatchObject({
+        response: { code: 'BAZAAR_COMPLETED' },
+      });
+      expect(bazaarsRepo.updateStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('decideApplication (organizer)', () => {
+    const pending = { id: 'app-1', bazaarId: 'bazaar-1', vendorId: 'vendor-1', applicationStatus: ApplicationStatus.PENDING };
+
+    beforeEach(() => {
+      organizersService.getOrganizerByOwnerId.mockResolvedValue(mockOrganizer);
+      bazaarsRepo.findById.mockResolvedValue(mockBazaar);
+    });
+
+    it('accepts through the guarded transition, emits the event and returns the fresh row', async () => {
+      const accepted = { ...pending, applicationStatus: ApplicationStatus.ACCEPTED };
+      bazaarsRepo.findApplicationById.mockResolvedValueOnce(pending as any).mockResolvedValueOnce(accepted as any);
+      bazaarsRepo.transitionApplication.mockResolvedValue(1);
+
+      const result = await service.decideApplication('owner-1', 'bazaar-1', 'app-1', 'ACCEPTED');
+
+      expect(bazaarsRepo.transitionApplication).toHaveBeenCalledWith('app-1', 'ACCEPTED');
+      expect(domainEvents.emit.mock.calls[0][0]).toMatchObject({ boothListingId: 'app-1', bazaarId: 'bazaar-1', vendorId: 'vendor-1' });
+      expect(result).toEqual(accepted);
+    });
+
+    it('a decision that lands first (0 rows moved) is 409 APPLICATION_STATE_CHANGED, no event', async () => {
+      bazaarsRepo.findApplicationById.mockResolvedValue(pending as any);
+      bazaarsRepo.transitionApplication.mockResolvedValue(0);
+
+      await expect(service.decideApplication('owner-1', 'bazaar-1', 'app-1', 'ACCEPTED')).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'APPLICATION_STATE_CHANGED' },
+      });
+      expect(domainEvents.emit).not.toHaveBeenCalled();
+    });
+
+    it('an already decided application is still 400 APPLICATION_NOT_PENDING, nothing written', async () => {
+      bazaarsRepo.findApplicationById.mockResolvedValue({ ...pending, applicationStatus: ApplicationStatus.REJECTED } as any);
+
+      await expect(service.decideApplication('owner-1', 'bazaar-1', 'app-1', 'ACCEPTED')).rejects.toMatchObject({
+        response: { code: 'APPLICATION_NOT_PENDING' },
+      });
+      expect(bazaarsRepo.transitionApplication).not.toHaveBeenCalled();
+    });
+
+    it("another bazaar's application is 404 APPLICATION_NOT_FOUND", async () => {
+      bazaarsRepo.findApplicationById.mockResolvedValue({ ...pending, bazaarId: 'other-bazaar' } as any);
+
+      await expect(service.decideApplication('owner-1', 'bazaar-1', 'app-1', 'REJECTED')).rejects.toMatchObject({
+        response: { code: 'APPLICATION_NOT_FOUND' },
+      });
+      expect(bazaarsRepo.transitionApplication).not.toHaveBeenCalled();
     });
   });
 

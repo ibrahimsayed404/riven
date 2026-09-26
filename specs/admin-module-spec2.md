@@ -1,6 +1,6 @@
 # Admin Module Spec — Pass 2 (management surface)
 
-**Status:** **Part A implemented and merged** (2026-09-25): Task 1 and 2 in PR #8, then A3 #9, A4 #10, A5 #11, A6 #12, A7 #13, docs in this change. **Part B is still open for Ibrahim, and nothing in it is built.** Deviations found during implementation are marked inline in A1–A9. Reports: `report/2026-09-25T*_admin-*.md`.
+**Status:** **Part A implemented and merged** (2026-09-25): Task 1 and 2 in PR #8, then A3 #9, A4 #10, A5 #11, A6 #12, A7 #13, docs in this change. **Part B was decided by Ibrahim and is built: see `specs/admin-module-spec3.md` (merged to `main` in PR #16). The Part B open items below are kept as the original questions; spec3 records the answers.** Deviations found during implementation are marked inline in A1–A9. Reports: `report/2026-09-25T*_admin-*.md`.
 **Builds on:** `specs/admin-module-spec.md` (pass 1: moderation queues, audit log, overview). Nothing in pass 1 is changed here.
 **Written against:** `apps/api/prisma/schema.prisma` on `main` @ `456a06f`.
 **Scope:** Admin reads across every domain, and category management (Part A). Every other admin write is listed in Part B with options, and waits for a decision.

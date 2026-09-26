@@ -1,6 +1,6 @@
 # Admin Module Spec — Pass 3 (Part B: admin writes)
 
-**Status:** **Implemented** (2026-09-26) on `feature/admin-part-b`, all of §2–§3, with the full suite green (43/43 suites, 660/660 tests). This spec is the decisions record. Code lands in one PR, one commit per section (§4).
+**Status:** **Implemented and merged to `main`** (PR #16, 2026-09-26), all of §2–§3, with the full suite green (43/43 suites, 660/660 tests). This spec is the decisions record. Code lands in one PR, one commit per section (§4).
 **Decisions:** Ibrahim approved every recommendation in the decision doc [Riven admin — Part B decisions](https://claude.ai/code/artifact/2c12bc77-6f4d-4abc-b6a5-8ffeb3b7b2d7); Youssef relayed the approval on 2026-09-25. Youssef settled the remaining details the same day (§1: B3c, B8b, delivery).
 **Builds on:** `specs/admin-module-spec.md` (pass 1) and `specs/admin-module-spec2.md` (pass 2, Part A merged in PRs #8–#15). Neither file is modified; Part B lives here.
 **Written against:** `apps/api/prisma/schema.prisma` on `main` @ `4d6e978`, with every rule below checked in the code.

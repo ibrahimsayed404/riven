@@ -18,6 +18,27 @@ describe('BazaarsModule (e2e)', () => {
   let vendorId: string;
   let bazaarId: string;
 
+  // Dependency order, so leftovers from any other suite (products, orders,
+  // ratings, booths) can't block the vendor/user deletes (same as booths.e2e).
+  async function wipe() {
+    await prisma.rating.deleteMany(); // Rating.orderId is RESTRICT: before orders
+    await prisma.orderItem.deleteMany();
+    await prisma.order.deleteMany();
+    await prisma.orderGroup.deleteMany();
+    await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany(); // Cart.userId is RESTRICT: before users
+    await prisma.productVariant.deleteMany();
+    await prisma.product.deleteMany();
+    await prisma.booth.deleteMany();
+    await prisma.boothLayout.deleteMany();
+    await prisma.boothListing.deleteMany();
+    await prisma.bazaar.deleteMany();
+    await prisma.organizer.deleteMany();
+    await prisma.vendor.deleteMany();
+    await prisma.adminAuditLog.deleteMany();
+    await prisma.user.deleteMany();
+  }
+
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -29,13 +50,7 @@ describe('BazaarsModule (e2e)', () => {
 
     prisma = app.get(PrismaService);
 
-    // Clean up database before tests
-    await prisma.boothListing.deleteMany();
-    await prisma.bazaar.deleteMany();
-    await prisma.organizer.deleteMany();
-    await prisma.vendor.deleteMany();
-    await prisma.adminAuditLog.deleteMany();
-    await prisma.user.deleteMany();
+    await wipe();
 
     // Create Admin
     const admin = await prisma.user.create({
@@ -69,13 +84,13 @@ describe('BazaarsModule (e2e)', () => {
   });
 
   afterAll(async () => {
-    await prisma.boothListing.deleteMany();
-    await prisma.bazaar.deleteMany();
-    await prisma.organizer.deleteMany();
-    await prisma.vendor.deleteMany();
-    await prisma.adminAuditLog.deleteMany();
-    await prisma.user.deleteMany();
-    await app.close();
+    // close() even if the wipe throws: an unclosed app keeps its BullMQ workers
+    // alive, jest never exits, and those workers go on consuming the shared queue.
+    try {
+      await wipe();
+    } finally {
+      await app.close();
+    }
   });
 
   it('1. Organizer fails to create bazaar before verification', async () => {
@@ -153,6 +168,35 @@ describe('BazaarsModule (e2e)', () => {
     expect(res.status).toBe(201);
     expect(res.body.status).toBe(BazaarStatus.DRAFT);
     bazaarId = res.body.id;
+  });
+
+  // Found by the live endpoint run on 2026-09-26: a backwards range was accepted,
+  // and the completion job would end such a bazaar before it opens.
+  it('3b. endDate before startDate is refused on create and update, and by the DB constraint', async () => {
+    const start = new Date(Date.now() + 10 * 86_400_000);
+    const before = new Date(start.getTime() - 86_400_000).toISOString();
+
+    const created = await request(app.getHttpServer())
+      .post('/organizers/me/bazaars')
+      .set('Authorization', `Bearer ${organizerToken}`)
+      .send({ name: 'Backwards', lat: 30, lng: 31, scheduleType: ScheduleType.ONE_OFF, startDate: start.toISOString(), endDate: before });
+    expect(created.status).toBe(400);
+    expect(created.body.code).toBe('BAZAAR_END_BEFORE_START');
+
+    // Partial update: the new endDate is checked against the stored startDate.
+    const patched = await request(app.getHttpServer())
+      .patch(`/organizers/me/bazaars/${bazaarId}`)
+      .set('Authorization', `Bearer ${organizerToken}`)
+      .send({ endDate: new Date(Date.now() - 86_400_000).toISOString() });
+    expect(patched.status).toBe(400);
+    expect(patched.body.code).toBe('BAZAAR_END_BEFORE_START');
+
+    await expect(
+      prisma.$executeRawUnsafe(
+        `UPDATE "bazaars" SET "endDate" = "startDate" - interval '1 day' WHERE "id" = $1`,
+        bazaarId,
+      ),
+    ).rejects.toThrow(/bazaars_end_date_not_before_start/);
   });
 
   it('4. Admin verifies Vendor', async () => {
@@ -238,5 +282,21 @@ describe('BazaarsModule (e2e)', () => {
     expect(res.body.status).toBe(BazaarStatus.PUBLISHED);
     expect(res.body.acceptedVendors).toHaveLength(1);
     expect(res.body.acceptedVendors[0].vendorId).toBe(vendorId);
+  });
+
+  it('11. Organizer cancel; cancelling again is a 200 no-op that writes nothing', async () => {
+    const cancel = () =>
+      request(app.getHttpServer())
+        .patch(`/organizers/me/bazaars/${bazaarId}/cancel`)
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+    const first = await cancel();
+    expect(first.status).toBe(200);
+    expect(first.body.status).toBe(BazaarStatus.CANCELLED);
+
+    const second = await cancel();
+    expect(second.status).toBe(200);
+    expect(second.body.status).toBe(BazaarStatus.CANCELLED);
+    expect(second.body.updatedAt).toBe(first.body.updatedAt);
   });
 });

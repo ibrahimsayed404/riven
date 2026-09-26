@@ -1,8 +1,8 @@
 # Riven API — Postman endpoint reference
 
-Generated from the controllers and DTOs in `apps/api/src` on 2026-09-19. Paste each block into the request's **Description** in Postman.
+Generated from the controllers and DTOs in `apps/api/src` on 2026-09-19; re-checked route by route against the code on 2026-09-25 (all 120 routes). Paste each block into the request's **Description** in Postman.
 
-**Base URL:** `http://localhost:3000` (no prefix). Suggested Postman variable: `{{baseUrl}}`.
+**Base URL:** `http://localhost:3000` (no prefix). In the Postman workspace "Riven" (15 collections, environment "Riven") it is `{{URL}}` **with a trailing slash** — requests look like `{{URL}}auth/login` — and the Login request's test script saves the access token to `{{token}}`.
 
 **Conventions that apply everywhere**
 - Auth: `Authorization: Bearer <accessToken>` (15 min). Refresh with `POST /auth/refresh`.
@@ -11,7 +11,7 @@ Generated from the controllers and DTOs in `apps/api/src` on 2026-09-19. Paste e
 - Lists: `?page=` (>=1) and `?limit=` (1–100) → `{ data: [...], meta: { total, page, limit, totalPages } }`. Social/discovery lists use `?cursor=` instead → `{ data, nextCursor }`.
 - Rate limits: 300 req/min per user or IP; 10/min on register/login; 30/min on refresh; 1/min on location updates → `429 RATE_LIMITED` + `Retry-After`.
 - Money is a decimal string with 2 places (`"249.00"`).
-- Visibility rule: vendors, organizers and products are invisible to shoppers until an admin approves them. Editing a product sends it back to `PENDING`.
+- Visibility rule: vendors, organizers and products are invisible to shoppers until an admin approves them. A **vendor** editing a product sends it back to `PENDING`; an admin edit of its text/images does not (spec3 B2). A bazaar is public only while its organizer is verified and not deleted (spec3 B8b).
 
 Enums used below
 - `Role`: SHOPPER · VENDOR · ORGANIZER · ADMIN
@@ -71,8 +71,8 @@ Body: `{ "refreshToken" }`
 ### GET /auth/me
 Returns the identity inside the access token. Use `GET /users/me` for the full profile.
 Auth: any role.
-200 → `{ id, email, role }`
-Errors: 401.
+200 → `{ id, email, name, role }`
+Errors: 401 INVALID_ACCESS_TOKEN (also once the account is deactivated or deleted — the user is re-read on every request).
 
 ---
 
@@ -125,17 +125,17 @@ Auth: ADMIN. 204. Errors: 404 USER_NOT_FOUND · 400 USER_DELETED.
 
 ### GET /vendors/me
 The logged-in vendor's own profile, including moderation fields (`verified`, `rejectionReason`, `subscriptionStatus`).
-Auth: VENDOR. 200 → vendor. Errors: 404 VENDOR_NOT_FOUND.
+Auth: VENDOR. 200 → vendor. Errors: 404 VENDOR_PROFILE_NOT_FOUND.
 
 ### PATCH /vendors/me
-Update storefront info. Does **not** reset verification.
+Update storefront info. Does **not** reset verification. A `businessName` change also re-indexes the vendor's products (their search documents carry `vendorName`), like the admin edit.
 Auth: VENDOR.
 Body (all optional): `{ "businessName" (<=120), "category": VendorCategory, "description" (<=2000), "logo" (URL), "coverMedia": URL[] (<=10), "brandStory" (<=5000), "logoUrl", "bannerUrl", "returnPolicy" (<=5000), "shippingPolicy" (<=5000), "vendorType": VendorType, "hasFixedLocation": boolean }`
-200 → vendor. Errors: 400.
+200 → vendor. Errors: 400 (enums are uppercase: `"category": "FASHION"`, not `"fashion"`) · 404 VENDOR_PROFILE_NOT_FOUND.
 
 ### PATCH /vendors/me/location
 Sets the vendor's fixed home location. Limit 1/min.
-Auth: VENDOR. Body: `{ "lat", "lng" }`. 204.
+Auth: VENDOR. Body: `{ "lat" (-90..90), "lng" (-180..180) }`. 204. Errors: 400 · 404 VENDOR_PROFILE_NOT_FOUND · 429.
 
 ### GET /vendors/:id
 Public storefront. Only verified, non-deleted vendors are returned; internal fields (ownerId, subscriptionStatus, rejectionReason, isActive, deletedAt) are stripped.
@@ -161,13 +161,13 @@ Auth: VENDOR. Body: any subset of the create body. 200 → product. Errors: 404.
 
 ### DELETE /vendors/me/products/:id
 Soft-delete (kept for order history). Removed from search.
-Auth: VENDOR. 200/204. Errors: 404.
+Auth: VENDOR. 200 → the soft-deleted product row. Errors: 404 PRODUCT_NOT_FOUND.
 
 ### POST /vendors/me/products/:id/variants
 Adds a sellable variant. Stock lives on the variant, not the product.
 Auth: VENDOR.
 Body: `{ "sku" (<=64, unique per vendor), "size"?, "color"?, "priceOverride"? (replaces basePrice), "stockQuantity"? (int >=0) }`
-201 → variant. Errors: 404 · 409 UNIQUE_VIOLATION (sku).
+201 → variant. Errors: 404 PRODUCT_NOT_FOUND · 409 SKU_TAKEN.
 
 ### PATCH /vendors/me/products/:id/variants/:variantId
 Partial variant update (e.g. restock).
@@ -175,7 +175,7 @@ Auth: VENDOR. Body: subset of the create body. 200 → variant. Errors: 404.
 
 ### DELETE /vendors/me/products/:id/variants/:variantId
 Soft-deletes the variant; it disappears from carts and public reads.
-Auth: VENDOR. 200/204. Errors: 404.
+Auth: VENDOR. 200 → the variant row. Errors: 404 PRODUCT_NOT_FOUND · 404 VARIANT_NOT_FOUND.
 
 ### GET /admin/vendors
 Moderation queue.
@@ -206,7 +206,7 @@ Auth: ADMIN. Body (all optional): `{ "businessName" (1–120), "description" (<=
 
 ### GET /products
 Public catalog: only APPROVED, active, non-deleted products of verified vendors.
-Auth: none. Query: `categoryId?`, `vendorId?`, `search?` (<=200, title match), `page`, `limit`.
+Auth: none. Query: `categoryId?`, `vendorId?`, `search?` (<=200, case-insensitive match on title or description), `page`, `limit`.
 200 → `{ data: [public product + variants], meta }`
 
 ### GET /products/:id
@@ -297,7 +297,7 @@ Empties the cart. Auth: SHOPPER. 200/204.
 ### POST /checkout
 Turns the cart into one **OrderGroup** with one **Order per vendor**, reserves stock, empties the cart, and asks Paymob for a payment intention. If Paymob is not configured (local dev) the orders are still created and `paymentSetupFailed: true` is returned — call retry-payment later.
 Auth: SHOPPER. Body: none.
-201 → the OrderGroup: `{ id (= orderGroupId), userId, totalAmount, paymobIntentId?, orders: [{ id, vendorId, status: "PENDING", subtotal, items }], paymentSetupFailed }`
+201 → the OrderGroup (`id` = orderGroupId, `orders: [{ id, vendorId, status: "PENDING", subtotal, items }]`, …) plus `paymobIntentId`, `clientUrl` and `paymentSetupFailed: false` — or the OrderGroup with only `paymentSetupFailed: true` when Paymob isn't configured.
 Errors: 400 CART_EMPTY · 400 CHECKOUT_ITEM_UNAVAILABLE (`details.items` lists the bad lines: unavailable / insufficient stock).
 Note: a PENDING group that is never paid is auto-cancelled after 60 min and its stock released.
 
@@ -370,7 +370,7 @@ Auth: none. 200. Errors: 404 BAZAAR_NOT_FOUND.
 
 ### GET /organizers/me
 Organizer's own profile with moderation fields.
-Auth: ORGANIZER. 200. Errors: 404 ORGANIZER_NOT_FOUND.
+Auth: ORGANIZER. 200. Errors: 404 ORGANIZER_PROFILE_NOT_FOUND.
 
 ### PATCH /organizers/me
 Auth: ORGANIZER. Body: `{ "name"? }`. 200.
@@ -383,22 +383,23 @@ Auth: ORGANIZER. Query: `page`, `limit`. 200 → `{ data, meta }`.
 Creates a bazaar in DRAFT (not visible yet). Organizer must be verified.
 Auth: ORGANIZER.
 Body: `{ "name", "description"?, "coverMedia"?: URL[], "lat", "lng", "scheduleType": ScheduleType, "recurrenceRule"? (required when RECURRING), "startDate": ISO, "endDate"?: ISO }`
-201 → bazaar. Errors: 400 · 403 ORGANIZER_NOT_VERIFIED.
+201 → bazaar. Errors: 400 VALIDATION_ERROR · 400 RECURRENCE_RULE_REQUIRED · 400 BAZAAR_END_BEFORE_START (`endDate` earlier than `startDate`; equal is allowed, omitted = single-day) · 403 ORGANIZER_NOT_VERIFIED.
 
 ### GET /organizers/me/bazaars/:id
 Auth: ORGANIZER (owner). 200. Errors: 404 BAZAAR_NOT_FOUND.
 
 ### PATCH /organizers/me/bazaars/:id
-Partial update, same fields as create. Re-indexes for search.
-Auth: ORGANIZER (owner). 200. Errors: 404.
+Partial update, same fields as create. Re-indexes for search. Dates are checked against the stored ones they leave unchanged (a new `endDate` against the stored `startDate`, and vice versa); the database enforces the same rule (`bazaars_end_date_not_before_start`).
+Auth: ORGANIZER (owner). 200. Errors: 404 BAZAAR_NOT_FOUND · 400 RECURRENCE_RULE_REQUIRED · 400 BAZAAR_END_BEFORE_START.
 
 ### PATCH /organizers/me/bazaars/:id/publish
 DRAFT → PUBLISHED: visible to shoppers, searchable, vendors can apply. Emits `bazaar.published`.
 Auth: ORGANIZER (owner). 200. Errors: 404 · 400 BAZAAR_NOT_DRAFT.
 
 ### PATCH /organizers/me/bazaars/:id/cancel
-PUBLISHED/DRAFT → CANCELLED; removed from public reads and search.
-Auth: ORGANIZER (owner). 200. Errors: 404 · 400.
+Any status except COMPLETED → CANCELLED; removed from public reads and search. Applications and booths untouched.
+Auth: ORGANIZER (owner). 200. Errors: 404 BAZAAR_NOT_FOUND · 400 BAZAAR_COMPLETED.
+An already CANCELLED bazaar is a 200 no-op: nothing is written or re-indexed (same as the admin cancel).
 
 ### GET /organizers/me/bazaars/:id/applications
 Vendor applications for one bazaar.
@@ -406,14 +407,15 @@ Auth: ORGANIZER (owner). Query: `status?` = PENDING|ACCEPTED|REJECTED, `page`, `
 
 ### PATCH /organizers/me/bazaars/:id/applications/:applicationId/accept
 PENDING → ACCEPTED. Emits `booth_listing.accepted`. The vendor can then be assigned a booth.
-Auth: ORGANIZER (owner). 200. Errors: 404 APPLICATION_NOT_FOUND · 400 APPLICATION_NOT_PENDING.
+The write is guarded (only a still-PENDING row moves), like the admin decision, so an organizer and an admin deciding at the same moment can't overwrite each other.
+Auth: ORGANIZER (owner). 200 → application. Errors: 404 APPLICATION_NOT_FOUND · 400 APPLICATION_NOT_PENDING · 409 APPLICATION_STATE_CHANGED (decided by someone else while in flight).
 
 ### PATCH /organizers/me/bazaars/:id/applications/:applicationId/reject
-PENDING → REJECTED. Auth: ORGANIZER (owner). 200. Errors: 404 · 400 APPLICATION_NOT_PENDING.
+PENDING → REJECTED, same guarded write. Auth: ORGANIZER (owner). 200 → application. Errors: 404 APPLICATION_NOT_FOUND · 400 APPLICATION_NOT_PENDING · 409 APPLICATION_STATE_CHANGED.
 
 ### POST /bazaars/:id/apply
-Vendor applies to a PUBLISHED bazaar. One application per vendor per bazaar. Vendor must be verified.
-Auth: VENDOR. Body: none. 201 → application (PENDING). Errors: 403 VENDOR_NOT_VERIFIED · 404 BAZAAR_NOT_FOUND · 400 BAZAAR_NOT_ACCEPTING_APPLICATIONS (exists but not PUBLISHED) · 409 APPLICATION_EXISTS.
+Vendor applies to a public bazaar (see the visibility rule under `GET /bazaars`). One application per vendor per bazaar. Vendor must be verified.
+Auth: VENDOR. Body: none. 201 → application (PENDING). Errors: 403 VENDOR_NOT_VERIFIED · 400 BAZAAR_NOT_ACCEPTING_APPLICATIONS (unknown id, not PUBLISHED, deleted, or organizer rejected/deleted — this route never answers 404) · 409 APPLICATION_EXISTS.
 
 ### DELETE /bazaars/:id/apply
 Withdraws a PENDING application. Auth: VENDOR. 204. Errors: 404.
@@ -426,11 +428,12 @@ Auth: VENDOR. Query: `status?`, `page`, `limit`. 200 → `{ data, meta }`.
 Moderation queue. Auth: ADMIN. Query: `status?` = pending|verified|rejected, `search?`, `page`, `limit`. 200 → `{ data, meta }`.
 
 ### PATCH /admin/organizers/:id/verify
-Organizer can now create/publish bazaars. Idempotent. Audit ORGANIZER_VERIFIED. Auth: ADMIN. 200. Errors: 404.
+Organizer can now create/publish bazaars. Clears `rejectionReason`. Automatically restores the public visibility of their PUBLISHED bazaars that a reject had hidden (spec3 B8b). Idempotent (repeat = 200, no audit). Audit ORGANIZER_VERIFIED.
+Auth: ADMIN. 200 → `{ id, verified, rejectionReason }`. Errors: 404 ORGANIZER_NOT_FOUND. `:id` is the organizer id, not the user id.
 
 ### PATCH /admin/organizers/:id/reject
-Rejects/revokes with a reason. Existing PUBLISHED bazaars stay public (product decision pending).
-Auth: ADMIN. Body: `{ "reason" (1–1000) }`. 200. Errors: 400 · 404.
+Rejects a pending organizer or revokes a verified one, with a reason. **Hides all their bazaars** from public reads, discovery, search and vendor applications (spec3 B8b); the bazaars' own status is not changed, so a later verify restores them. Same state and same reason = 200 no-op, no audit. Audit ORGANIZER_REJECTED.
+Auth: ADMIN. Body: `{ "reason" (1–1000) }`. 200 → `{ id, verified, rejectionReason }`. Errors: 400 · 404 ORGANIZER_NOT_FOUND.
 
 ### GET /admin/bazaars
 Every bazaar of every organizer, in any status, **DRAFT included** (every other route shows a DRAFT to its owner only). Newest first.
@@ -521,7 +524,7 @@ All search routes: `q` (1–200 chars, required), optional `lat`/`lng` + `radius
 ### GET /search
 Federated overview: top hits for products, vendors and bazaars in one call.
 Query: `q`, `types?` = comma list of product,vendor,bazaar, `limit` <=20.
-200 → `{ products: [...], vendors: [...], bazaars: [...] }`
+200 → `{ products: { hits, estimatedTotalHits, page, limit }, vendors: { … }, bazaars: { … } }` — each key has the same shape as its single-index route.
 
 ### GET /search/products
 Query: `q`, `categoryId?`, `category?` (slug), `vendorId?`, `minPrice?`, `maxPrice?`, `size?`, `color?`, `sort?` (relevance | price_asc | price_desc | newest), `page`, `limit`.
@@ -609,8 +612,11 @@ Auth: ADMIN. 200 → `{ pending: {...}, totals: {...}, orders: {...} }`.
 
 ### GET /admin/audit-log
 Who did what to whom. Newest first.
-Auth: ADMIN. Query: `actorId?`, `targetType?` VENDOR|ORGANIZER|PRODUCT|USER, `targetId?`, `action?` (VENDOR_VERIFIED, VENDOR_REJECTED, ORGANIZER_VERIFIED, ORGANIZER_REJECTED, PRODUCT_APPROVED, PRODUCT_REJECTED, USER_DEACTIVATED, USER_REACTIVATED), `page`, `limit`.
-200 → `{ data: [{ id, actorId, action, targetType, targetId, reason, createdAt }], meta }`
+Auth: ADMIN. Query: `actorId?`, `targetType?`, `targetId?`, `action?`, `page`, `limit`.
+- `targetType`: VENDOR · ORGANIZER · PRODUCT · USER · CATEGORY · RATING · APPLICATION · ORDER · BAZAAR · BOOTH · SEARCH_INDEX
+- `action`: VENDOR_VERIFIED · VENDOR_REJECTED · VENDOR_EDITED · ORGANIZER_VERIFIED · ORGANIZER_REJECTED · PRODUCT_APPROVED · PRODUCT_REJECTED · PRODUCT_EDITED · PRODUCT_DELETED · USER_DEACTIVATED · USER_REACTIVATED · CATEGORY_CREATED · CATEGORY_UPDATED · CATEGORY_DELETED · RATING_DELETED · RATING_COMMENT_CLEARED · APPLICATION_ACCEPTED · APPLICATION_REJECTED · ORDER_CANCELLED · BAZAAR_CANCELLED · BOOTH_LAYOUT_CREATED · BOOTH_LAYOUT_UPDATED · BOOTH_CREATED · BOOTH_UPDATED · BOOTH_DELETED · BOOTH_ASSIGNED · BOOTH_UNASSIGNED · SEARCH_REINDEX_REQUESTED
+
+200 → `{ data: [{ id, actorId, action, targetType, targetId, reason, createdAt }], meta }`. Idempotent no-op repeats write no row.
 
 ---
 

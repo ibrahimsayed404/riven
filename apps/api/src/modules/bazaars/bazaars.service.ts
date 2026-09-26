@@ -20,6 +20,19 @@ import { BoothListingAcceptedEvent } from './events/booth-listing-accepted.event
 import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { AuditService } from '../audit/audit.service';
 
+/**
+ * endDate is optional (a single-day event) but never before startDate: the
+ * completion job and discovery's `upcomingOnly` both read `endDate < now` as
+ * "over", so a backwards range ends a bazaar before it opens. The schema has
+ * the same rule as a CHECK constraint (bazaars_end_date_not_before_start).
+ */
+function assertEndNotBeforeStart(start: string | Date, end: string | Date | null | undefined): void {
+  if (end == null) return;
+  if (new Date(end).getTime() < new Date(start).getTime()) {
+    throw new BadRequestException({ code: 'BAZAAR_END_BEFORE_START', message: 'endDate must not be before startDate.' });
+  }
+}
+
 @Injectable()
 export class BazaarsService {
   constructor(
@@ -44,6 +57,8 @@ export class BazaarsService {
     if (data.scheduleType === ScheduleType.RECURRING && !data.recurrenceRule) {
       throw new BadRequestException({ code: 'RECURRENCE_RULE_REQUIRED', message: 'recurrenceRule is required when scheduleType is RECURRING' });
     }
+
+    assertEndNotBeforeStart(data.startDate, data.endDate);
 
     return this.bazaarsRepository.create({
       ...data,
@@ -82,6 +97,12 @@ export class BazaarsService {
       }
     }
 
+    // A partial update is checked against the stored dates it leaves unchanged.
+    assertEndNotBeforeStart(
+      (data.startDate as string | Date | undefined) ?? bazaar.startDate,
+      data.endDate === undefined ? bazaar.endDate : (data.endDate as string | Date | null),
+    );
+
     const updated = await this.bazaarsRepository.update(bazaar.id, data);
     await this.searchIndexQueue.enqueue({ type: 'BAZAAR', id: bazaar.id });
     return updated;
@@ -114,6 +135,10 @@ export class BazaarsService {
 
     if (bazaar.status === BazaarStatus.COMPLETED) {
       throw new BadRequestException({ code: 'BAZAAR_COMPLETED', message: 'Cannot cancel a COMPLETED bazaar.' });
+    }
+    // Already cancelled: nothing to write or re-index (same no-op as the admin cancel, spec3 B7).
+    if (bazaar.status === BazaarStatus.CANCELLED) {
+      return bazaar;
     }
 
     const cancelled = await this.bazaarsRepository.updateStatus(id, BazaarStatus.CANCELLED);
@@ -264,12 +289,21 @@ export class BazaarsService {
       throw new BadRequestException({ code: 'APPLICATION_NOT_PENDING', message: 'Can only make decisions on PENDING applications.' });
     }
 
-    const decided = await this.bazaarsRepository.updateApplicationStatus(application.id, status);
+    // Guarded PENDING → status, like the admin path: an admin decision that lands
+    // between the read above and this write must not be overwritten (no reversals).
+    const moved = await this.bazaarsRepository.transitionApplication(application.id, status);
+    if (moved === 0) {
+      throw new ConflictException({
+        code: 'APPLICATION_STATE_CHANGED',
+        message: 'The application was decided while this request was in flight. Reload and try again.',
+      });
+    }
+
     if (status === 'ACCEPTED') {
       // After the commit (fix.js ARCH-04): notifications' FOLLOWED_VENDOR_NEW_BAZAAR trigger.
-      this.domainEvents.emit(new BoothListingAcceptedEvent(decided.id, decided.bazaarId, decided.vendorId));
+      this.domainEvents.emit(new BoothListingAcceptedEvent(application.id, application.bazaarId, application.vendorId));
     }
-    return decided;
+    return this.bazaarsRepository.findApplicationById(application.id);
   }
 
   // --- Internal Passthrough for Other Modules ---
