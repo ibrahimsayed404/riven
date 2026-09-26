@@ -475,16 +475,6 @@ export class BazaarsRepository {
     });
   }
 
-  updateApplicationStatus(id: string, status: ApplicationStatus): Promise<BoothListing> {
-    return this.prisma.boothListing.update({
-      where: { id },
-      data: {
-        applicationStatus: status,
-        decidedAt: new Date(),
-      },
-    });
-  }
-
   async findVendorApplicationsPaginated(
     vendorId: string,
     page: number,
@@ -674,9 +664,10 @@ export class BazaarsRepository {
   }
 
   /**
-   * Admin decision (spec3 B5): PENDING → status only. The status guard lives in
-   * the WHERE, so a concurrent organizer decision can't be overwritten — the
-   * loser sees 0 rows and the service reports a conflict. Returns rows moved.
+   * Application decision, organizer or admin (spec3 B5): PENDING → status only.
+   * The status guard lives in the WHERE, so two concurrent decisions can't
+   * overwrite each other — the loser sees 0 rows and the service reports a
+   * conflict. Returns rows moved.
    */
   async transitionApplication(id: string, status: 'ACCEPTED' | 'REJECTED'): Promise<number> {
     const { count } = await this.prisma.boothListing.updateMany({

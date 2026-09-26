@@ -392,6 +392,8 @@ model Bazaar {
   scheduleType   ScheduleType
   recurrenceRule String? // e.g. iCal RRULE string, required if scheduleType = RECURRING
   startDate      DateTime
+  // CHECK bazaars_end_date_not_before_start (migration SQL only, Prisma can't model it):
+  // endDate IS NULL OR endDate >= startDate.
   endDate        DateTime?
   status         BazaarStatus                          @default(DRAFT)
 

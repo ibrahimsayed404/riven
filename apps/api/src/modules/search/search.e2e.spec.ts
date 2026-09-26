@@ -657,6 +657,26 @@ describe('SearchModule (e2e)', () => {
       }
     });
 
+    // Same fan-out when the vendor renames their own shop (PATCH /vendors/me): the
+    // live endpoint run on 2026-09-26 found product documents keeping the old name.
+    it('vendor self-rename also updates vendorName on their product documents', async () => {
+      await waitForIndexed('products', ids.linen, true);
+      const { ownerId } = await prisma.vendor.findUniqueOrThrow({ where: { id: verifiedVendorId }, select: { ownerId: true } });
+      const vendorToken = await jwtService.signAsync({ sub: ownerId, role: Role.VENDOR });
+      const renameTo = (businessName: string) =>
+        request(app.getHttpServer())
+          .patch('/vendors/me')
+          .set('Authorization', `Bearer ${vendorToken}`)
+          .send({ businessName });
+      try {
+        expect((await renameTo('Nour Loom')).status).toBe(200);
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Loom');
+      } finally {
+        await renameTo('Nour Atelier');
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Atelier');
+      }
+    });
+
     // spec3 B8b: organizer.verified gates bazaar visibility; reject/verify fan out
     // ORGANIZER_BAZAARS so the documents follow without the bazaar row changing.
     it('organizer reject removes their bazaar documents; re-verify restores them', async () => {

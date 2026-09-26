@@ -11,6 +11,7 @@
     "test:unit": "jest --runInBand --testPathIgnorePatterns e2e",
     "test:e2e": "jest --runInBand --testPathPatterns e2e",
     "check:env": "node scripts/check-env-example.mjs",
+    "smoke": "nest build && node scripts/smoke-live.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.seed.json",
     "prisma": "prisma"
   },
