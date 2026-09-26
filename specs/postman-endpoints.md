@@ -7,10 +7,10 @@ Generated from the controllers and DTOs in `apps/api/src` on 2026-09-19; re-chec
 **Conventions that apply everywhere**
 - Auth: `Authorization: Bearer <accessToken>` (15 min). Refresh with `POST /auth/refresh`.
 - Bodies are JSON. Unknown fields are rejected (`400 VALIDATION_ERROR`).
-- Errors are flat: `{ "code": "...", "message": "...", "details"?: {...} }`.
+- Errors are flat: `{ "code": "...", "message": "...", "details"?: {...} }`. For `VALIDATION_ERROR` the `message` is an array of strings. Codes that can come from any route: 400 `VALIDATION_ERROR` · 401 `INVALID_ACCESS_TOKEN` · 429 `RATE_LIMITED` · 409 `UNIQUE_VIOLATION` / 400 `INVALID_REFERENCE` / 404 `NOT_FOUND` (database constraint hits) · `HTTP_ERROR` (older routes without a specific code) · 500 `INTERNAL_SERVER_ERROR`. `TARGET_TYPE_UNSUPPORTED` (social) and 500 `INVALID_AMOUNT` (payment setup) are internal guards that validation normally prevents.
 - Lists: `?page=` (>=1) and `?limit=` (1–100) → `{ data: [...], meta: { total, page, limit, totalPages } }`. Social/discovery lists use `?cursor=` instead → `{ data, nextCursor }`.
 - Rate limits: 300 req/min per user or IP; 10/min on register/login; 30/min on refresh; 1/min on location updates → `429 RATE_LIMITED` + `Retry-After`.
-- Money is a decimal string with 2 places (`"249.00"`).
+- Money (EGP) comes back as a **decimal string without fixed places**: `"420"`, `"449.5"` (Prisma Decimal). Search hits carry prices as numbers. Send numbers with at most 2 decimals (`"basePrice": 450`). `paidAmountCents` (admin order detail) is integer piastres.
 - Visibility rule: vendors, organizers and products are invisible to shoppers until an admin approves them. A **vendor** editing a product sends it back to `PENDING`; an admin edit of its text/images does not (spec3 B2). A bazaar is public only while its organizer is verified and not deleted (spec3 B8b).
 
 Enums used below
@@ -32,7 +32,7 @@ Creates a **SHOPPER** account. Vendors and organizers use their own routes; `rol
 Auth: none. Limit 10/min.
 Body: `{ "email", "password" (>=8 chars, at least 1 digit), "name" }`
 201 → `{ id, email, name, role: "SHOPPER", createdAt }` — no tokens; log in next.
-Errors: 400 VALIDATION_ERROR · 409 EMAIL_ALREADY_EXISTS (case-insensitive).
+Errors: 400 VALIDATION_ERROR (a `role` other than SHOPPER: "only SHOPPER accounts can be created here") · 409 EMAIL_ALREADY_EXISTS (case-insensitive). The service also refuses other roles with 400 ROLE_NOT_SELF_ASSIGNABLE, as a second guard behind validation.
 
 ### POST /auth/register/vendor
 Creates a VENDOR user **and** its vendor profile in one transaction. Profile starts unverified (hidden from shoppers) until an admin verifies it.
@@ -272,23 +272,23 @@ Note: `GET /admin/categories` shows `productCount` *without* soft-deleted produc
 ## 6. Cart (`/cart`) — SHOPPER only
 
 ### GET /cart
-The shopper's cart (created on first read). Lines carry public product/variant fields only.
-Auth: SHOPPER. 200 → `{ id, userId, items: [{ id, productId, variantId, quantity, product, variant }] }`
+The shopper's cart. Lines carry public product/variant fields only. Reading doesn't create a cart: until the first `POST /cart/items` there is none, and the response is an empty placeholder with `id: ""`. The first Add Item creates the real cart (a uuid); Clear Cart empties it but keeps it.
+Auth: SHOPPER. 200 → `{ id, userId, updatedAt, items: [{ id, productId, variantId, quantity, product, variant }] }`
 
 ### POST /cart/items
 Adds a variant or increases its quantity. Product must be publicly visible; stock is checked.
 Auth: SHOPPER. Body: `{ "productId", "variantId", "quantity" (>=1) }`
-201 → cart item. Errors: 404 PRODUCT_NOT_FOUND · 400 INSUFFICIENT_STOCK (`details.inStock`).
+201 → cart item. Errors: 404 PRODUCT_UNAVAILABLE (unknown, hidden or removed product/variant) · 400 INSUFFICIENT_STOCK (`details.inStock`) · 400 INVALID_QUANTITY.
 
 ### PATCH /cart/items/:itemId
 Sets the exact quantity; `0` removes the line. Stock is re-checked.
 Auth: SHOPPER. Body: `{ "quantity" (>=0) }`. 200. Errors: 404 CART_ITEM_NOT_FOUND · 400 INSUFFICIENT_STOCK.
 
 ### DELETE /cart/items/:itemId
-Removes one line. Auth: SHOPPER. 200/204. Errors: 404.
+Removes one line. Auth: SHOPPER. 200. Errors: 404 CART_ITEM_NOT_FOUND.
 
 ### DELETE /cart
-Empties the cart. Auth: SHOPPER. 200/204.
+Empties the cart (the cart itself and its id stay). Auth: SHOPPER. 200.
 
 ---
 
@@ -298,12 +298,12 @@ Empties the cart. Auth: SHOPPER. 200/204.
 Turns the cart into one **OrderGroup** with one **Order per vendor**, reserves stock, empties the cart, and asks Paymob for a payment intention. If Paymob is not configured (local dev) the orders are still created and `paymentSetupFailed: true` is returned — call retry-payment later.
 Auth: SHOPPER. Body: none.
 201 → the OrderGroup (`id` = orderGroupId, `orders: [{ id, vendorId, status: "PENDING", subtotal, items }]`, …) plus `paymobIntentId`, `clientUrl` and `paymentSetupFailed: false` — or the OrderGroup with only `paymentSetupFailed: true` when Paymob isn't configured.
-Errors: 400 CART_EMPTY · 400 CHECKOUT_ITEM_UNAVAILABLE (`details.items` lists the bad lines: unavailable / insufficient stock).
+Errors: 400 CART_EMPTY · 400 CHECKOUT_ITEM_UNAVAILABLE (`details.items` lists the bad lines, each with `reason` PRODUCT_UNAVAILABLE or OUT_OF_STOCK) · 500 CHECKOUT_CONTENDED (too busy to reserve stock; retry) · 500 CHECKOUT_FAILED.
 Note: a PENDING group that is never paid is auto-cancelled after 60 min and its stock released.
 
 ### POST /checkout/:orderGroupId/retry-payment
 Requests a fresh Paymob intention for a still-PENDING group (e.g. after `paymentSetupFailed`).
-Auth: SHOPPER (owner). 201 → payment fields. Errors: 404 ORDER_GROUP_NOT_FOUND · 400 ORDER_GROUP_NOT_PENDING · 503 PAYMENTS_NOT_CONFIGURED.
+Auth: SHOPPER (owner). 201 → payment fields. Errors: 404 ORDER_GROUP_NOT_FOUND · 403 ORDER_GROUP_FORBIDDEN (another shopper's checkout) · 400 PAYMENT_ALREADY_SET_UP (an intention already exists) · 400 ORDER_GROUP_NOT_PENDING · 503 PAYMENTS_NOT_CONFIGURED.
 
 ---
 
@@ -488,12 +488,12 @@ Auth: ADMIN. Body: `{ "label", "positionX" >=0, "positionY" >=0, "width" >=1, "h
 Move/resize/rename a booth. Auth: ADMIN. Body: any subset of the create body. 200. Errors: 404 BOOTH_NOT_FOUND.
 
 ### DELETE /admin/booths/:id
-Deletes an **unassigned** booth. Auth: ADMIN. 200/204. Errors: 404 · 400 BOOTH_ASSIGNED.
+Deletes an **unassigned** booth. Auth: ADMIN. 200. Errors: 404 BOOTH_NOT_FOUND · 400 BOOTH_ASSIGNED.
 
 ### PATCH /admin/booths/:id/assign
 Puts an ACCEPTED vendor application into a booth.
 Auth: ADMIN. Body: `{ "boothListingId": "<application id>" }`
-200 → booth. Errors: 404 BOOTH_NOT_FOUND / APPLICATION_NOT_FOUND · 400 BOOTH_ASSIGNED · 400 APPLICATION_NOT_ACCEPTED · 400 APPLICATION_BAZAAR_MISMATCH · 409 LISTING_ALREADY_ASSIGNED.
+200 → booth. Errors: 404 BOOTH_NOT_FOUND / APPLICATION_NOT_FOUND · 400 BOOTH_ASSIGNED · 400 APPLICATION_NOT_ACCEPTED · 400 APPLICATION_BAZAAR_MISMATCH · 409 APPLICATION_ALREADY_ASSIGNED (the application already has another booth).
 
 ### PATCH /admin/booths/:id/unassign
 Frees the booth. Auth: ADMIN. 200. Errors: 404.
@@ -513,17 +513,18 @@ Auth: none. 200. Errors: 404 BAZAAR_NOT_FOUND · 404 LAYOUT_NOT_FOUND.
 Auth: optional.
 Query: `lat`, `lng` (both or neither), `radiusKm` 1–150 (default 25), `scheduleType?`, `upcomingOnly?` (default true), `limit` 1–50, `cursor?`.
 200 → `{ data: [{ id, name, coverMedia, scheduleType, startDate, endDate, location, distanceKm, isFavorite, organizer }], nextCursor }`
-Errors: 400 VALIDATION_ERROR (lat without lng, radius out of range).
+Errors: 400 VALIDATION_ERROR (lat without lng, radius out of range) · 400 INVALID_CURSOR (the cursor doesn't fit the query, e.g. after dropping lat/lng; restart the list).
+Without `lat`/`lng` the results are ordered by start date, not distance; the location saved with `PATCH /users/me/location` isn't used.
 
 ---
 
 ## 12. Search (`/search`, `/admin/search`) — Meilisearch
 
-All search routes: `q` (1–200 chars, required), optional `lat`/`lng` + `radiusKm` (1–150) for geo filtering, `page`, `limit` (<=50). Optional Bearer token adds `isFavorite`.
+All search routes: `q` (1–100 chars after trimming, required), optional `lat`/`lng` + `radiusKm` (1–150) for geo filtering, `page`, `limit` (<=50). Optional Bearer token adds `isFavorite`. Errors on every search route: 400 VALIDATION_ERROR · 400 SEARCH_QUERY_INVALID (the search engine rejected the query or filters) · 503 SEARCH_UNAVAILABLE (search is down; retry).
 
 ### GET /search
 Federated overview: top hits for products, vendors and bazaars in one call.
-Query: `q`, `types?` = comma list of product,vendor,bazaar, `limit` <=20.
+Query: `q`, `types?` = comma list of `products,vendors,bazaars` (plural; omit = all three; anything else → 400 SEARCH_TYPE_INVALID), `limit` per type (1–20, default 10).
 200 → `{ products: { hits, estimatedTotalHits, page, limit }, vendors: { … }, bazaars: { … } }` — each key has the same shape as its single-index route.
 
 ### GET /search/products
@@ -569,7 +570,7 @@ Auth: any role. Query: `followableType?`, `limit`, `cursor?`. 200 → `{ data, n
 ### POST /social/ratings
 One rating per user per target (upsert). VENDOR and PRODUCT ratings require `orderId` of a **DELIVERED** order that contains that vendor/product. BAZAAR ratings need no order but the bazaar must be PUBLISHED or COMPLETED.
 Auth: SHOPPER. Body: `{ "targetType": VENDOR|BAZAAR|PRODUCT, "targetId", "score" 1–5, "comment"? (<=2000), "orderId"? }`
-200 → rating. Errors: 400 ORDER_ID_REQUIRED · 403 NOT_VERIFIED_PURCHASE · 404 TARGET_NOT_FOUND · 400 BAZAAR_NOT_RATEABLE.
+200 → rating. Errors: 400 ORDER_ID_REQUIRED · 403 NOT_VERIFIED_PURCHASE (no DELIVERED order of yours contains it) · 404 BAZAAR_NOT_FOUND (bazaar not PUBLISHED or COMPLETED) · 404 TARGET_NOT_FOUND (EVENT, not available yet).
 
 ### GET /social/ratings/summary
 Public average and count. Query: `targetType`, `targetId`. 200 → `{ average, count }`.
@@ -626,7 +627,7 @@ Auth: ADMIN. Query: `actorId?`, `targetType?`, `targetId?`, `action?`, `page`, `
 Liveness. Auth: none. 200 → `{ "status": "ok" }`.
 
 ### POST /webhooks/paymob
-Paymob calls this — not for Postman. Requires a valid HMAC (`?hmac=` or header); marks the order group PAID. Unsigned → 401.
+Paymob calls this — not for Postman. Requires a valid HMAC (`?hmac=` or header); marks the order group PAID. Errors: 401 WEBHOOK_SIGNATURE_MISSING (no HMAC) · 401 WEBHOOK_SIGNATURE_INVALID (HMAC doesn't match).
 
 ---
 
