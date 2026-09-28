@@ -313,24 +313,17 @@ async function scenario(prisma) {
   const v4 = await mkVariant(p4, 4, 5);
   await call('duplicate sku -> 409 SKU_TAKEN', 'POST', 'vendors/me/products/:id/variants', { token: vendorToken, params: { id: p1 }, body: { sku: `SKU-${run}-1` }, expect: 409 });
   await call('update variant stock', 'PATCH', 'vendors/me/products/:id/variants/:variantId', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { stockQuantity: 12 }, expect: 200 });
-  await call('admin products queue', 'GET', 'admin/products', { token: adminToken, query: { approvalStatus: 'PENDING', vendorId }, expect: 200 });
+  await call('admin products list', 'GET', 'admin/products', { token: adminToken, query: { vendorId }, expect: 200 });
   await call('admin product detail', 'GET', 'admin/products/:id', { token: adminToken, params: { id: p1 }, expect: 200 });
-  for (const [id, n] of [[p1, 1], [p2, 2], [p3, 3], [p4, 4]]) {
-    await call(`approve product ${n}`, 'PATCH', 'admin/products/:id/approve', { token: adminToken, params: { id }, expect: 200 });
-  }
   const pub = await call('public product list', 'GET', 'products', { query: { vendorId }, expect: 200 });
-  check('public list contains approved product', pub.body?.data?.some((x) => x.id === p1), JSON.stringify(pub.body?.meta));
+  check('public list contains the new product (no approval gate)', pub.body?.data?.some((x) => x.id === p1), JSON.stringify(pub.body?.meta));
   await call('public product detail', 'GET', 'products/:id', { params: { id: p1 }, expect: 200 });
   const ed = await call('vendor edit product', 'PATCH', 'vendors/me/products/:id', { token: vendorToken, params: { id: p2 }, body: { basePrice: 420 }, expect: 200 });
-  check('vendor edit resets to PENDING', ed.body?.approvalStatus === 'PENDING', ed.body?.approvalStatus);
-  await call('edited product hidden publicly -> 404', 'GET', 'products/:id', { params: { id: p2 }, expect: 404 });
-  await call('re-approve product 2', 'PATCH', 'admin/products/:id/approve', { token: adminToken, params: { id: p2 }, expect: 200 });
+  check('vendor edit applies the change', String(ed.body?.basePrice) === '420', ed.body?.basePrice);
+  await call('edited product still public', 'GET', 'products/:id', { params: { id: p2 }, expect: 200 });
   const ae = await call('admin edit product', 'PATCH', 'admin/products/:id', { token: adminToken, params: { id: p1 }, body: { title: `Admin Title ${WORD}` }, expect: 200 });
-  check('admin edit keeps APPROVED', ae.body?.approvalStatus === 'APPROVED', ae.body?.approvalStatus);
+  check('admin edit applies the title', ae.body?.title === `Admin Title ${WORD}`, ae.body?.title);
   await call('admin edit product price -> 400', 'PATCH', 'admin/products/:id', { token: adminToken, params: { id: p1 }, body: { basePrice: 1 }, expect: 400 });
-  await call('admin reject product 3', 'PATCH', 'admin/products/:id/reject', { token: adminToken, params: { id: p3 }, body: { reason: 'Photos too dark' }, expect: 200 });
-  const rj = await call('vendor sees rejection reason', 'GET', 'vendors/me/products/:id', { token: vendorToken, params: { id: p3 }, expect: 200 });
-  check('rejectionReason visible to vendor', rj.body?.rejectionReason === 'Photos too dark', rj.body?.rejectionReason);
   await call('admin delete product 3', 'DELETE', 'admin/products/:id', { token: adminToken, params: { id: p3 }, expect: 204 });
   await call('admin delete product 3 again (no-op)', 'DELETE', 'admin/products/:id', { token: adminToken, params: { id: p3 }, expect: 204 });
   await call('vendor delete variant 4', 'DELETE', 'vendors/me/products/:id/variants/:variantId', { token: vendorToken, params: { id: p4, variantId: v4 }, expect: 200 });
@@ -532,7 +525,7 @@ async function scenario(prisma) {
   const actions = new Set(rows.map((r) => r.action));
   for (const a of [
     'USER_DEACTIVATED', 'USER_REACTIVATED', 'CATEGORY_CREATED', 'CATEGORY_DELETED', 'VENDOR_VERIFIED', 'VENDOR_EDITED',
-    'PRODUCT_APPROVED', 'PRODUCT_EDITED', 'PRODUCT_REJECTED', 'PRODUCT_DELETED', 'ORDER_CANCELLED', 'RATING_COMMENT_CLEARED',
+    'PRODUCT_EDITED', 'PRODUCT_DELETED', 'ORDER_CANCELLED', 'RATING_COMMENT_CLEARED',
     'RATING_DELETED', 'ORGANIZER_VERIFIED', 'ORGANIZER_REJECTED', 'APPLICATION_REJECTED', 'APPLICATION_ACCEPTED',
     'BOOTH_LAYOUT_CREATED', 'BOOTH_LAYOUT_UPDATED', 'BOOTH_CREATED', 'BOOTH_UPDATED', 'BOOTH_ASSIGNED', 'BOOTH_UNASSIGNED',
     'BOOTH_DELETED', 'BAZAAR_CANCELLED', 'SEARCH_REINDEX_REQUESTED',

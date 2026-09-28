@@ -129,12 +129,6 @@ enum VendorCategory {
   OTHER
 }
 
-enum ApprovalStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
 enum OrderStatus {
   PENDING
   PAID
@@ -315,9 +309,7 @@ model Product {
   basePrice   Decimal  @db.Decimal(12, 2)
   images      String[]
 
-  approvalStatus  ApprovalStatus @default(PENDING)
-  rejectionReason String?
-  isActive        Boolean        @default(true)
+  isActive Boolean @default(true)
 
   variants   ProductVariant[]
   cartItems  CartItem[]

@@ -68,7 +68,7 @@ describe('AdminModule (e2e)', () => {
       .send({ email: 'admin-shopper@example.com', password: 'Password123!', name: 'S', role: 'SHOPPER' })
       .expect(201);
 
-    // A pending product and a published bazaar, seeded directly (the vendor is unverified, so it cannot create one).
+    // A product (no approval gate to be "pending" on) and a published bazaar, seeded directly (the vendor is unverified, so it cannot create one via its own route).
     const category = await prisma.category.upsert({
       where: { slug: 'admin-e2e-cat' },
       update: {},
@@ -128,7 +128,7 @@ describe('AdminModule (e2e)', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .expect(200);
 
-      expect(res.body.pending).toEqual({ vendors: 1, organizers: 1, products: 1 });
+      expect(res.body.pending).toEqual({ vendors: 1, organizers: 1 });
       expect(res.body.users).toEqual({ SHOPPER: 1, VENDOR: 1, ORGANIZER: 1, ADMIN: 1 });
       expect(Object.keys(res.body.orders).sort()).toEqual(Object.values(OrderStatus).sort());
       expect(Object.values(res.body.orders).every((n) => n === 0)).toBe(true);
@@ -146,8 +146,9 @@ describe('AdminModule (e2e)', () => {
         .send({ reason: 'No venue contract' })
         .expect(200);
       await request(app.getHttpServer())
-        .patch(`/admin/products/${productId}/approve`)
+        .patch(`/admin/products/${productId}`)
         .set('Authorization', `Bearer ${adminToken}`)
+        .send({ title: 'P edited' })
         .expect(200);
 
       const res = await request(app.getHttpServer())
@@ -156,7 +157,7 @@ describe('AdminModule (e2e)', () => {
         .expect(200);
 
       // A rejected organizer is not pending: pending means "no decision yet".
-      expect(res.body.pending).toEqual({ vendors: 0, organizers: 0, products: 0 });
+      expect(res.body.pending).toEqual({ vendors: 0, organizers: 0 });
     });
   });
 
@@ -168,7 +169,7 @@ describe('AdminModule (e2e)', () => {
         .expect(200);
 
       expect(res.body.meta.total).toBe(3);
-      expect(res.body.data.map((r: any) => r.action)).toEqual(['PRODUCT_APPROVED', 'ORGANIZER_REJECTED', 'VENDOR_VERIFIED']);
+      expect(res.body.data.map((r: any) => r.action)).toEqual(['PRODUCT_EDITED', 'ORGANIZER_REJECTED', 'VENDOR_VERIFIED']);
       expect(res.body.data[1]).toMatchObject({
         targetType: 'ORGANIZER',
         targetId: organizerId,
@@ -186,7 +187,7 @@ describe('AdminModule (e2e)', () => {
       expect(byType.body.data[0].targetId).toBe(vendorId);
 
       const byAction = await request(app.getHttpServer())
-        .get('/admin/audit-log?action=PRODUCT_APPROVED')
+        .get('/admin/audit-log?action=PRODUCT_EDITED')
         .set('Authorization', `Bearer ${adminToken}`)
         .expect(200);
       expect(byAction.body.data).toHaveLength(1);

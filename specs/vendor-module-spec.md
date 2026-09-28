@@ -5,6 +5,8 @@
 **Depends on:** `User`, `Vendor`, `Product`, `ProductVariant`, `Category` models (already migrated). Auth module (JWT, guards, password hashing patterns).
 **Out of scope (this pass):** Booth/Bazaar-specific vendor flows (separate module), Cart/Checkout/Orders (separate module), Subscription/billing enforcement (flagged as open item), image upload for product photos (same S3 blocker as avatar upload — deferred).
 
+> **Superseded:** this file's product-approval sections (`POST /vendors/me/products` starting `PENDING`, `PATCH /admin/products/:id/approve|reject`) no longer reflect the code. Product approval was removed by product decision, 2026-09-27 — see `specs/vendor-module-spec2.md`.
+
 ---
 
 ## 1. Vendor Registration (Direct)

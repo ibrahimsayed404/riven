@@ -6,6 +6,8 @@
 **Scope:** Admin reads across every domain, and category management (Part A). Every other admin write is listed in Part B with options, and waits for a decision.
 **Out of scope:** Refunds (no refund code exists, `payments-module-spec.md` isn't built, Paymob is unverified against a sandbox). Comments moderation as its own resource (there is no Comment model; `comment` is a column on `Rating`). Role changes (`role` is immutable by design). Any guard-level admin bypass.
 
+> **Superseded (A1, A2):** `productCounts: { PENDING, APPROVED, REJECTED }` on the vendor detail (A1) is now `productCount: number`; the product detail (A2) has no `approvalStatus`. Product approval was removed by product decision, 2026-09-27 — see `specs/vendor-module-spec2.md`.
+
 ---
 
 ## 0. Why this pass exists

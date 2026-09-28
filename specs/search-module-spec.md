@@ -4,6 +4,8 @@
 **Module**: Full-text search over Products, Vendors and Bazaars (`apps/api/src/infra/search` + `apps/api/src/modules/search`)  
 **References**: `riven-spec.md` §11 (Meilisearch, sync via queue), §12 (stack), §13 item 9; `fashion-marketplace-addendum.md` §2–3 (Category hierarchy, Product/Variant); `vendor-module-spec.md` §3 (visibility); `discovery-module-spec.md` (geo + optional-auth patterns); `riven-backend-architecture.md` §2 (`modules/search`, `jobs/search-sync.processor.ts`)
 
+> **Superseded (product eligibility):** every mention below of a product's `approvalStatus`/`PENDING`/`REJECTED` no longer reflects the code — product approval was removed by product decision, 2026-09-27 (`specs/vendor-module-spec2.md`). A product's search eligibility is now just `isActive` + `deletedAt IS NULL` + `vendor.verified` + `vendor.deletedAt IS NULL`. Vendor/bazaar eligibility is unaffected.
+
 ---
 
 ## 1. Overview, Scope & Governing Principle

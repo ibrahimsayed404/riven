@@ -104,8 +104,8 @@ Note the request field is `businessName` but the response field is `name`. `reje
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/vendors/me/products?page&limit` | — | `{ data: Product[], total }` — all approval statuses, active and inactive |
-| POST | `/vendors/me/products` | `{ title, description, categoryId, basePrice, images[] (URLs), isActive? }` | Product (`approvalStatus: "PENDING"`) |
+| GET | `/vendors/me/products?page&limit` | — | `{ data: Product[], total }` — active and inactive, soft-deleted excluded |
+| POST | `/vendors/me/products` | `{ title, description, categoryId, basePrice, images[] (URLs), isActive? }` | Product — immediately public, no approval gate |
 | GET | `/vendors/me/products/:id` | — | Product **with `variants[]`** |
 | PATCH | `/vendors/me/products/:id` | any of the POST fields | Product |
 | DELETE | `/vendors/me/products/:id` | — | soft-delete |
@@ -120,15 +120,14 @@ Note the request field is `businessName` but the response field is `name`. `reje
   "id": "uuid", "vendorId": "uuid",
   "title": "Linen shirt", "description": "…", "categoryId": "uuid",
   "basePrice": "450.00", "images": ["https://…"],
-  "approvalStatus": "PENDING", "rejectionReason": null, "isActive": true,
+  "isActive": true,
   "createdAt": "…", "updatedAt": "…", "deletedAt": null
 }
 ```
 
 **Variant:** `{ id, productId, sku (globally unique), size, color, priceOverride (null = use basePrice), stockQuantity }`
 
-- `approvalStatus`: `PENDING | APPROVED | REJECTED`. Admin decides; on reject, `rejectionReason` is filled — surface it in the UI.
-- A product is only publicly visible when `APPROVED`, `isActive`, and the vendor is `verified`.
+- No approval gate: a product is publicly visible as soon as it's created, as long as `isActive` and the vendor is `verified` (product decision, 2026-09-27).
 - Images are URL strings — get them from `POST /media/upload-url` (section 0).
 - `categoryId` comes from `GET /categories` (section 5). Any node is valid, parent or leaf.
 
@@ -267,7 +266,7 @@ Every route requires an `ADMIN` token; other roles get `403`. There is no self-s
 
 | Method | Path | Returns |
 |---|---|---|
-| GET | `/admin/overview` | `{ pending: { vendors, organizers, products }, users: { SHOPPER, VENDOR, ORGANIZER, ADMIN }, orders: { PENDING, PAID, FULFILLED, SHIPPED, DELIVERED, CANCELLED }, bazaars: { DRAFT, PUBLISHED, CANCELLED, COMPLETED } }`. Every enum key is always present (0 when empty). `pending` = awaiting a first decision; rejected items are not pending. |
+| GET | `/admin/overview` | `{ pending: { vendors, organizers }, users: { SHOPPER, VENDOR, ORGANIZER, ADMIN }, orders: { PENDING, PAID, FULFILLED, SHIPPED, DELIVERED, CANCELLED }, bazaars: { DRAFT, PUBLISHED, CANCELLED, COMPLETED } }`. Every enum key is always present (0 when empty). `pending` = awaiting a first decision; rejected items are not pending. No `products` key — products have no approval gate (product decision, 2026-09-27). |
 
 ### 6.2 Moderation queues and decisions
 
@@ -281,9 +280,7 @@ Vendors and organizers share one state model: `verified: true` → verified; `ve
 | GET | `/admin/organizers` | same as vendors | `{ data: [{ id, ownerId, name, verified, rejectionReason, createdAt, owner }], meta }` |
 | PATCH | `/admin/organizers/:id/verify` | — | `{ id, verified, rejectionReason }` |
 | PATCH | `/admin/organizers/:id/reject` | `{ reason }` | Revoking does **not** un-publish the organizer's bazaars (open item). |
-| GET | `/admin/products` | `?approvalStatus=PENDING\|APPROVED\|REJECTED&vendorId=&page=&limit=` | `{ data: [{ …product, vendor: { id, name, verified } }], meta }`. Soft-deleted products never appear; `isActive` is not filtered. |
-| PATCH | `/admin/products/:id/approve` | — | `{ id, approvalStatus, rejectionReason }` |
-| PATCH | `/admin/products/:id/reject` | `{ reason }` | `{ id, approvalStatus: 'REJECTED', rejectionReason }` |
+| GET | `/admin/products` | `?vendorId=&page=&limit=` | `{ data: [{ …product, vendor: { id, name, verified } }], meta }`. Soft-deleted products never appear; `isActive` is not filtered. No approval gate — this is not a moderation queue, just a list. |
 | GET | `/admin/users` | `?role=&search=&includeDeleted=&page=&limit=` | `{ data: [User], meta }` |
 | GET | `/admin/users/:id` | — | User |
 | PATCH | `/admin/users/:id/deactivate` | — | `204`. Soft-delete. `400 CANNOT_DEACTIVATE_SELF` on your own id. Does not revoke existing tokens (open item). |
@@ -297,7 +294,7 @@ Errors use stable codes: `VENDOR_NOT_FOUND`, `ORGANIZER_NOT_FOUND`, `PRODUCT_NOT
 |---|---|---|---|
 | GET | `/admin/audit-log` | `?actorId=&targetType=VENDOR\|ORGANIZER\|PRODUCT\|USER&targetId=&action=&page=&limit=` | `{ data: [{ id, action, targetType, targetId, reason, createdAt, actor: { id, name, email } }], meta }`, newest first. |
 
-`action` is one of `VENDOR_VERIFIED, VENDOR_REJECTED, ORGANIZER_VERIFIED, ORGANIZER_REJECTED, PRODUCT_APPROVED, PRODUCT_REJECTED, USER_DEACTIVATED, USER_REACTIVATED`. Only real state changes produce a row; a repeated identical decision does not. Booth-layout edits and search reindexes are **not** audited yet.
+`action` is one of `VENDOR_VERIFIED, VENDOR_REJECTED, ORGANIZER_VERIFIED, ORGANIZER_REJECTED, USER_DEACTIVATED, USER_REACTIVATED` (plus `PRODUCT_APPROVED`/`PRODUCT_REJECTED` on historical rows only — nothing writes them since products lost their approval gate on 2026-09-27). Only real state changes produce a row; a repeated identical decision does not. Booth-layout edits and search reindexes are **not** audited yet.
 
 ### 6.4 Other admin routes (pre-existing)
 

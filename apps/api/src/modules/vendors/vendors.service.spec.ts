@@ -33,7 +33,7 @@ describe('VendorsService', () => {
       findPublicById: jest.fn(),
       countPendingForAdmin: jest.fn(),
       findByIdForAdmin: jest.fn(),
-      countProductsByApprovalStatus: jest.fn(),
+      countProducts: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -86,26 +86,21 @@ describe('VendorsService', () => {
       expect(result).toEqual({ id: 'prod-1' });
       expect(vendorsRepository.createProduct).toHaveBeenCalledWith('vendor-1', expect.objectContaining({
         title: 'Test Product',
-        approvalStatus: 'PENDING',
       }));
     });
   });
 
   describe('updateProduct', () => {
-    it('should reset approvalStatus to PENDING', async () => {
+    it('writes exactly the given fields, with no approval reset', async () => {
       vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', verified: true } as any);
       vendorsRepository.findProductByIdAndVendor.mockResolvedValue({ id: 'prod-1', vendorId: 'vendor-1' } as any);
-      vendorsRepository.updateProduct.mockResolvedValue({ id: 'prod-1', approvalStatus: 'PENDING' } as any);
+      vendorsRepository.updateProduct.mockResolvedValue({ id: 'prod-1', title: 'Updated Title' } as any);
 
       await service.updateProduct('owner-1', 'prod-1', {
         title: 'Updated Title',
       });
 
-      expect(vendorsRepository.updateProduct).toHaveBeenCalledWith('prod-1', expect.objectContaining({
-        title: 'Updated Title',
-        approvalStatus: 'PENDING',
-        rejectionReason: null,
-      }));
+      expect(vendorsRepository.updateProduct).toHaveBeenCalledWith('prod-1', { title: 'Updated Title' });
     });
   });
 
@@ -305,7 +300,7 @@ describe('VendorsService', () => {
     beforeEach(() => {
       vendorsRepository.findByIdForAdmin.mockResolvedValue(verified as any);
       vendorsRepository.findVendorLocation.mockResolvedValue(null);
-      vendorsRepository.countProductsByApprovalStatus.mockResolvedValue({ PENDING: 0, APPROVED: 0, REJECTED: 0 });
+      vendorsRepository.countProducts.mockResolvedValue(0);
     });
 
     it('maps businessName to name, writes only changes, never touches verification, and re-indexes products on rename', async () => {
@@ -357,11 +352,11 @@ describe('VendorsService', () => {
   });
 
   describe('getVendorForAdmin', () => {
-    it('returns an unverified, soft-deleted vendor with location and product counts', async () => {
+    it('returns an unverified, soft-deleted vendor with location and product count', async () => {
       const deletedAt = new Date('2026-09-01T00:00:00Z');
       vendorsRepository.findByIdForAdmin.mockResolvedValue({ id: 'v1', verified: false, deletedAt } as any);
       vendorsRepository.findVendorLocation.mockResolvedValue({ lat: 30, lng: 31 });
-      vendorsRepository.countProductsByApprovalStatus.mockResolvedValue({ PENDING: 2, APPROVED: 1, REJECTED: 0 });
+      vendorsRepository.countProducts.mockResolvedValue(3);
 
       const result = await service.getVendorForAdmin('v1');
 
@@ -372,7 +367,7 @@ describe('VendorsService', () => {
         verified: false,
         deletedAt,
         location: { lat: 30, lng: 31 },
-        productCounts: { PENDING: 2, APPROVED: 1, REJECTED: 0 },
+        productCount: 3,
       });
     });
 
@@ -382,7 +377,7 @@ describe('VendorsService', () => {
       await expect(service.getVendorForAdmin('missing')).rejects.toMatchObject({
         response: { code: 'VENDOR_NOT_FOUND' },
       });
-      expect(vendorsRepository.countProductsByApprovalStatus).not.toHaveBeenCalled();
+      expect(vendorsRepository.countProducts).not.toHaveBeenCalled();
     });
   });
 
@@ -392,7 +387,7 @@ describe('VendorsService', () => {
       vendorsRepository.findProductByIdAndVendor.mockResolvedValue({ id: 'prod-1', variants: [{ id: 'var-1' }] } as any);
     });
 
-    it('createProduct enqueues even though the product starts PENDING', async () => {
+    it('createProduct enqueues so the new product is indexed immediately', async () => {
       vendorsRepository.createProduct.mockResolvedValue({ id: 'prod-new' } as any);
 
       await service.createProduct('owner-1', { title: 'T', description: 'D', categoryId: 'c', basePrice: 1, images: [] });

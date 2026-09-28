@@ -5,6 +5,8 @@
 **Builds on:** `specs/admin-module-spec.md` (pass 1) and `specs/admin-module-spec2.md` (pass 2, Part A merged in PRs #8–#15). Neither file is modified; Part B lives here.
 **Written against:** `apps/api/prisma/schema.prisma` on `main` @ `4d6e978`, with every rule below checked in the code.
 
+> **Superseded (B4):** "Product reject is the moderation tool" no longer applies — product reject was removed along with the rest of product approval, product decision 2026-09-27 (`specs/vendor-module-spec2.md`). Soft-delete (B3a) is now the only way an admin removes a product from public view. B1–B3, B5–B8 (vendor/organizer/application/order moderation) are unaffected.
+
 ---
 
 ## 0. Conventions (unchanged from pass 2 §1)

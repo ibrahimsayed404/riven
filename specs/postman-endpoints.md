@@ -11,13 +11,12 @@ Generated from the controllers and DTOs in `apps/api/src` on 2026-09-19; re-chec
 - Lists: `?page=` (>=1) and `?limit=` (1–100) → `{ data: [...], meta: { total, page, limit, totalPages } }`. Social/discovery lists use `?cursor=` instead → `{ data, nextCursor }`.
 - Rate limits: 300 req/min per user or IP; 10/min on register/login; 30/min on refresh; 1/min on location updates → `429 RATE_LIMITED` + `Retry-After`.
 - Money (EGP) comes back as a **decimal string without fixed places**: `"420"`, `"449.5"` (Prisma Decimal). Search hits carry prices as numbers. Send numbers with at most 2 decimals (`"basePrice": 450`). `paidAmountCents` (admin order detail) is integer piastres.
-- Visibility rule: vendors, organizers and products are invisible to shoppers until an admin approves them. A **vendor** editing a product sends it back to `PENDING`; an admin edit of its text/images does not (spec3 B2). A bazaar is public only while its organizer is verified and not deleted (spec3 B8b).
+- Visibility rule: vendors and organizers are invisible to shoppers until an admin approves them. Products have no approval gate — a product is visible as soon as it's created, subject only to `isActive` and its vendor being verified and not deleted (product decision, 2026-09-27). A bazaar is public only while its organizer is verified and not deleted (spec3 B8b).
 
 Enums used below
 - `Role`: SHOPPER · VENDOR · ORGANIZER · ADMIN
 - `VendorCategory`: FASHION · FOOD · HOME_CRAFTS · BEAUTY · ACCESSORIES · KIDS · ART · OTHER
 - `VendorType`: BAZAAR_ONLY · MARKETPLACE · BOTH
-- `ApprovalStatus`: PENDING · APPROVED · REJECTED
 - `OrderStatus`: PENDING · PAID · FULFILLED · SHIPPED · DELIVERED · CANCELLED
 - `ScheduleType`: ONE_OFF · RECURRING — `BazaarStatus`: DRAFT · PUBLISHED · CANCELLED · COMPLETED
 - `ApplicationStatus`: PENDING · ACCEPTED · REJECTED
@@ -142,11 +141,11 @@ Public storefront. Only verified, non-deleted vendors are returned; internal fie
 Auth: none. 200 → public vendor. Errors: 404 VENDOR_NOT_FOUND.
 
 ### GET /vendors/me/products
-The vendor's own catalog, every approval status, soft-deleted ones excluded.
+The vendor's own catalog, soft-deleted ones excluded.
 Auth: VENDOR. Query: `page`, `limit`. 200 → `{ data, meta }`.
 
 ### POST /vendors/me/products
-Creates a product in `PENDING` approval. Prices are EGP with <=2 decimals. `images` must be URLs (use `/media/upload-url` first).
+Creates a product. It's immediately public — no approval gate — subject to `isActive` and the vendor being verified. Prices are EGP with <=2 decimals. `images` must be URLs (use `/media/upload-url` first). **Requires the vendor to be verified**, else 403 `VENDOR_NOT_VERIFIED`.
 Auth: VENDOR.
 Body: `{ "title", "description", "categoryId" (UUID from GET /categories), "basePrice", "images": URL[], "isActive"?: boolean }`
 201 → product. Errors: 400 · 400 INVALID_REFERENCE (bad categoryId).
@@ -156,7 +155,7 @@ One of the vendor's products with its live variants.
 Auth: VENDOR. 200 → product. Errors: 404 PRODUCT_NOT_FOUND.
 
 ### PATCH /vendors/me/products/:id
-Partial update. **Any edit resets `approvalStatus` to PENDING** and removes the product from public listings/search until re-approved.
+Partial update. Only the given fields change — no approval state to reset.
 Auth: VENDOR. Body: any subset of the create body. 200 → product. Errors: 404.
 
 ### DELETE /vendors/me/products/:id
@@ -184,10 +183,10 @@ Auth: ADMIN. Query: `status?` = pending | verified | rejected, `search?`, `page`
 
 ### GET /admin/vendors/:id
 Full vendor detail in **any** state (pending, rejected, soft-deleted); the public `GET /vendors/:id` 404s on those.
-Auth: ADMIN. 200 → vendor profile + `rejectionReason`, `deletedAt`, `owner: { id, name, email, isActive }`, `location: {lat,lng} | null`, `productCounts: { PENDING, APPROVED, REJECTED }`. Errors: 404 VENDOR_NOT_FOUND (also for a malformed id).
+Auth: ADMIN. 200 → vendor profile + `rejectionReason`, `deletedAt`, `owner: { id, name, email, isActive }`, `location: {lat,lng} | null`, `productCount: number` (non-deleted products of this vendor). Errors: 404 VENDOR_NOT_FOUND (also for a malformed id).
 
 ### PATCH /admin/vendors/:id/verify
-Marks the vendor verified → storefront and its APPROVED products become public and searchable. Clears `rejectionReason`. Idempotent. Audit VENDOR_VERIFIED.
+Marks the vendor verified → storefront and its products become public and searchable. Clears `rejectionReason`. Idempotent. Audit VENDOR_VERIFIED.
 Auth: ADMIN. 200 → vendor. Errors: 404.
 
 ### PATCH /admin/vendors/:id/reject
@@ -204,35 +203,28 @@ Auth: ADMIN. Body (all optional): `{ "businessName" (1–120), "description" (<=
 
 ## 4. Products — public & admin (`/products`, `/admin/products`)
 
+Products have no approval gate (product decision, 2026-09-27 — `specs/vendor-module-spec2.md`): a product is public as soon as it's created, subject only to `isActive`, `deletedAt`, and its vendor being verified and not deleted.
+
 ### GET /products
-Public catalog: only APPROVED, active, non-deleted products of verified vendors.
+Public catalog: only active, non-deleted products of verified vendors.
 Auth: none. Query: `categoryId?`, `vendorId?`, `search?` (<=200, case-insensitive match on title or description), `page`, `limit`.
 200 → `{ data: [public product + variants], meta }`
 
 ### GET /products/:id
 Public product detail with live variants and public vendor summary.
-Auth: none. 200. Errors: 404 PRODUCT_NOT_FOUND (also when pending/rejected/vendor unverified).
+Auth: none. 200. Errors: 404 PRODUCT_NOT_FOUND (also when inactive/deleted/vendor unverified).
 
 ### GET /admin/products
-Moderation queue for products.
-Auth: ADMIN. Query: `approvalStatus?`, `vendorId?`, `page`, `limit`. 200 → `{ data, meta }`.
+Lists every non-deleted product.
+Auth: ADMIN. Query: `vendorId?`, `page`, `limit`. 200 → `{ data, meta }`.
 
 ### GET /admin/products/:id
-Full product detail in **any** state (pending, rejected, inactive, soft-deleted); the public `GET /products/:id` 404s on those.
+Full product detail regardless of state (inactive, soft-deleted); the public `GET /products/:id` 404s on those.
 Auth: ADMIN. 200 → product + `deletedAt`, `vendor: { id, name, verified }`, `category: { id, name, slug }`, `variants[]` (all of them; removed ones have `deletedAt` set). Errors: 404 PRODUCT_NOT_FOUND.
 
-### PATCH /admin/products/:id/approve
-Sets APPROVED and indexes the product for search (visible only if the vendor is verified). Idempotent. Audit PRODUCT_APPROVED.
-Auth: ADMIN. 200 → product. Errors: 404.
-
-### PATCH /admin/products/:id/reject
-Sets REJECTED with a reason the vendor sees on `GET /vendors/me/products/:id`.
-Auth: ADMIN. Body: `{ "reason" }`. 200. Errors: 400 · 404.
-Reject is also the only way to hide a product — there is no separate hide switch (spec3 B4).
-
 ### PATCH /admin/products/:id
-Admin edit of **title, description and images only** (spec3 B2). Unlike a vendor edit, **approval is not reset**: an APPROVED product stays APPROVED. Only changed fields are written; unchanged = 200 no-op, no audit. Re-indexes the product. Audit PRODUCT_EDITED.
-Auth: ADMIN. Body (all optional): `{ "title" (1–200), "description" (<=5000), "images": URL[] (<=10) }`. Price, category, isActive, approvalStatus → 400.
+Admin edit of **title, description and images only** (spec3 B2). Only changed fields are written; unchanged = 200 no-op, no audit. Re-indexes the product. Audit PRODUCT_EDITED.
+Auth: ADMIN. Body (all optional): `{ "title" (1–200), "description" (<=5000), "images": URL[] (<=10) }`. Price, category, isActive → 400.
 200 → the admin product detail. Errors: 400 · 404 PRODUCT_NOT_FOUND (also soft-deleted).
 
 ### DELETE /admin/products/:id
@@ -608,14 +600,14 @@ Errors: 400 VALIDATION_ERROR · 403.
 ## 15. Admin dashboard (`/admin/overview`, `/admin/audit-log`)
 
 ### GET /admin/overview
-Home-screen counters: pending vendors/organizers/products, totals per role, orders by status.
-Auth: ADMIN. 200 → `{ pending: {...}, totals: {...}, orders: {...} }`.
+Home-screen counters: pending vendors/organizers (products have no approval gate — no `pending.products`), totals per role, orders by status.
+Auth: ADMIN. 200 → `{ pending: { vendors, organizers }, totals: {...}, orders: {...} }`.
 
 ### GET /admin/audit-log
 Who did what to whom. Newest first.
 Auth: ADMIN. Query: `actorId?`, `targetType?`, `targetId?`, `action?`, `page`, `limit`.
 - `targetType`: VENDOR · ORGANIZER · PRODUCT · USER · CATEGORY · RATING · APPLICATION · ORDER · BAZAAR · BOOTH · SEARCH_INDEX
-- `action`: VENDOR_VERIFIED · VENDOR_REJECTED · VENDOR_EDITED · ORGANIZER_VERIFIED · ORGANIZER_REJECTED · PRODUCT_APPROVED · PRODUCT_REJECTED · PRODUCT_EDITED · PRODUCT_DELETED · USER_DEACTIVATED · USER_REACTIVATED · CATEGORY_CREATED · CATEGORY_UPDATED · CATEGORY_DELETED · RATING_DELETED · RATING_COMMENT_CLEARED · APPLICATION_ACCEPTED · APPLICATION_REJECTED · ORDER_CANCELLED · BAZAAR_CANCELLED · BOOTH_LAYOUT_CREATED · BOOTH_LAYOUT_UPDATED · BOOTH_CREATED · BOOTH_UPDATED · BOOTH_DELETED · BOOTH_ASSIGNED · BOOTH_UNASSIGNED · SEARCH_REINDEX_REQUESTED
+- `action`: VENDOR_VERIFIED · VENDOR_REJECTED · VENDOR_EDITED · ORGANIZER_VERIFIED · ORGANIZER_REJECTED · PRODUCT_APPROVED (historical only, nothing writes it since 2026-09-27) · PRODUCT_REJECTED (historical only) · PRODUCT_EDITED · PRODUCT_DELETED · USER_DEACTIVATED · USER_REACTIVATED · CATEGORY_CREATED · CATEGORY_UPDATED · CATEGORY_DELETED · RATING_DELETED · RATING_COMMENT_CLEARED · APPLICATION_ACCEPTED · APPLICATION_REJECTED · ORDER_CANCELLED · BAZAAR_CANCELLED · BOOTH_LAYOUT_CREATED · BOOTH_LAYOUT_UPDATED · BOOTH_CREATED · BOOTH_UPDATED · BOOTH_DELETED · BOOTH_ASSIGNED · BOOTH_UNASSIGNED · SEARCH_REINDEX_REQUESTED
 
 200 → `{ data: [{ id, actorId, action, targetType, targetId, reason, createdAt }], meta }`. Idempotent no-op repeats write no row.
 

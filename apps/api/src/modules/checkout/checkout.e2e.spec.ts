@@ -97,7 +97,6 @@ describe('Checkout and Orders (e2e)', () => {
         description: 'A good laptop',
         categoryId: category.id,
         basePrice: 1000,
-        approvalStatus: 'APPROVED',
         isActive: true,
         variants: {
           create: [{ sku: 'LAP-001', stockQuantity: 10 }],
