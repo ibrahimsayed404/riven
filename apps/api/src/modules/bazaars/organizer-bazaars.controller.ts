@@ -36,7 +36,10 @@ export class OrganizerBazaarsController {
   }
 
   @Get('bazaars')
-  getBazaars(@CurrentUser('id') ownerId: string, @Query() query: PaginationQueryDto) {
+  getBazaars(
+    @CurrentUser('id') ownerId: string,
+    @Query() query: PaginationQueryDto,
+  ) {
     const { page = 1, limit = 20 } = query;
     return this.bazaarsService.getMyBazaars(ownerId, page, limit);
   }
@@ -91,7 +94,13 @@ export class OrganizerBazaarsController {
     @Query() query: ListApplicationsQueryDto,
   ) {
     const { page = 1, limit = 20, status } = query;
-    return this.bazaarsService.getBazaarApplications(ownerId, bazaarId, page, limit, status);
+    return this.bazaarsService.getBazaarApplications(
+      ownerId,
+      bazaarId,
+      page,
+      limit,
+      status,
+    );
   }
 
   @Patch('bazaars/:id/applications/:applicationId/accept')
@@ -100,7 +109,12 @@ export class OrganizerBazaarsController {
     @Param('id') bazaarId: string,
     @Param('applicationId') applicationId: string,
   ) {
-    return this.bazaarsService.decideApplication(ownerId, bazaarId, applicationId, ApplicationStatus.ACCEPTED);
+    return this.bazaarsService.decideApplication(
+      ownerId,
+      bazaarId,
+      applicationId,
+      ApplicationStatus.ACCEPTED,
+    );
   }
 
   @Patch('bazaars/:id/applications/:applicationId/reject')
@@ -109,6 +123,11 @@ export class OrganizerBazaarsController {
     @Param('id') bazaarId: string,
     @Param('applicationId') applicationId: string,
   ) {
-    return this.bazaarsService.decideApplication(ownerId, bazaarId, applicationId, ApplicationStatus.REJECTED);
+    return this.bazaarsService.decideApplication(
+      ownerId,
+      bazaarId,
+      applicationId,
+      ApplicationStatus.REJECTED,
+    );
   }
 }

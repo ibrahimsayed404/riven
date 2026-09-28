@@ -70,11 +70,6 @@ import {
 export class ProductsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** @deprecated import PUBLIC_PRODUCT_WHERE from ./product-visibility instead. */
-  public get visibilityFilter(): Prisma.ProductWhereInput {
-    return PUBLIC_PRODUCT_WHERE;
-  }
-
   async findManyPaginated(params: {
     categoryId?: string;
     vendorId?: string;
@@ -178,7 +173,7 @@ export class ProductsRepository {
   }
 
   async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
-    return this.pageIds({ ...this.visibilityFilter, vendor: { verified: true, deletedAt: null } }, cursor, take);
+    return this.pageIds({ ...PUBLIC_PRODUCT_WHERE }, cursor, take);
   }
 
   private async pageIds(where: Prisma.ProductWhereInput, cursor: string | null, take: number): Promise<IdPage> {
@@ -214,20 +209,31 @@ export class ProductsRepository {
    * product. Variants are left alone, exactly like the vendor's own delete.
    */
   async softDeleteForAdmin(id: string): Promise<void> {
-    await this.prisma.product.update({ where: { id }, data: { deletedAt: new Date() } });
+    await this.prisma.product.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
   }
 
-  /** Admin content edit (spec3 B2). The parameter type is the whole allow-list: price, category and isActive cannot reach this write. */
+  /**
+   * Admin content edit (spec3 B2). The parameter type is the whole allow-list:
+   * price, category and isActive cannot reach this write.
+   */
   async updateContentForAdmin(
     id: string,
     data: { title?: string; description?: string; images?: string[] },
   ): Promise<void> {
-    await this.prisma.product.update({ where: { id }, data });
+    await this.prisma.product.update({
+      where: { id },
+      data,
+    });
   }
 
   /**
-   * Admin list. Deliberately NOT built on visibilityFilter: that hides
-   * products of unverified vendors, which an admin still needs to see.
+   * Admin queue/list. Deliberately NOT built on PUBLIC_PRODUCT_WHERE:
+   * that hides PENDING/REJECTED rows and products of unverified vendors,
+   * which is exactly what the admin needs to see.
+   *
    * Soft-deleted rows are always excluded; isActive is not filtered.
    */
   async findManyForAdmin(params: {
@@ -235,11 +241,17 @@ export class ProductsRepository {
     page: number;
     limit: number;
   }): Promise<{ data: AdminProductRow[]; total: number }> {
-    const where: Prisma.ProductWhereInput = { deletedAt: null };
-    if (params.vendorId) where.vendorId = params.vendorId;
+    const where: Prisma.ProductWhereInput = {
+      deletedAt: null,
+    };
+
+    if (params.vendorId) {
+      where.vendorId = params.vendorId;
+    }
 
     return this.prisma.$transaction(async (tx) => {
       const total = await tx.product.count({ where });
+
       const data = await tx.product.findMany({
         where,
         select: adminProductRowSelect,
@@ -247,7 +259,7 @@ export class ProductsRepository {
         skip: (params.page - 1) * params.limit,
         take: params.limit,
       });
+
       return { data, total };
     });
   }
-}

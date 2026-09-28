@@ -8,6 +8,7 @@ import { compare } from 'bcrypt';
 import { AdminAction, AdminTargetType, Role } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
+import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { AuthService } from '../auth/auth.service';
 import { OrganizersService } from '../bazaars/organizers.service';
 import { VendorsService } from '../vendors/vendors.service';
@@ -142,12 +143,7 @@ export class UsersService {
 
     return {
       data,
-      meta: {
-        total,
-        page: params.page,
-        limit: params.limit,
-        totalPages: Math.ceil(total / params.limit),
-      },
+      meta: pageMeta(total, params.page, params.limit),
     };
   }
 

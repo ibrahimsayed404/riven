@@ -37,6 +37,13 @@ export const PAYMOB_HMAC_KEYS = [
   'success',
 ] as const;
 
+/**
+ * Upper bound on the intention call. Node applies no default timeout to fetch,
+ * and a stalled Paymob leaves POST /checkout hanging with stock already
+ * reserved; the caller's catch turns a failure into paymentSetupFailed.
+ */
+const INTENTION_TIMEOUT_MS = 10_000;
+
 @Injectable()
 export class PaymobService {
   private readonly logger = new Logger(PaymobService.name);
@@ -90,6 +97,7 @@ export class PaymobService {
           Authorization: `Token ${this.apiKey}`,
         },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(INTENTION_TIMEOUT_MS),
       });
 
       if (!response.ok) {

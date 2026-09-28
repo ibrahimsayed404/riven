@@ -25,7 +25,11 @@ export class AdminBoothsController {
     @Param('bazaarId') bazaarId: string,
     @Body() dto: CreateBoothLayoutDto,
   ) {
-    return this.boothsService.createLayout(admin.id, bazaarId, dto.gridConfig as any);
+    return this.boothsService.createLayout(
+      admin.id,
+      bazaarId,
+      dto.gridConfig as any,
+    );
   }
 
   @Get('bazaars/:bazaarId/layout')
@@ -39,7 +43,11 @@ export class AdminBoothsController {
     @Param('bazaarId') bazaarId: string,
     @Body() dto: UpdateBoothLayoutDto,
   ) {
-    return this.boothsService.updateLayout(admin.id, bazaarId, dto.gridConfig as any);
+    return this.boothsService.updateLayout(
+      admin.id,
+      bazaarId,
+      dto.gridConfig as any,
+    );
   }
 
   @Post('bazaars/:bazaarId/layout/booths')
@@ -52,22 +60,36 @@ export class AdminBoothsController {
   }
 
   @Patch('booths/:id')
-  updateBooth(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string, @Body() dto: UpdateBoothDto) {
+  updateBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateBoothDto,
+  ) {
     return this.boothsService.updateBooth(admin.id, id, dto);
   }
 
   @Delete('booths/:id')
-  deleteBooth(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+  deleteBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
     return this.boothsService.deleteBooth(admin.id, id);
   }
 
   @Patch('booths/:id/assign')
-  assignBooth(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string, @Body() dto: AssignBoothDto) {
+  assignBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: AssignBoothDto,
+  ) {
     return this.boothsService.assignBooth(admin.id, id, dto.boothListingId);
   }
 
   @Patch('booths/:id/unassign')
-  unassignBooth(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+  unassignBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
     return this.boothsService.unassignBooth(admin.id, id);
   }
 }

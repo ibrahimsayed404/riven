@@ -1,10 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { PageMeta, pageMeta } from '../../common/dto/pagination-query.dto';
+
 import { AuditLogEntry, AuditLogFilter, AuditLogRow, AuditRepository } from './audit.repository';
 
 export interface AuditLogPage {
   data: AuditLogRow[];
-  meta: { total: number; page: number; limit: number; totalPages: number };
+  meta: PageMeta;
 }
 
 @Injectable()
@@ -34,7 +36,7 @@ export class AuditService {
     const { data, total } = await this.auditRepository.findManyPaginated(filter, page, limit);
     return {
       data,
-      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+      meta: pageMeta(total, page, limit),
     };
   }
 }

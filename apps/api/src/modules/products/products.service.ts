@@ -102,12 +102,7 @@ export class ProductsService {
     const { data, total } = await this.productsRepository.findManyForAdmin(params);
     return {
       data,
-      meta: {
-        total,
-        page: params.page,
-        limit: params.limit,
-        totalPages: Math.ceil(total / params.limit),
-      },
+      meta: pageMeta(total, params.page, params.limit),
     };
   }
 

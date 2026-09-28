@@ -301,6 +301,12 @@ export class SocialService {
       throw this.invalidCursor();
     }
 
+    // page() turns s into a Date for the keyset comparison; an unparseable one
+    // would reach Prisma as Invalid Date and come back as a 500.
+    if (Number.isNaN(new Date(s).getTime())) {
+      throw this.invalidCursor();
+    }
+
     return { s, id };
   }
 

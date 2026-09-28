@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AdminAction, AdminTargetType, Prisma } from '@prisma/client';
+import { AdminAction, AdminTargetType } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
+import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { OrganizersRepository, OrganizerProfile, OrganizerModerationStatus } from './organizers.repository';
 
@@ -29,7 +30,7 @@ export class OrganizersService {
     return organizer;
   }
 
-  async updateMyProfile(ownerId: string, data: Prisma.OrganizerUpdateInput): Promise<OrganizerProfile> {
+  async updateMyProfile(ownerId: string, data: { name?: string }): Promise<OrganizerProfile> {
     const organizer = await this.getOrganizerByOwnerId(ownerId);
     return this.organizersRepository.update(organizer.id, data);
   }
@@ -57,12 +58,7 @@ export class OrganizersService {
     const { data, total } = await this.organizersRepository.findManyForAdmin(params);
     return {
       data,
-      meta: {
-        total,
-        page: params.page,
-        limit: params.limit,
-        totalPages: Math.ceil(total / params.limit),
-      },
+      meta: pageMeta(total, params.page, params.limit),
     };
   }
 

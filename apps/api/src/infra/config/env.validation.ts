@@ -3,6 +3,35 @@ import { z } from 'zod';
 // An empty string in .env means "not set" — .env.example ships PAYMOB_*="" .
 const blankToUndefined = (value: unknown) => (value === '' ? undefined : value);
 
+/**
+ * How many reverse proxies stand between the internet and this process, or
+ * which proxy addresses to trust. Express defaults to false: req.ip is then
+ * the socket peer — the proxy — and X-Forwarded-For is ignored, so every
+ * anonymous caller shares one rate-limit identity.
+ *
+ * Accepted: "false" (no proxy), a hop count ("1"), or a comma-separated list
+ * of addresses/CIDRs/Express presets ("10.0.0.0/8,loopback").
+ *
+ * "true" is deliberately rejected. It trusts the whole X-Forwarded-For chain,
+ * including the part the client wrote, so any caller can forge a fresh
+ * rate-limit identity per request — a worse failure than the one this setting
+ * exists to fix. A hop count or a CIDR list expresses the same intent safely.
+ */
+function isTrustProxyValue(raw: string): boolean {
+  const value = raw.trim();
+  if (/^true$/i.test(value)) return false;
+  if (/^false$/i.test(value)) return true;
+  if (/^\d+$/.test(value)) return true;
+  return value.length > 0 && value.split(',').every((entry) => entry.trim().length > 0);
+}
+
+function parseTrustProxy(raw: string | undefined): false | number | string[] {
+  const value = (raw ?? 'false').trim();
+  if (/^false$/i.test(value)) return false;
+  if (/^\d+$/.test(value)) return Number(value);
+  return value.split(',').map((entry) => entry.trim()).filter(Boolean);
+}
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
@@ -20,6 +49,18 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1),
   S3_SECRET_ACCESS_KEY: z.string().min(1),
   S3_PUBLIC_URL: z.string().url(),
+  // Wrong value here silently breaks rate limiting in one of two directions —
+  // see isTrustProxyValue above. Defaults to false: correct for a process
+  // exposed directly, and the safe direction to be wrong in.
+  TRUST_PROXY: z
+    .preprocess(blankToUndefined, z.string().optional())
+    .refine((value) => value === undefined || isTrustProxyValue(value), {
+      message:
+        'TRUST_PROXY must be "false", a hop count such as "1", or a comma-separated list of proxy addresses/CIDRs ' +
+        'such as "10.0.0.0/8,loopback". "true" is rejected: it trusts a client-supplied X-Forwarded-For, which lets ' +
+        'any caller forge their rate-limit identity.',
+    })
+    .transform(parseTrustProxy),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   // Comma-separated browser origins allowed by CORS. Defaults to the local

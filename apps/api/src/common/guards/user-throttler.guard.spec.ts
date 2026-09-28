@@ -1,46 +1,92 @@
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { ThrottlerModuleOptions, ThrottlerStorage } from '@nestjs/throttler';
 
 import { UserThrottlerGuard } from './user-throttler.guard';
 
 /**
- * The guard is an APP_GUARD and runs before JwtAuthGuard, so req.user is never
- * populated when it keys the request. It must derive the user from the bearer
- * token itself, or two users behind one NAT share every per-user limit.
+ * These cover the tracker only — the rest of ThrottlerGuard is the library's.
+ *
+ * The case that matters: this guard is an APP_GUARD, so Nest runs it before
+ * JwtAuthGuard and `req.user` is always undefined when getTracker is called.
+ * Every request on every route was therefore keyed by IP, which quietly turned
+ * "one location update per minute per user" into "per IP" — two people behind
+ * one NAT blocked each other, and an anonymous caller could spend the bucket.
  */
 describe('UserThrottlerGuard.getTracker', () => {
-  const jwt = new JwtService({ secret: 'test-secret-that-is-long-enough-for-hs256' });
-  const guard = new UserThrottlerGuard(
-    { throttlers: [{ ttl: 60_000, limit: 10 }] },
-    {} as any,
-    new Reflector(),
-    jwt,
-  );
-  const tracker = (req: any) => (guard as any).getTracker(req) as Promise<string>;
+  const secret = 'test-secret-that-is-at-least-32-chars-long';
+  const jwtService = new JwtService({ secret });
 
-  it('keys by the sub of a valid bearer token even though req.user is not set yet', async () => {
-    const token = await jwt.signAsync({ sub: 'user-1', role: 'SHOPPER' });
-    await expect(tracker({ ip: '1.1.1.1', headers: { authorization: `Bearer ${token}` } })).resolves.toBe('user:user-1');
+  function guardWith(jwt: JwtService = jwtService): UserThrottlerGuard {
+    return new UserThrottlerGuard(
+      [{ name: 'default', ttl: 60_000, limit: 300 }] as unknown as ThrottlerModuleOptions,
+      { increment: jest.fn() } as unknown as ThrottlerStorage,
+      new Reflector(),
+      jwt,
+    );
+  }
+
+  // getTracker is protected; these tests exercise it the way the base class does.
+  const track = (guard: UserThrottlerGuard, req: unknown): Promise<string> =>
+    (guard as unknown as { getTracker(req: unknown): Promise<string> }).getTracker(req);
+
+  it('keys by the token subject when req.user is not populated yet (the APP_GUARD case)', async () => {
+    const token = await jwtService.signAsync({ sub: 'user-1', role: 'SHOPPER' });
+
+    const tracker = await track(guardWith(), {
+      ip: '10.0.0.1',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(tracker).toBe('user:user-1');
   });
 
-  it('two users on the same IP get different keys', async () => {
-    const a = await jwt.signAsync({ sub: 'user-a' });
-    const b = await jwt.signAsync({ sub: 'user-b' });
-    const ka = await tracker({ ip: '1.1.1.1', headers: { authorization: `Bearer ${a}` } });
-    const kb = await tracker({ ip: '1.1.1.1', headers: { authorization: `Bearer ${b}` } });
-    expect(ka).not.toBe(kb);
+  it('gives two users on the same IP separate buckets', async () => {
+    const guard = guardWith();
+    const headersFor = async (sub: string) => ({
+      authorization: `Bearer ${await jwtService.signAsync({ sub, role: 'SHOPPER' })}`,
+    });
+
+    const first = await track(guard, { ip: '10.0.0.1', headers: await headersFor('user-1') });
+    const second = await track(guard, { ip: '10.0.0.1', headers: await headersFor('user-2') });
+
+    expect(first).not.toBe(second);
   });
 
-  it('falls back to the IP for a forged or expired token', async () => {
-    const forged = await new JwtService({ secret: 'another-secret-entirely-not-the-real-one' }).signAsync({ sub: 'attacker' });
-    await expect(tracker({ ip: '1.1.1.1', headers: { authorization: `Bearer ${forged}` } })).resolves.toBe('ip:1.1.1.1');
+  it('prefers req.user when a route-level guard has already populated it', async () => {
+    const tracker = await track(guardWith(), {
+      ip: '10.0.0.1',
+      user: { id: 'user-from-request' },
+      headers: { authorization: 'Bearer nonsense' },
+    });
+
+    expect(tracker).toBe('user:user-from-request');
   });
 
-  it('falls back to the IP with no Authorization header', async () => {
-    await expect(tracker({ ip: '2.2.2.2', headers: {} })).resolves.toBe('ip:2.2.2.2');
+  it('falls back to the IP for an anonymous caller', async () => {
+    expect(await track(guardWith(), { ip: '10.0.0.1', headers: {} })).toBe('ip:10.0.0.1');
+    expect(await track(guardWith(), {})).toBe('ip:unknown');
   });
 
-  it('prefers req.user when a later guard already populated it', async () => {
-    await expect(tracker({ ip: '1.1.1.1', user: { id: 'user-9' }, headers: {} })).resolves.toBe('user:user-9');
+  it('falls back to the IP rather than trusting an unverifiable token', async () => {
+    const forged = await new JwtService({ secret: 'a-different-secret-of-sufficient-length' }).signAsync({
+      sub: 'attacker-chosen-id',
+    });
+    const expired = await jwtService.signAsync({ sub: 'user-1' }, { expiresIn: '-1s' });
+
+    // A forged sub would otherwise hand the caller a fresh bucket per request.
+    expect(await track(guardWith(), { ip: '10.0.0.1', headers: { authorization: `Bearer ${forged}` } })).toBe(
+      'ip:10.0.0.1',
+    );
+    expect(await track(guardWith(), { ip: '10.0.0.1', headers: { authorization: `Bearer ${expired}` } })).toBe(
+      'ip:10.0.0.1',
+    );
+    expect(await track(guardWith(), { ip: '10.0.0.1', headers: { authorization: 'Basic abc' } })).toBe('ip:10.0.0.1');
+  });
+
+  it('prefers the forwarded client address over the socket address when one is present', async () => {
+    expect(await track(guardWith(), { ip: '10.0.0.1', ips: ['203.0.113.7', '10.0.0.1'], headers: {} })).toBe(
+      'ip:203.0.113.7',
+    );
   });
 });
