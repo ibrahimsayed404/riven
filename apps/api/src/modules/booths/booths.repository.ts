@@ -110,8 +110,8 @@ export class BoothsRepository {
     });
   }
 
-  findPublicLayoutByBazaarId(bazaarId: string): Promise<PublicBoothLayout | null> {
-    return this.prisma.boothLayout.findUnique({
+  async findPublicLayoutByBazaarId(bazaarId: string): Promise<PublicBoothLayout | null> {
+    const layout = await this.prisma.boothLayout.findUnique({
       where: { bazaarId },
       include: {
         booths: {
@@ -123,6 +123,8 @@ export class BoothsRepository {
                     id: true,
                     name: true,
                     logo: true,
+                    verified: true,
+                    deletedAt: true,
                   },
                 },
               },
@@ -131,5 +133,20 @@ export class BoothsRepository {
         },
       },
     });
+    if (!layout) return null;
+
+    // A booth stays occupied, but a revoked or self-deleted vendor is not shown
+    // to shoppers — same rule as every other public read.
+    return {
+      ...layout,
+      booths: layout.booths.map(({ boothListing, ...booth }) => {
+        if (!boothListing) return { ...booth, boothListing: null };
+        const { verified, deletedAt, ...vendor } = boothListing.vendor;
+        return {
+          ...booth,
+          boothListing: verified && !deletedAt ? { ...boothListing, vendor } : null,
+        };
+      }),
+    };
   }
 }

@@ -15,6 +15,13 @@ import { VendorsService } from '../vendors/vendors.service';
 import { UsersRepository } from './users.repository';
 import { UserProfileResponse } from './dto/user-profile-response.dto';
 
+/** An owner-deleted account is gone for moderation purposes: it can be neither suspended nor restored. */
+const userDeleted = () =>
+  new BadRequestException({
+    code: 'USER_DELETED',
+    message: 'This account was deleted by its owner and cannot be changed.',
+  });
+
 @Injectable()
 export class UsersService {
   constructor(
@@ -44,6 +51,7 @@ export class UsersService {
       phone: user.phone,
       role: user.role,
       interests: user.interests,
+      isActive: user.isActive,
       location,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
@@ -64,6 +72,7 @@ export class UsersService {
       phone: user.phone,
       role: user.role,
       interests: user.interests,
+      isActive: user.isActive,
       location,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
@@ -126,6 +135,7 @@ export class UsersService {
       phone: user.phone,
       role: user.role,
       interests: user.interests,
+      isActive: user.isActive,
       location: null, // Omitted in list view to avoid N+1 queries; available in detail view
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
@@ -158,15 +168,19 @@ export class UsersService {
       });
     }
 
-    // Already deactivated: 204 no-op, no audit row (specs/admin-module-spec.md §4.4).
     if (user.deletedAt) {
+      throw userDeleted();
+    }
+
+    // Already deactivated: 204 no-op, no audit row (specs/admin-module-spec.md §4.4).
+    if (!user.isActive) {
       return;
     }
 
-    // Revoke every refresh token, then soft-delete. Existing access tokens die
-    // on their next request because the auth lookups now exclude deletedAt.
+    // Revoke every refresh token, then suspend. Existing access tokens die on
+    // their next request because JwtStrategy only resolves active users.
     await this.authService.revokeAllSessions(targetId);
-    await this.usersRepository.softDelete(targetId);
+    await this.usersRepository.deactivate(targetId);
 
     await this.auditService.record({
       actorId: adminId,
@@ -186,8 +200,12 @@ export class UsersService {
       });
     }
 
+    if (user.deletedAt) {
+      throw userDeleted();
+    }
+
     // Already active: 204 no-op, no audit row.
-    if (!user.deletedAt) {
+    if (user.isActive) {
       return;
     }
 

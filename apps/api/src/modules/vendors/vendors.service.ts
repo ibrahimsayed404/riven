@@ -12,6 +12,8 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 import { pageMeta } from '../../common/dto/pagination-query.dto';
+import { changedFields } from '../../common/changed-fields';
+import { AdminUpdateVendorDto } from './dto/admin-update-vendor.dto';
 
 const vendorProfileNotFound = () =>
   new NotFoundException({ code: 'VENDOR_PROFILE_NOT_FOUND', message: 'Vendor profile not found.' });
@@ -58,7 +60,13 @@ export class VendorsService {
       hasFixedLocation: updateDto.hasFixedLocation,
     });
 
-    await this.searchIndexQueue.enqueue({ type: 'VENDOR', id: vendor.id });
+    // Product documents carry vendorName, so a rename must re-index them too
+    // (same rule as the admin edit, updateVendorForAdmin).
+    const renamed = updateDto.businessName !== undefined && updateDto.businessName !== vendor.name;
+    await this.searchIndexQueue.enqueueMany([
+      { type: 'VENDOR', id: vendor.id },
+      ...(renamed ? [{ type: 'VENDOR_PRODUCTS' as const, vendorId: vendor.id }] : []),
+    ]);
 
     const location = await this.vendorsRepository.findVendorLocation(vendor.id);
     return { ...updated, location };
@@ -102,6 +110,54 @@ export class VendorsService {
   }
 
   // --- Admin moderation (specs/admin-module-spec.md §3, §4.1) ---
+
+  /** Admin detail (specs/admin-module-spec2.md A1): any moderation state, soft-deleted included. */
+  async getVendorForAdmin(id: string) {
+    const vendor = await this.vendorsRepository.findByIdForAdmin(id);
+    if (!vendor) {
+      throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
+    }
+
+    const [location, productCount] = await Promise.all([
+      this.vendorsRepository.findVendorLocation(vendor.id),
+      this.vendorsRepository.countProducts(vendor.id),
+    ]);
+    return { ...vendor, location, productCount };
+  }
+
+  /**
+   * Admin edit (specs/admin-module-spec3.md B2): text and image fields only.
+   * Verification is never touched — a verified vendor stays verified.
+   */
+  async updateVendorForAdmin(adminId: string, id: string, dto: AdminUpdateVendorDto) {
+    const vendor = await this.vendorsRepository.findByIdForAdmin(id);
+    if (!vendor || vendor.deletedAt) {
+      throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
+    }
+
+    const { businessName, ...rest } = dto;
+    const changes = changedFields(vendor, { name: businessName, ...rest });
+    if (Object.keys(changes).length === 0) {
+      return this.getVendorForAdmin(id);
+    }
+
+    await this.vendorsRepository.update(id, changes);
+
+    // Product documents carry vendorName, so a rename must re-index them too.
+    await this.searchIndexQueue.enqueueMany([
+      { type: 'VENDOR', id },
+      ...(changes.name !== undefined ? [{ type: 'VENDOR_PRODUCTS' as const, vendorId: id }] : []),
+    ]);
+
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.VENDOR_EDITED,
+      targetType: AdminTargetType.VENDOR,
+      targetId: id,
+    });
+
+    return this.getVendorForAdmin(id);
+  }
 
   async listForAdmin(params: {
     status?: VendorModerationStatus;
@@ -233,10 +289,9 @@ export class VendorsService {
       basePrice: createDto.basePrice,
       images: createDto.images,
       isActive: createDto.isActive ?? true,
-      approvalStatus: 'PENDING',
     });
-    // A new product is PENDING, so this resolves to "not eligible" → no-op on the
-    // index. Enqueued anyway: eligibility is decided in one place, not here.
+    // No approval gate: the product is immediately eligible, subject only to
+    // isActive / vendor.verified (product decision, specs/vendor-module-spec2.md).
     await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: product.id });
     return product;
   }
@@ -257,12 +312,7 @@ export class VendorsService {
     // getMyProduct ensures it exists and belongs to the vendor
     await this.getMyProduct(ownerId, productId);
 
-    const updated = await this.vendorsRepository.updateProduct(productId, {
-      ...updateDto,
-      approvalStatus: 'PENDING',
-      rejectionReason: null,
-    });
-    // Reset to PENDING means the sync job *removes* it from the index until re-approved.
+    const updated = await this.vendorsRepository.updateProduct(productId, updateDto);
     await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
     return updated;
   }

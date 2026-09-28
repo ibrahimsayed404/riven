@@ -79,6 +79,18 @@ const adminVendorRowSelect = {
 
 export type AdminVendorRow = Prisma.VendorGetPayload<{ select: typeof adminVendorRowSelect }>;
 
+// Admin detail: the full profile in any moderation state, soft-deleted
+// included (deletedAt tells the admin). /admin/* only, never public.
+const adminVendorDetailSelect = {
+  ...vendorProfileSelect,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  owner: { select: { id: true, name: true, email: true, isActive: true } },
+} satisfies Prisma.VendorSelect;
+
+export type AdminVendorDetail = Prisma.VendorGetPayload<{ select: typeof adminVendorDetailSelect }>;
+
 /** pending = unverified with no reason; rejected = unverified with a reason. */
 export type VendorModerationStatus = 'pending' | 'verified' | 'rejected';
 
@@ -177,6 +189,19 @@ export class VendorsRepository {
     });
   }
 
+  /** Admin detail: no verified/deletedAt filter — admin sees every state. */
+  findByIdForAdmin(id: string): Promise<AdminVendorDetail | null> {
+    return this.prisma.vendor.findUnique({
+      where: { id },
+      select: adminVendorDetailSelect,
+    });
+  }
+
+  /** Non-deleted product count of one vendor, for the admin detail view. */
+  countProducts(vendorId: string): Promise<number> {
+    return this.prisma.product.count({ where: { vendorId, deletedAt: null } });
+  }
+
   async findManyForAdmin(params: {
     status?: VendorModerationStatus;
     search?: string;
@@ -244,8 +269,7 @@ export class VendorsRepository {
     });
   }
 
-  // "All statuses" means every approvalStatus — not deleted rows. A deleted
-  // product must not be editable or re-submitted for approval (fix.js LOGIC-02).
+  // A soft-deleted product must not be editable (fix.js LOGIC-02).
   findProductByIdAndVendor(productId: string, vendorId: string): Promise<(Product & { variants: ProductVariant[] }) | null> {
     return this.prisma.product.findFirst({
       where: {

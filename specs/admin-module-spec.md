@@ -7,6 +7,8 @@
 
 Written against `apps/api/prisma/schema.prisma` as of `776a583`, not `specs/schema.prisma`.
 
+> **Superseded (product moderation):** everything below about a product moderation queue, `approve`/`reject`, and `pending.products` no longer reflects the code — product approval was removed by product decision, 2026-09-27. See `specs/vendor-module-spec2.md`. Vendor/organizer moderation (this file's §3) is unaffected.
+
 ---
 
 ## 0. What exists today, and what's missing

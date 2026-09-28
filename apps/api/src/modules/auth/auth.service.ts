@@ -1,4 +1,10 @@
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { compare, hash } from 'bcrypt';
@@ -46,6 +52,13 @@ type LoginResponse = {
     role: string;
   };
 };
+
+/** Admin-suspended account: the credentials are right, the account is not usable. */
+const accountDeactivatedException = () =>
+  new ForbiddenException({
+    code: 'ACCOUNT_DEACTIVATED',
+    message: 'Your account has been deactivated. Contact support.',
+  });
 
 @Injectable()
 export class AuthService {
@@ -188,6 +201,12 @@ export class AuthService {
       throw invalidCredentialsException;
     }
 
+    // Checked after the password on purpose: a correct password proves
+    // ownership, so telling this person they are suspended reveals nothing.
+    if (!user.isActive) {
+      throw accountDeactivatedException();
+    }
+
     const accessToken = await this.jwtService.signAsync({
       sub: user.id,
       role: user.role,
@@ -228,6 +247,10 @@ export class AuthService {
 
     if (!user) {
       throw invalidRefreshTokenException;
+    }
+
+    if (!user.isActive) {
+      throw accountDeactivatedException();
     }
 
     const accessToken = await this.jwtService.signAsync({

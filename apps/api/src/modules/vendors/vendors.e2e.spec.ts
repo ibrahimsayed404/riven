@@ -184,7 +184,7 @@ describe('VendorsModule (e2e)', () => {
     expect(audit).toBe(1);
   });
 
-  it('/vendors/me/products (POST) - succeeds for verified vendor', async () => {
+  it('/vendors/me/products (POST) - succeeds for verified vendor and is immediately public (no approval gate)', async () => {
     const res = await request(app.getHttpServer())
       .post('/vendors/me/products')
       .set('Authorization', `Bearer ${vendorToken}`)
@@ -196,81 +196,42 @@ describe('VendorsModule (e2e)', () => {
         images: []
       })
       .expect(201);
-      
+
     productId = res.body.id;
-    expect(res.body.approvalStatus).toBe('PENDING');
+    expect(res.body).not.toHaveProperty('approvalStatus');
+
+    const publicList = await request(app.getHttpServer()).get('/products').expect(200);
+    expect(publicList.body.data.some((p: any) => p.id === productId)).toBe(true);
   });
 
-  it('/admin/products?approvalStatus=PENDING (GET) - queue lists the new product; public list does not', async () => {
+  it('/admin/products (GET) - lists the product for the admin view too', async () => {
     const queue = await request(app.getHttpServer())
-      .get('/admin/products?approvalStatus=PENDING')
+      .get('/admin/products?vendorId=' + vendorId)
       .set('Authorization', `Bearer ${adminToken}`)
       .expect(200);
     const row = queue.body.data.find((p: any) => p.id === productId);
     expect(row).toBeDefined();
     expect(row.vendor).toEqual({ id: vendorId, name: 'Vendor One Shop', verified: true });
-
-    const publicList = await request(app.getHttpServer()).get('/products').expect(200);
-    expect(publicList.body.data.some((p: any) => p.id === productId)).toBe(false);
-
-    await request(app.getHttpServer())
-      .get('/admin/products?approvalStatus=MAYBE')
-      .set('Authorization', `Bearer ${adminToken}`)
-      .expect(400);
   });
 
-  it('/admin/products/:id/reject (PATCH) - admin reject persists reason; audit row written; repeat is a no-op', async () => {
-    const res = await request(app.getHttpServer())
-      .patch(`/admin/products/${productId}/reject`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .send({ reason: 'Inappropriate content' })
-      .expect(200);
-
-    expect(res.body.approvalStatus).toBe('REJECTED');
-    expect(res.body.rejectionReason).toBe('Inappropriate content');
-
-    await request(app.getHttpServer())
-      .patch(`/admin/products/${productId}/reject`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .send({ reason: 'Inappropriate content' })
-      .expect(200);
-
-    const audit = await prisma.adminAuditLog.findMany({ where: { targetId: productId } });
-    expect(audit).toHaveLength(1);
-    expect(audit[0]).toMatchObject({ action: 'PRODUCT_REJECTED', targetType: 'PRODUCT', reason: 'Inappropriate content' });
-
-    const vendorCheck = await request(app.getHttpServer())
-      .get(`/vendors/me/products/${productId}`)
-      .set('Authorization', `Bearer ${vendorToken}`)
-      .expect(200);
-      
-    expect(vendorCheck.body.approvalStatus).toBe('REJECTED');
-    expect(vendorCheck.body.rejectionReason).toBe('Inappropriate content');
-  });
-
-  it('/vendors/me/products/:id (PATCH) - edit resets approvalStatus to PENDING', async () => {
+  it('/vendors/me/products/:id (PATCH) - edit does not hide the product', async () => {
     const res = await request(app.getHttpServer())
       .patch(`/vendors/me/products/${productId}`)
       .set('Authorization', `Bearer ${vendorToken}`)
       .send({ title: 'Fixed Product' })
       .expect(200);
-      
-    expect(res.body.approvalStatus).toBe('PENDING');
-    expect(res.body.rejectionReason).toBeNull();
+
+    expect(res.body.title).toBe('Fixed Product');
+
+    const publicDetail = await request(app.getHttpServer()).get(`/products/${productId}`).expect(200);
+    expect(publicDetail.body.title).toBe('Fixed Product');
   });
 
   it('/products (GET) - excludes products from unverified vendors', async () => {
-    // Approve the product first
-    await request(app.getHttpServer())
-      .patch(`/admin/products/${productId}/approve`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .expect(200);
-
-    // List products
     const listRes = await request(app.getHttpServer())
       .get('/products')
       .expect(200);
-      
+
     expect(listRes.body.data.some((p: any) => p.id === productId)).toBe(true);
 
     // Unverify vendor (manually via DB since we don't have an endpoint for it)

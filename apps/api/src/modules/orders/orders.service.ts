@@ -1,8 +1,9 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { OrderStatus, RatingTargetType } from '@prisma/client';
+import { AdminAction, AdminTargetType, OrderStatus, RatingTargetType } from '@prisma/client';
 
 import { pageMeta } from '../../common/dto/pagination-query.dto';
-import { OrdersRepository } from './orders.repository';
+import { AuditService } from '../audit/audit.service';
+import { AdminOrderDetail, OrdersRepository } from './orders.repository';
 
 // Valid forward transitions
 export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
@@ -27,7 +28,10 @@ const orderStateChanged = () =>
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
 
-  constructor(private readonly ordersRepository: OrdersRepository) {}
+  constructor(
+    private readonly ordersRepository: OrdersRepository,
+    private readonly auditService: AuditService,
+  ) {}
 
   validateTransition(currentStatus: OrderStatus, newStatus: OrderStatus) {
     const allowed = ORDER_STATUS_TRANSITIONS[currentStatus];
@@ -166,5 +170,64 @@ export class OrdersService {
   /** Admin overview: orders per status, one query. */
   countByStatus(): Promise<{ status: OrderStatus; count: number }[]> {
     return this.ordersRepository.groupByStatus();
+  }
+
+  // --- Admin: reads (specs/admin-module-spec2.md A5) and unpaid-order cancel
+  // (spec3 B6). No refunds and no other status overrides. ---
+
+  async listForAdmin(params: {
+    status?: OrderStatus;
+    vendorId?: string;
+    userId?: string;
+    orderGroupId?: string;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.ordersRepository.findManyForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
+  }
+
+  async getOrderForAdmin(orderId: string): Promise<AdminOrderDetail> {
+    const order = await this.ordersRepository.findByIdForAdmin(orderId);
+    if (!order) {
+      throw orderNotFound();
+    }
+    return order;
+  }
+
+  /**
+   * Admin cancel (specs/admin-module-spec3.md B6): unpaid orders only, same rule
+   * as the shopper's cancel. Reuses cancelPendingGroup, which is group-level —
+   * every PENDING order of that checkout, across vendors (fix.js PAY-01) — and
+   * restores stock in one Serializable transaction. No refunds: a PAID order is
+   * refused. Audits one row per order actually cancelled.
+   */
+  async cancelOrderForAdmin(adminId: string, orderId: string) {
+    const order = await this.getOrderForAdmin(orderId);
+    if (order.status === 'CANCELLED') {
+      return { ...order, cancelledOrderIds: [] as string[] };
+    }
+    if (order.status !== 'PENDING') {
+      throw new BadRequestException({
+        code: 'ORDER_NOT_CANCELLABLE',
+        message: 'Only unpaid (PENDING) orders can be cancelled; refunds are not available yet.',
+      });
+    }
+
+    const { cancelledOrderIds } = await this.ordersRepository.cancelPendingGroup(order.orderGroupId);
+    if (!cancelledOrderIds.includes(order.id)) {
+      throw orderStateChanged();
+    }
+
+    for (const cancelledId of cancelledOrderIds) {
+      await this.auditService.record({
+        actorId: adminId,
+        action: AdminAction.ORDER_CANCELLED,
+        targetType: AdminTargetType.ORDER,
+        targetId: cancelledId,
+      });
+    }
+
+    return { ...(await this.getOrderForAdmin(orderId)), cancelledOrderIds };
   }
 }

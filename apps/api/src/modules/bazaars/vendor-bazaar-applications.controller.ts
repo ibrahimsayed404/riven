@@ -30,12 +30,3 @@ export class VendorBazaarApplicationsController {
   ) {
     return this.bazaarsService.withdrawApplication(ownerId, bazaarId);
   }
-
-  @Get('vendors/me/bazaar-applications')
-  getApplications(
-    @CurrentUser('id') ownerId: string,
-    @Query() query: ListApplicationsQueryDto,
-  ) {
-    return this.bazaarsService.getVendorApplications(ownerId, query.page ?? 1, query.limit ?? 10, query.status);
-  }
-}

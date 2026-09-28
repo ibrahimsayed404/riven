@@ -3,6 +3,7 @@ import { AdminAction, AdminTargetType } from '@prisma/client';
 
 import { AuditService } from '../audit/audit.service';
 import { pageMeta } from '../../common/dto/pagination-query.dto';
+import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { OrganizersRepository, OrganizerProfile, OrganizerModerationStatus } from './organizers.repository';
 
 @Injectable()
@@ -10,6 +11,7 @@ export class OrganizersService {
   constructor(
     private readonly organizersRepository: OrganizersRepository,
     private readonly auditService: AuditService,
+    private readonly searchIndexQueue: SearchIndexQueue,
   ) {}
 
   async getOrganizerByOwnerId(ownerId: string): Promise<OrganizerProfile> {
@@ -35,12 +37,14 @@ export class OrganizersService {
 
   /**
    * Called when the owning user account is deleted (fix.js LOGIC-05). Their
-   * PUBLISHED bazaars are left as they are — bazaar visibility never depended
-   * on the organizer row (admin spec Open Item 3), and cancelling live events
-   * with accepted vendors is a product decision, not a side effect.
+   * bazaars keep their status, but a deleted organizer hides them everywhere
+   * (specs/admin-module-spec3.md B8b, bazaar-visibility.ts), so re-index them.
    */
   async softDeleteByOwner(ownerId: string): Promise<void> {
-    await this.organizersRepository.softDeleteByOwner(ownerId);
+    const organizerId = await this.organizersRepository.softDeleteByOwner(ownerId);
+    if (organizerId) {
+      await this.searchIndexQueue.enqueue({ type: 'ORGANIZER_BAZAARS', organizerId });
+    }
   }
 
   // --- Admin moderation (specs/admin-module-spec.md §3, §4.2) ---
@@ -74,8 +78,9 @@ export class OrganizersService {
   /**
    * One transition function for verify and reject. Idempotent: when the target
    * state equals the current one nothing is written or audited.
-   * No search work: bazaar eligibility never reads organizer.verified
-   * (bazaars.repository.ts listPublicIds) — verification only gates creation.
+   * A flip of `verified` flips every one of their bazaars' visibility (spec3 B8b:
+   * reject hides them, verify restores them — bazaar status is never touched),
+   * so it fans out a BAZAAR re-index; a reason-only change needs none.
    */
   private async moderateOrganizer(
     adminId: string,
@@ -95,6 +100,10 @@ export class OrganizersService {
     }
 
     const updated = await this.organizersRepository.update(id, target);
+
+    if (current.verified !== target.verified) {
+      await this.searchIndexQueue.enqueue({ type: 'ORGANIZER_BAZAARS', organizerId: id });
+    }
 
     await this.auditService.record({
       actorId: adminId,

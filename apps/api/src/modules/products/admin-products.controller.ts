@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Query, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -8,7 +8,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { ProductsService } from './products.service';
 import { AdminListProductsQueryDto } from './dto/admin-list-products-query.dto';
-import { RejectProductDto } from './dto/reject-product.dto';
+import { AdminUpdateProductDto } from './dto/admin-update-product.dto';
 
 @Controller('admin/products')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -16,30 +16,35 @@ import { RejectProductDto } from './dto/reject-product.dto';
 export class AdminProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
-  /** Moderation queue. `?approvalStatus=PENDING` is the "needs a decision" view. */
   @Get()
   listProducts(@Query() query: AdminListProductsQueryDto) {
     return this.productsService.listForAdmin({
-      approvalStatus: query.approvalStatus,
       vendorId: query.vendorId,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
     });
   }
 
-  @Patch(':id/approve')
-  @HttpCode(HttpStatus.OK)
-  approveProduct(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
-    return this.productsService.approveProduct(admin.id, id);
+  /** Inactive and soft-deleted included (specs/admin-module-spec2.md A2). */
+  @Get(':id')
+  getProduct(@Param('id') id: string) {
+    return this.productsService.getProductForAdmin(id);
   }
 
-  @Patch(':id/reject')
-  @HttpCode(HttpStatus.OK)
-  rejectProduct(
+  /** Text and images only; approval state is untouched (specs/admin-module-spec3.md B2). */
+  @Patch(':id')
+  updateProduct(
     @CurrentUser() admin: AuthenticatedUser,
     @Param('id') id: string,
-    @Body() rejectDto: RejectProductDto,
+    @Body() dto: AdminUpdateProductDto,
   ) {
-    return this.productsService.rejectProduct(admin.id, id, rejectDto.reason);
+    return this.productsService.updateProductForAdmin(admin.id, id, dto);
+  }
+
+  /** Soft delete; repeating it is a no-op (specs/admin-module-spec3.md B3a). */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteProduct(@CurrentUser() admin: AuthenticatedUser, @Param('id') id: string) {
+    return this.productsService.deleteProductForAdmin(admin.id, id);
   }
 }

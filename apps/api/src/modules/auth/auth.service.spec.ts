@@ -15,6 +15,7 @@ const user = {
   name: 'Shopper',
   role: Role.SHOPPER,
   passwordHash: '$2b$12$hash',
+  isActive: true,
   createdAt: new Date('2026-01-01'),
 } as any;
 
@@ -125,9 +126,41 @@ describe('AuthService', () => {
       });
       expect(bcrypt.compare).not.toHaveBeenCalled();
     });
+
+    it('an admin-deactivated user with the right password gets 403 ACCOUNT_DEACTIVATED', async () => {
+      repository.findUserByEmail.mockResolvedValue({ ...user, isActive: false });
+
+      await expect(service.login({ email: 'shopper@example.com', password: 'Password1' })).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'ACCOUNT_DEACTIVATED' },
+      });
+      expect(repository.createRefreshToken).not.toHaveBeenCalled();
+    });
+
+    it('a deactivated user with the WRONG password still gets INVALID_CREDENTIALS (no enumeration)', async () => {
+      repository.findUserByEmail.mockResolvedValue({ ...user, isActive: false });
+      (bcrypt.compare as jest.Mock).mockResolvedValueOnce(false);
+
+      await expect(service.login({ email: 'shopper@example.com', password: 'nope' })).rejects.toMatchObject({
+        response: { code: 'INVALID_CREDENTIALS' },
+      });
+    });
   });
 
   describe('refresh (AUTH-01)', () => {
+    it('rejects a valid token whose user has since been deactivated', async () => {
+      repository.findRefreshTokenByHash.mockResolvedValue({
+        id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() + 60_000),
+      } as any);
+      repository.findUserById.mockResolvedValue({ ...user, isActive: false });
+
+      await expect(service.refresh({ refreshToken: 'abc' })).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'ACCOUNT_DEACTIVATED' },
+      });
+      expect(repository.rotateRefreshToken).not.toHaveBeenCalled();
+    });
+
     it('rejects a valid token whose user has since been soft-deleted', async () => {
       repository.findRefreshTokenByHash.mockResolvedValue({
         id: 'rt-1', userId: 'user-1', revokedAt: null, expiresAt: new Date(Date.now() + 60_000),

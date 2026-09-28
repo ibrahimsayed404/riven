@@ -20,8 +20,9 @@ export class AuthRepository {
   findAuthenticatedUserById(
     id: string,
   ): Promise<Pick<User, 'id' | 'email' | 'name' | 'role'> | null> {
+    // Suspended users are excluded too: their access tokens die on the next request.
     return this.prisma.user.findFirst({
-      where: { id, deletedAt: null },
+      where: { id, deletedAt: null, isActive: true },
       select: {
         id: true,
         email: true,

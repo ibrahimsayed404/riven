@@ -24,6 +24,7 @@ const mockUser = {
   interests: ['fashion', 'tech'],
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
+  isActive: true,
   deletedAt: null,
 };
 
@@ -40,6 +41,7 @@ function createMockRepository(): jest.Mocked<UsersRepository> {
     updateLocation: jest.fn(),
     findUserLocation: jest.fn(),
     softDelete: jest.fn(),
+    deactivate: jest.fn(),
     reactivate: jest.fn(),
     findManyPaginated: jest.fn(),
   } as unknown as jest.Mocked<UsersRepository>;
@@ -76,6 +78,7 @@ describe('UsersService', () => {
         phone: '+201012345678',
         role: Role.SHOPPER,
         interests: ['fashion', 'tech'],
+        isActive: true,
         location: { lat: 30.0444, lng: 31.2357 },
         createdAt: mockUser.createdAt,
         updatedAt: mockUser.updatedAt,
@@ -162,17 +165,18 @@ describe('UsersService', () => {
       await expect(
         service.deactivateUser('admin-1', 'admin-1'),
       ).rejects.toThrow(BadRequestException);
-      expect(repository.softDelete).not.toHaveBeenCalled();
+      expect(repository.deactivate).not.toHaveBeenCalled();
     });
 
-    it('succeeds for a different user and records USER_DEACTIVATED', async () => {
+    it('suspends a different user (isActive=false, not deletedAt), revokes sessions, records USER_DEACTIVATED', async () => {
       repository.findById.mockResolvedValue(mockUser);
-      repository.softDelete.mockResolvedValue(mockUser);
+      repository.deactivate.mockResolvedValue({ ...mockUser, isActive: false });
 
       await expect(
         service.deactivateUser('admin-1', 'user-1'),
       ).resolves.toBeUndefined();
-      expect(repository.softDelete).toHaveBeenCalledWith('user-1');
+      expect(repository.deactivate).toHaveBeenCalledWith('user-1');
+      expect(repository.softDelete).not.toHaveBeenCalled();
       expect(authService.revokeAllSessions).toHaveBeenCalledWith('user-1');
       expect(auditService.record).toHaveBeenCalledWith({
         actorId: 'admin-1',
@@ -183,13 +187,22 @@ describe('UsersService', () => {
     });
 
     it('is a no-op for an already-deactivated user: no write, no audit', async () => {
-      repository.findById.mockResolvedValue({ ...mockUser, deletedAt: new Date() });
+      repository.findById.mockResolvedValue({ ...mockUser, isActive: false });
 
       await expect(
         service.deactivateUser('admin-1', 'user-1'),
       ).resolves.toBeUndefined();
-      expect(repository.softDelete).not.toHaveBeenCalled();
+      expect(repository.deactivate).not.toHaveBeenCalled();
       expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('rejects an owner-deleted account with USER_DELETED', async () => {
+      repository.findById.mockResolvedValue({ ...mockUser, deletedAt: new Date() });
+
+      await expect(service.deactivateUser('admin-1', 'user-1')).rejects.toMatchObject({
+        response: { code: 'USER_DELETED' },
+      });
+      expect(repository.deactivate).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException for non-existent target user', async () => {
@@ -203,10 +216,7 @@ describe('UsersService', () => {
 
   describe('reactivateUser', () => {
     it('succeeds for a deactivated user and records USER_REACTIVATED', async () => {
-      repository.findById.mockResolvedValue({
-        ...mockUser,
-        deletedAt: new Date(),
-      });
+      repository.findById.mockResolvedValue({ ...mockUser, isActive: false });
       repository.reactivate.mockResolvedValue(mockUser);
 
       await expect(service.reactivateUser('admin-1', 'user-1')).resolves.toBeUndefined();
@@ -225,6 +235,15 @@ describe('UsersService', () => {
       await expect(service.reactivateUser('admin-1', 'user-1')).resolves.toBeUndefined();
       expect(repository.reactivate).not.toHaveBeenCalled();
       expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('cannot resurrect an owner-deleted account: USER_DELETED', async () => {
+      repository.findById.mockResolvedValue({ ...mockUser, deletedAt: new Date() });
+
+      await expect(service.reactivateUser('admin-1', 'user-1')).rejects.toMatchObject({
+        response: { code: 'USER_DELETED' },
+      });
+      expect(repository.reactivate).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException for non-existent user', async () => {

@@ -14,7 +14,7 @@ type RequestLike = {
   ip?: string;
   ips?: string[];
   user?: { id?: string };
-  headers?: Record<string, unknown>;
+  headers?: Record<string, string | string[] | undefined>;
 };
 
 const BEARER = 'Bearer ';
@@ -58,14 +58,21 @@ export class UserThrottlerGuard extends ThrottlerGuard {
 
   /** The `sub` of a valid, unexpired access token, or null for anything else. */
   private async userIdFromBearerToken(req: RequestLike): Promise<string | null> {
-    const header = req.headers?.authorization;
+    const raw = req.headers?.authorization;
+    const header = Array.isArray(raw) ? raw[0] : raw;
+
     if (typeof header !== 'string' || !header.startsWith(BEARER)) {
       return null;
     }
 
     try {
-      const payload = await this.jwtService.verifyAsync<{ sub?: unknown }>(header.slice(BEARER.length));
-      return typeof payload.sub === 'string' && payload.sub.length > 0 ? payload.sub : null;
+      const payload = await this.jwtService.verifyAsync<{ sub?: unknown }>(
+        header.slice(BEARER.length),
+      );
+
+      return typeof payload.sub === 'string' && payload.sub.length > 0
+        ? payload.sub
+        : null;
     } catch {
       return null;
     }

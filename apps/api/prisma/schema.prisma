@@ -129,12 +129,6 @@ enum VendorCategory {
   OTHER
 }
 
-enum ApprovalStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
 enum OrderStatus {
   PENDING
   PAID
@@ -155,6 +149,27 @@ enum AdminAction {
   PRODUCT_REJECTED
   USER_DEACTIVATED
   USER_REACTIVATED
+  CATEGORY_CREATED
+  CATEGORY_UPDATED
+  // Admin Part B (specs/admin-module-spec3.md)
+  VENDOR_EDITED
+  PRODUCT_EDITED
+  PRODUCT_DELETED
+  CATEGORY_DELETED
+  RATING_DELETED
+  RATING_COMMENT_CLEARED
+  APPLICATION_ACCEPTED
+  APPLICATION_REJECTED
+  ORDER_CANCELLED
+  BAZAAR_CANCELLED
+  BOOTH_LAYOUT_CREATED
+  BOOTH_LAYOUT_UPDATED
+  BOOTH_CREATED
+  BOOTH_UPDATED
+  BOOTH_DELETED
+  BOOTH_ASSIGNED
+  BOOTH_UNASSIGNED
+  SEARCH_REINDEX_REQUESTED
 }
 
 enum AdminTargetType {
@@ -162,6 +177,14 @@ enum AdminTargetType {
   ORGANIZER
   PRODUCT
   USER
+  CATEGORY
+  // Admin Part B (specs/admin-module-spec3.md)
+  RATING
+  APPLICATION
+  ORDER
+  BAZAAR
+  BOOTH
+  SEARCH_INDEX
 }
 
 // ----------------------------------------------------------------------------
@@ -175,6 +198,10 @@ model User {
   phone        String?                                @unique
   passwordHash String
   role         Role
+  // Admin suspension (PATCH /admin/users/:id/deactivate). Distinct from deletedAt,
+  // which is the owner's own DELETE /users/me — a suspended user gets a clear
+  // ACCOUNT_DEACTIVATED at login, a deleted one looks like it never existed.
+  isActive     Boolean                                @default(true)
   // GIST index required: CREATE INDEX user_location_gist ON "User" USING GIST (location);
   location     Unsupported("geography(Point, 4326)")?
   interests    String[]                               @default([])
@@ -282,9 +309,7 @@ model Product {
   basePrice   Decimal  @db.Decimal(12, 2)
   images      String[]
 
-  approvalStatus  ApprovalStatus @default(PENDING)
-  rejectionReason String?
-  isActive        Boolean        @default(true)
+  isActive Boolean @default(true)
 
   variants   ProductVariant[]
   cartItems  CartItem[]
@@ -359,6 +384,8 @@ model Bazaar {
   scheduleType   ScheduleType
   recurrenceRule String? // e.g. iCal RRULE string, required if scheduleType = RECURRING
   startDate      DateTime
+  // CHECK bazaars_end_date_not_before_start (migration SQL only, Prisma can't model it):
+  // endDate IS NULL OR endDate >= startDate.
   endDate        DateTime?
   status         BazaarStatus                          @default(DRAFT)
 

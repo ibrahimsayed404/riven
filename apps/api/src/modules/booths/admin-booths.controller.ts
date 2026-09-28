@@ -3,6 +3,8 @@ import { BoothsService } from './booths.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { Role } from '@prisma/client';
 import { CreateBoothLayoutDto } from './dto/create-booth-layout.dto';
 import { UpdateBoothLayoutDto } from './dto/update-booth-layout.dto';
@@ -10,6 +12,7 @@ import { CreateBoothDto } from './dto/create-booth.dto';
 import { UpdateBoothDto } from './dto/update-booth.dto';
 import { AssignBoothDto } from './dto/assign-booth.dto';
 
+// Every write here is audited with the acting admin (specs/admin-module-spec3.md B8c).
 @Controller('admin')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.ADMIN)
@@ -17,8 +20,16 @@ export class AdminBoothsController {
   constructor(private readonly boothsService: BoothsService) {}
 
   @Post('bazaars/:bazaarId/layout')
-  createLayout(@Param('bazaarId') bazaarId: string, @Body() dto: CreateBoothLayoutDto) {
-    return this.boothsService.createLayout(bazaarId, dto.gridConfig);
+  createLayout(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('bazaarId') bazaarId: string,
+    @Body() dto: CreateBoothLayoutDto,
+  ) {
+    return this.boothsService.createLayout(
+      admin.id,
+      bazaarId,
+      dto.gridConfig as any,
+    );
   }
 
   @Get('bazaars/:bazaarId/layout')
@@ -27,32 +38,58 @@ export class AdminBoothsController {
   }
 
   @Patch('bazaars/:bazaarId/layout')
-  updateLayout(@Param('bazaarId') bazaarId: string, @Body() dto: UpdateBoothLayoutDto) {
-    return this.boothsService.updateLayout(bazaarId, dto.gridConfig);
+  updateLayout(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('bazaarId') bazaarId: string,
+    @Body() dto: UpdateBoothLayoutDto,
+  ) {
+    return this.boothsService.updateLayout(
+      admin.id,
+      bazaarId,
+      dto.gridConfig as any,
+    );
   }
 
   @Post('bazaars/:bazaarId/layout/booths')
-  createBooth(@Param('bazaarId') bazaarId: string, @Body() dto: CreateBoothDto) {
-    return this.boothsService.createBooth(bazaarId, dto);
+  createBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('bazaarId') bazaarId: string,
+    @Body() dto: CreateBoothDto,
+  ) {
+    return this.boothsService.createBooth(admin.id, bazaarId, dto);
   }
 
   @Patch('booths/:id')
-  updateBooth(@Param('id') id: string, @Body() dto: UpdateBoothDto) {
-    return this.boothsService.updateBooth(id, dto);
+  updateBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateBoothDto,
+  ) {
+    return this.boothsService.updateBooth(admin.id, id, dto);
   }
 
   @Delete('booths/:id')
-  deleteBooth(@Param('id') id: string) {
-    return this.boothsService.deleteBooth(id);
+  deleteBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.boothsService.deleteBooth(admin.id, id);
   }
 
   @Patch('booths/:id/assign')
-  assignBooth(@Param('id') id: string, @Body() dto: AssignBoothDto) {
-    return this.boothsService.assignBooth(id, dto.boothListingId);
+  assignBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: AssignBoothDto,
+  ) {
+    return this.boothsService.assignBooth(admin.id, id, dto.boothListingId);
   }
 
   @Patch('booths/:id/unassign')
-  unassignBooth(@Param('id') id: string) {
-    return this.boothsService.unassignBooth(id);
+  unassignBooth(
+    @CurrentUser() admin: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.boothsService.unassignBooth(admin.id, id);
   }
 }

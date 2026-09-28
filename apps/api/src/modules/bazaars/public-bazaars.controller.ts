@@ -8,7 +8,7 @@ export class PublicBazaarsController {
 
   @Get()
   getBazaars(@Query() query: ListBazaarsQueryDto) {
-    const { page = 1, limit = 10, ...filters } = query;
+    const { page = 1, limit = 20, ...filters } = query;
     return this.bazaarsService.getPublicBazaars(page, limit, filters);
   }
 

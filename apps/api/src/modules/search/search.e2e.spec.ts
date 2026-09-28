@@ -9,7 +9,7 @@ import * as request from 'supertest';
 
 import { AppModule } from '../../app.module';
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { SEARCH_INDEXES } from '../../infra/search/search-index.config';
+import { SEARCH_INDEXES, SEARCH_INDEX_SETTINGS } from '../../infra/search/search-index.config';
 import { SearchIndexRegistry } from '../../infra/search/search-index.registry';
 import { SEARCH_SYNC_QUEUE } from '../../infra/search/search-sync.job';
 
@@ -88,7 +88,6 @@ describe('SearchModule (e2e)', () => {
     description?: string;
     categoryId: string;
     basePrice: number;
-    approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
     isActive?: boolean;
     variants?: { sku: string; size?: string; color?: string; priceOverride?: number }[];
   }): Promise<string> {
@@ -100,7 +99,6 @@ describe('SearchModule (e2e)', () => {
         categoryId: opts.categoryId,
         basePrice: opts.basePrice,
         images: ['https://cdn.example/1.jpg'],
-        approvalStatus: opts.approvalStatus ?? 'APPROVED',
         isActive: opts.isActive ?? true,
         variants: opts.variants
           ? { create: opts.variants.map((v) => ({ sku: v.sku, size: v.size, color: v.color, priceOverride: v.priceOverride })) }
@@ -139,9 +137,26 @@ describe('SearchModule (e2e)', () => {
     return id;
   }
 
+  // deleteIndex only *enqueues* a Meilisearch task; waitTask makes the drop
+  // actually happen before we go on (a missing index just yields a failed task).
   async function dropTestIndexes() {
     for (const name of SEARCH_INDEXES) {
-      await registry.client.deleteIndexIfExists(registry.uid(name));
+      await registry.client.deleteIndex(registry.uid(name)).waitTask();
+    }
+  }
+
+  /**
+   * Drop leftovers from an earlier run, then recreate each index WITH its
+   * settings. app.init() already bootstrapped (and flagged search ready), so
+   * after a bare drop nothing would re-apply settings: the first document write
+   * auto-creates an index with no filterable attributes, and every filtered
+   * search 500s ("Attribute `scheduleType` is not filterable").
+   */
+  async function resetTestIndexes() {
+    await dropTestIndexes();
+    for (const name of SEARCH_INDEXES) {
+      await registry.client.createIndex(registry.uid(name), { primaryKey: 'id' }).waitTask();
+      await registry.index(name).updateSettings(SEARCH_INDEX_SETTINGS[name]).waitTask();
     }
   }
 
@@ -174,7 +189,7 @@ describe('SearchModule (e2e)', () => {
 
     // Leftover jobs from an earlier run would race this one.
     await queue.obliterate({ force: true });
-    await dropTestIndexes();
+    await resetTestIndexes();
 
     await prisma.favorite.deleteMany();
     await prisma.productVariant.deleteMany();
@@ -275,13 +290,6 @@ describe('SearchModule (e2e)', () => {
       categoryId: womenCategoryId,
       basePrice: 2000,
     });
-    ids.pending = await seedProduct({
-      vendorId: verifiedVendorId,
-      title: 'Pending linen dress',
-      categoryId: maxiCategoryId,
-      basePrice: 300,
-      approvalStatus: 'PENDING',
-    });
     ids.inactive = await seedProduct({
       vendorId: verifiedVendorId,
       title: 'Inactive linen dress',
@@ -289,7 +297,7 @@ describe('SearchModule (e2e)', () => {
       basePrice: 300,
       isActive: false,
     });
-    // Approved but owned by an unverified vendor: must not be searchable.
+    // Owned by an unverified vendor: must not be searchable.
     ids.hidden = await seedProduct({
       vendorId: unverifiedVendorId,
       title: 'Hidden linen dress',
@@ -323,8 +331,7 @@ describe('SearchModule (e2e)', () => {
   // ---------------------------------------------------------------------------
 
   describe('index membership', () => {
-    it('indexes only approved, active products of verified vendors', async () => {
-      await waitForIndexed('products', ids.pending, false, 2_000);
+    it('indexes only active products of verified vendors', async () => {
       await waitForIndexed('products', ids.inactive, false, 2_000);
       await waitForIndexed('products', ids.hidden, false, 2_000);
     });
@@ -353,22 +360,7 @@ describe('SearchModule (e2e)', () => {
   // ---------------------------------------------------------------------------
 
   describe('sync', () => {
-    it('approving a product adds it; rejecting removes it', async () => {
-      const approve = await request(app.getHttpServer())
-        .patch(`/admin/products/${ids.pending}/approve`)
-        .set('Authorization', `Bearer ${adminToken}`);
-      expect(approve.status).toBe(200);
-      await waitForIndexed('products', ids.pending, true);
-
-      const reject = await request(app.getHttpServer())
-        .patch(`/admin/products/${ids.pending}/reject`)
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ reason: 'not now' });
-      expect(reject.status).toBe(200);
-      await waitForIndexed('products', ids.pending, false);
-    });
-
-    it('verifying a vendor indexes the vendor and fans out to its approved products', async () => {
+    it('verifying a vendor indexes the vendor and fans out to its products', async () => {
       const res = await request(app.getHttpServer())
         .patch(`/admin/vendors/${unverifiedVendorId}/verify`)
         .set('Authorization', `Bearer ${adminToken}`);
@@ -378,7 +370,7 @@ describe('SearchModule (e2e)', () => {
       await waitForIndexed('products', ids.hidden, true);
     });
 
-    it('a vendor editing a product resets it to PENDING and drops it from the index', async () => {
+    it('a vendor editing a product re-indexes it without dropping it (no approval gate)', async () => {
       const vendorToken = await jwtService.signAsync({ sub: unverifiedOwnerId, role: Role.VENDOR });
       const res = await request(app.getHttpServer())
         .patch(`/vendors/me/products/${ids.hidden}`)
@@ -386,7 +378,15 @@ describe('SearchModule (e2e)', () => {
         .send({ title: 'Hidden linen dress v2' });
       expect(res.status).toBe(200);
 
-      await waitForIndexed('products', ids.hidden, false);
+      // Already indexed before the edit, so poll for the new title rather than presence.
+      const deadline = Date.now() + 15_000;
+      let title: unknown;
+      while (Date.now() < deadline) {
+        title = (await registry.index('products').getDocument(ids.hidden).catch(() => null))?.title;
+        if (title === 'Hidden linen dress v2') break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(title).toBe('Hidden linen dress v2');
     });
   });
 
@@ -421,9 +421,16 @@ describe('SearchModule (e2e)', () => {
     });
 
     it('category=<slug> matches the whole subtree', async () => {
-      const res = await request(app.getHttpServer()).get('/search/products').query({ q: 'dress', category: 'women' });
-      expect(res.status).toBe(200);
-      expect(res.body.hits.map((h: { id: string }) => h.id)).toEqual(expect.arrayContaining([ids.linen, ids.arabic]));
+      // `q` is required and no single term hits both fixtures (the Arabic one has
+      // no English text, and there are no synonyms), so check each depth separately:
+      // linen sits two levels down (women › dresses › maxi-dresses), arabic directly under women.
+      const deep = await request(app.getHttpServer()).get('/search/products').query({ q: 'dress', category: 'women' });
+      expect(deep.status).toBe(200);
+      expect(deep.body.hits.map((h: { id: string }) => h.id)).toContain(ids.linen);
+
+      const direct = await request(app.getHttpServer()).get('/search/products').query({ q: 'فستان', category: 'women' });
+      expect(direct.status).toBe(200);
+      expect(direct.body.hits.map((h: { id: string }) => h.id)).toContain(ids.arabic);
     });
 
     it('filters by size and color', async () => {
@@ -553,6 +560,124 @@ describe('SearchModule (e2e)', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .send({ types: ['events'] });
       expect(res.status).toBe(400);
+    });
+
+    it('audits one SEARCH_REINDEX_REQUESTED row per index, with the acting admin (spec3 B8c)', async () => {
+      const before = await prisma.adminAuditLog.count({ where: { action: 'SEARCH_REINDEX_REQUESTED' } });
+
+      const res = await request(app.getHttpServer())
+        .post('/admin/search/reindex')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ types: ['vendors'] });
+      expect(res.status).toBe(202);
+
+      const rows = await prisma.adminAuditLog.findMany({
+        where: { action: 'SEARCH_REINDEX_REQUESTED' },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(rows).toHaveLength(before + 1);
+      expect(rows[0]).toMatchObject({ targetType: 'SEARCH_INDEX', targetId: 'vendors' });
+      const admin = await prisma.user.findFirstOrThrow({ where: { role: Role.ADMIN, email: { contains: 'search' } } });
+      expect(rows[0].actorId).toBe(admin.id);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Category edits reach the index (admin-module-spec2 A7: CATEGORY_PRODUCTS fan-out)
+  // ---------------------------------------------------------------------------
+
+  describe('admin category re-slug', () => {
+    /** Polls the product's document until `check` holds — the fan-out is two async hops. */
+    async function waitForProductDoc(id: string, check: (doc: Record<string, unknown>) => boolean, timeoutMs = 15_000) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const doc = (await registry.index('products').getDocument(id)) as Record<string, unknown>;
+        if (check(doc)) return doc;
+        if (Date.now() > deadline) throw new Error(`Timed out: product ${id} document is ${JSON.stringify(doc)}`);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+
+    const patchSlug = (slug: string) =>
+      request(app.getHttpServer())
+        .patch(`/admin/categories/${maxiCategoryId}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ slug });
+
+    it('re-indexes products under the category, and category=<new slug> finds them', async () => {
+      await waitForIndexed('products', ids.linen, true);
+      try {
+        expect((await patchSlug('maxi-gowns')).status).toBe(200);
+
+        const doc = await waitForProductDoc(ids.linen, (d) => d.categorySlug === 'maxi-gowns');
+        expect(doc.categoryPath).toEqual(['women', 'dresses', 'maxi-gowns']);
+
+        const res = await request(app.getHttpServer()).get('/search/products').query({ q: 'linen', category: 'maxi-gowns' });
+        expect(res.status).toBe(200);
+        expect(res.body.hits.map((h: { id: string }) => h.id)).toContain(ids.linen);
+      } finally {
+        // beforeAll upserts by slug: leave the fixture as the next run expects it.
+        await patchSlug('maxi-dresses');
+        await waitForProductDoc(ids.linen, (d) => d.categorySlug === 'maxi-dresses');
+      }
+    });
+
+    // spec3 B2: product documents carry vendorName, so an admin vendor rename must
+    // fan out to the vendor's products (VENDOR_PRODUCTS), not just re-index the vendor.
+    it('admin vendor rename updates vendorName on the vendor\'s product documents', async () => {
+      await waitForIndexed('products', ids.linen, true);
+      const renameTo = (businessName: string) =>
+        request(app.getHttpServer())
+          .patch(`/admin/vendors/${verifiedVendorId}`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({ businessName });
+      try {
+        expect((await renameTo('Nour Studio')).status).toBe(200);
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Studio');
+      } finally {
+        await renameTo('Nour Atelier');
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Atelier');
+      }
+    });
+
+    // Same fan-out when the vendor renames their own shop (PATCH /vendors/me): the
+    // live endpoint run on 2026-09-26 found product documents keeping the old name.
+    it('vendor self-rename also updates vendorName on their product documents', async () => {
+      await waitForIndexed('products', ids.linen, true);
+      const { ownerId } = await prisma.vendor.findUniqueOrThrow({ where: { id: verifiedVendorId }, select: { ownerId: true } });
+      const vendorToken = await jwtService.signAsync({ sub: ownerId, role: Role.VENDOR });
+      const renameTo = (businessName: string) =>
+        request(app.getHttpServer())
+          .patch('/vendors/me')
+          .set('Authorization', `Bearer ${vendorToken}`)
+          .send({ businessName });
+      try {
+        expect((await renameTo('Nour Loom')).status).toBe(200);
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Loom');
+      } finally {
+        await renameTo('Nour Atelier');
+        await waitForProductDoc(ids.linen, (d) => d.vendorName === 'Nour Atelier');
+      }
+    });
+
+    // spec3 B8b: organizer.verified gates bazaar visibility; reject/verify fan out
+    // ORGANIZER_BAZAARS so the documents follow without the bazaar row changing.
+    it('organizer reject removes their bazaar documents; re-verify restores them', async () => {
+      await waitForIndexed('bazaars', ids.bazaarNear, true);
+      const moderate = (verb: 'verify' | 'reject') =>
+        request(app.getHttpServer())
+          .patch(`/admin/organizers/${organizerId}/${verb}`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(verb === 'reject' ? { reason: 'Fraud report' } : {});
+      try {
+        expect((await moderate('reject')).status).toBe(200);
+        await waitForIndexed('bazaars', ids.bazaarNear, false);
+        await waitForIndexed('bazaars', ids.bazaarFar, false);
+      } finally {
+        expect((await moderate('verify')).status).toBe(200);
+        await waitForIndexed('bazaars', ids.bazaarNear, true);
+        await waitForIndexed('bazaars', ids.bazaarFar, true);
+      }
     });
   });
 });

@@ -1,11 +1,23 @@
 import { Injectable } from '@nestjs/common';
-import { Cart, CartItem, Product, ProductVariant } from '@prisma/client';
+import { Cart, CartItem, Prisma, Product, ProductVariant } from '@prisma/client';
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { ACTIVE_VARIANT_WHERE, PUBLIC_PRODUCT_WHERE } from '../products/product-visibility';
+import {
+  ACTIVE_VARIANT_WHERE,
+  PUBLIC_PRODUCT_SELECT,
+  PUBLIC_PRODUCT_WHERE,
+  PUBLIC_VARIANT_SELECT,
+} from '../products/product-visibility';
+
+// The cart is a shopper view: it carries the same public product/variant
+// fields as GET /products/:id, never moderation or soft-delete bookkeeping.
+const cartItemInclude = {
+  product: { select: PUBLIC_PRODUCT_SELECT },
+  variant: { select: PUBLIC_VARIANT_SELECT },
+} satisfies Prisma.CartItemInclude;
 
 export type CartItemWithDetails = CartItem & {
-  product: Product;
-  variant: ProductVariant;
+  product: Prisma.ProductGetPayload<{ select: typeof PUBLIC_PRODUCT_SELECT }>;
+  variant: Prisma.ProductVariantGetPayload<{ select: typeof PUBLIC_VARIANT_SELECT }>;
 };
 
 export type CartWithItems = Cart & {
@@ -22,12 +34,7 @@ export class CartRepository {
       update: {},
       create: { userId },
       include: {
-        items: {
-          include: {
-            product: true,
-            variant: true,
-          },
-        },
+        items: { include: cartItemInclude },
       },
     });
     return cart;
@@ -37,12 +44,7 @@ export class CartRepository {
     return this.prisma.cart.findUnique({
       where: { userId },
       include: {
-        items: {
-          include: {
-            product: true,
-            variant: true,
-          },
-        },
+        items: { include: cartItemInclude },
       },
     });
   }

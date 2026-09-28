@@ -10,7 +10,7 @@
 
 - **Cart model: multi-vendor — CONFIRMED.** A single cart can hold items from multiple vendors. At checkout, the cart splits into one `Order` per vendor (sub-orders), sharing an `OrderGroup` for grouping in the UI and for a single Paymob payment intent.
 - **Categories: managed taxonomy table — CONFIRMED.** `Product.category` is a relation to a `Category` model, not a free string. See Section 2b.
-- **Approval-gated visibility applies to Products**, consistent with existing Booth/Listing pattern — a `Product` is only visible to Shoppers once `approvalStatus = APPROVED`.
+- **Approval-gated visibility applies to Products** — ~~a `Product` is only visible to Shoppers once `approvalStatus = APPROVED`~~. **Superseded 2026-09-27** (`specs/vendor-module-spec2.md`): product approval was removed by product decision. A product is visible as soon as it's created, subject only to `isActive` and its vendor being verified.
 - **No multi-role accounts** — a Vendor account with `vendorType` including `MARKETPLACE` still just has one `User` row with `role = VENDOR`.
 
 ---

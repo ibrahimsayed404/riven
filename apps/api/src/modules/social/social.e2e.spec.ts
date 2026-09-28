@@ -146,6 +146,9 @@ describe('SocialModule (e2e)', () => {
         name: 'Artisan Goods',
         category: 'HOME_CRAFTS',
         vendorType: VendorType.MARKETPLACE,
+        // Follow/favorite need a publicly visible target (fix.js VULN-04): a
+        // verified vendor and, below, an APPROVED product.
+        verified: true,
       },
     });
     vendorId = vendor.id;

@@ -15,7 +15,7 @@ Shopper-only (`@Roles(Role.SHOPPER)`). One cart per user (schema already enforce
 **Endpoints:**
 - `GET /cart` — returns own cart with items, each item expanded with product title/current price/variant details (for display — but see Section 2 on why we don't trust this for checkout math).
 - `POST /cart/items` — add item: `{ productId, variantId, quantity }`. If `(cartId, variantId)` already exists (unique constraint), increment quantity instead of erroring — natural "add another one" behavior.
-  - Validate: product must be `approvalStatus: APPROVED`, `isActive: true`, `deletedAt: null`, and vendor `verified: true` (same visibility rule as public product browsing) — you can't add an invisible product to your cart.
+  - Validate: product must be `isActive: true`, `deletedAt: null`, and vendor `verified: true` (same visibility rule as public product browsing — products have no approval gate, product decision 2026-09-27) — you can't add an invisible product to your cart.
   - Validate: `quantity <= variant.stockQuantity` at add-time (soft check — stock can still change by checkout time, re-validated there; this is just early UX feedback, not the source of truth).
 - `PATCH /cart/items/:itemId` — update quantity. **`quantity: 0` removes the item** (same effect as DELETE) — one code path handles both reduce and remove, matching standard shopping-app UX (quantity stepper down to 0 = removed).
 - `DELETE /cart/items/:itemId` — remove one item.

@@ -11,6 +11,8 @@ import { UsersModule } from './users.module';
 import { UsersService } from './users.service';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { PrismaModule } from '../../infra/prisma/prisma.module';
+import { BazaarsModule } from '../bazaars/bazaars.module';
+import { VendorsModule } from '../vendors/vendors.module';
 
 // --------------------------------------------------------------------------
 // Test helpers
@@ -43,6 +45,16 @@ const mockJwtAuthGuard = {
 })
 class StubAuthModule {}
 
+// UsersModule imports VendorsModule and BazaarsModule only for services that the
+// real UsersService uses. UsersService is mocked here, so swap both for empty
+// modules — otherwise their own graphs (SearchIndexQueue, DomainEvents, BullMQ →
+// Redis) must be built just to be ignored.
+@Module({})
+class StubVendorsModule {}
+
+@Module({})
+class StubBazaarsModule {}
+
 const mockUsersService = {
   getProfile: jest.fn(),
   updateProfile: jest.fn(),
@@ -67,6 +79,10 @@ describe('Users Module (e2e)', () => {
     })
       .overrideModule(AuthModule)
       .useModule(StubAuthModule)
+      .overrideModule(VendorsModule)
+      .useModule(StubVendorsModule)
+      .overrideModule(BazaarsModule)
+      .useModule(StubBazaarsModule)
       .overrideProvider(UsersService)
       .useValue(mockUsersService)
       .overrideProvider(PrismaService)

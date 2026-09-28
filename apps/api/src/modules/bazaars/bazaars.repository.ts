@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import { Prisma, Bazaar, BoothListing, BazaarStatus, ApplicationStatus, ScheduleType } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { PUBLIC_BAZAAR_WHERE, PUBLIC_ORGANIZER_SQL, PUBLIC_ORGANIZER_WHERE } from './bazaar-visibility';
 
 export type BazaarWithLocation = Omit<Bazaar, 'location'> & {
   location: { lat: number; lng: number } | null;
@@ -25,6 +26,51 @@ export type VendorApplication = BoothListing & {
     location: { lat: number; lng: number } | null;
   };
 };
+
+// Admin row: every scalar column (Prisma can't select the geography one — the
+// page's locations are merged in from one raw query) plus the organizer, so the
+// list renders without a second request. /admin/* only, never public.
+const adminBazaarRowSelect = {
+  id: true,
+  organizerId: true,
+  name: true,
+  description: true,
+  coverMedia: true,
+  scheduleType: true,
+  recurrenceRule: true,
+  startDate: true,
+  endDate: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  organizer: { select: { id: true, name: true, verified: true } },
+} satisfies Prisma.BazaarSelect;
+
+export type AdminBazaarRow = Prisma.BazaarGetPayload<{ select: typeof adminBazaarRowSelect }> & {
+  location: { lat: number; lng: number } | null;
+};
+
+export type AdminBazaarDetail = AdminBazaarRow & {
+  applicationCounts: Record<ApplicationStatus, number>;
+  hasLayout: boolean;
+};
+
+// Admin application row: the listing plus enough of both sides — and the booth,
+// if one is assigned — to render without a second request. /admin/* only.
+const adminApplicationSelect = {
+  id: true,
+  bazaarId: true,
+  vendorId: true,
+  applicationStatus: true,
+  appliedAt: true,
+  decidedAt: true,
+  bazaar: { select: { id: true, name: true, status: true, startDate: true } },
+  vendor: { select: { id: true, name: true, verified: true } },
+  booth: { select: { id: true, label: true } },
+} satisfies Prisma.BoothListingSelect;
+
+export type AdminApplication = Prisma.BoothListingGetPayload<{ select: typeof adminApplicationSelect }>;
 
 @Injectable()
 export class BazaarsRepository {
@@ -79,9 +125,34 @@ export class BazaarsRepository {
   /** A bazaar shoppers may rate: it has been published (running or finished) and is not deleted. */
   async isRateable(id: string): Promise<boolean> {
     const count = await this.prisma.bazaar.count({
-      where: { id, deletedAt: null, status: { in: [BazaarStatus.PUBLISHED, BazaarStatus.COMPLETED] } },
+      where: {
+        id,
+        deletedAt: null,
+        status: { in: [BazaarStatus.PUBLISHED, BazaarStatus.COMPLETED] },
+        organizer: PUBLIC_ORGANIZER_WHERE,
+      },
     });
     return count > 0;
+  }
+
+  /** The organizer half of the visibility rule, for callers that already hold a bazaar row. */
+  async hasPublicOrganizer(organizerId: string): Promise<boolean> {
+    const count = await this.prisma.organizer.count({ where: { id: organizerId, ...PUBLIC_ORGANIZER_WHERE } });
+    return count > 0;
+  }
+
+  /** Every bazaar of an organizer, any status, keyset-paged — for the ORGANIZER_BAZAARS fan-out. */
+  async listIdsByOrganizer(organizerId: string, cursor: string | null, take: number): Promise<IdPage> {
+    const where: Prisma.BazaarWhereInput = { organizerId };
+    const rows = await this.prisma.bazaar.findMany({
+      where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: take + 1,
+    });
+    const hasMore = rows.length > take;
+    const ids = rows.slice(0, take).map((row) => row.id);
+    return { ids, nextCursor: hasMore ? ids[ids.length - 1] : null };
   }
 
   async findPublicById(id: string): Promise<BazaarPublicDetail | null> {
@@ -89,9 +160,18 @@ export class BazaarsRepository {
     if (!bazaar || bazaar.status !== BazaarStatus.PUBLISHED || bazaar.deletedAt) {
       return null;
     }
+    if (!(await this.hasPublicOrganizer(bazaar.organizerId))) {
+      return null;
+    }
 
+    // A revoked or self-deleted vendor is invisible everywhere else; keep the
+    // bazaar page consistent with that.
     const listings = await this.prisma.boothListing.findMany({
-      where: { bazaarId: id, applicationStatus: ApplicationStatus.ACCEPTED },
+      where: {
+        bazaarId: id,
+        applicationStatus: ApplicationStatus.ACCEPTED,
+        vendor: { verified: true, deletedAt: null },
+      },
       include: {
         vendor: {
           select: {
@@ -159,6 +239,7 @@ export class BazaarsRepository {
     const conditions = [
       Prisma.sql`"status" = 'PUBLISHED'::"BazaarStatus"`,
       Prisma.sql`"deletedAt" IS NULL`,
+      PUBLIC_ORGANIZER_SQL, // spec3 B8b: a rejected or deleted organizer hides their bazaars
     ];
 
     if (filters.scheduleType) {
@@ -234,6 +315,7 @@ export class BazaarsRepository {
     const conditions = [
       Prisma.sql`"status" = 'PUBLISHED'::"BazaarStatus"`,
       Prisma.sql`"deletedAt" IS NULL`,
+      PUBLIC_ORGANIZER_SQL, // spec3 B8b: a rejected or deleted organizer hides their bazaars
     ];
 
     if (filters.scheduleType) {
@@ -330,6 +412,10 @@ export class BazaarsRepository {
   /**
    * Returns the ids it completed (not just a count) so the caller can drop
    * them from the search index — a COMPLETED bazaar is no longer public.
+   *
+   * A ONE_OFF bazaar with no endDate is a single-day event: it stays PUBLISHED
+   * for one day after startDate, the same grace window findNearby applies, so
+   * shoppers can still find it while it is running.
    */
   async transitionPastOneOffBazaars(): Promise<string[]> {
     const rows = await this.prisma.$queryRaw<{ id: string }[]>`
@@ -340,7 +426,7 @@ export class BazaarsRepository {
         AND (
           ("endDate" IS NOT NULL AND "endDate" < NOW())
           OR
-          ("endDate" IS NULL AND "startDate" < NOW())
+          ("endDate" IS NULL AND "startDate" < NOW() - INTERVAL '1 day')
         )
       RETURNING "id"
     `;
@@ -349,7 +435,7 @@ export class BazaarsRepository {
 
   /** Publicly visible bazaar ids, keyset-paged, for reindexing. */
   async listPublicIds(cursor: string | null, take: number): Promise<IdPage> {
-    const where: Prisma.BazaarWhereInput = { status: BazaarStatus.PUBLISHED, deletedAt: null };
+    const where: Prisma.BazaarWhereInput = PUBLIC_BAZAAR_WHERE;
     const rows = await this.prisma.bazaar.findMany({
       where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
       select: { id: true },
@@ -386,16 +472,6 @@ export class BazaarsRepository {
   deleteApplication(id: string): Promise<BoothListing> {
     return this.prisma.boothListing.delete({
       where: { id },
-    });
-  }
-
-  updateApplicationStatus(id: string, status: ApplicationStatus): Promise<BoothListing> {
-    return this.prisma.boothListing.update({
-      where: { id },
-      data: {
-        applicationStatus: status,
-        decidedAt: new Date(),
-      },
     });
   }
 
@@ -489,6 +565,116 @@ export class BazaarsRepository {
       });
       return { data, total };
     });
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A3) ---
+
+  /**
+   * Every bazaar regardless of organizer or status — DRAFT included, which no
+   * other route shows to anyone but its owner. Soft-deleted only on request.
+   */
+  async findManyForAdmin(params: {
+    status?: BazaarStatus;
+    organizerId?: string;
+    search?: string;
+    includeDeleted: boolean;
+    page: number;
+    limit: number;
+  }): Promise<{ data: AdminBazaarRow[]; total: number }> {
+    const where: Prisma.BazaarWhereInput = {};
+    if (!params.includeDeleted) where.deletedAt = null;
+    if (params.status) where.status = params.status;
+    if (params.organizerId) where.organizerId = params.organizerId;
+    if (params.search) where.name = { contains: params.search, mode: 'insensitive' };
+
+    const { rows, total } = await this.prisma.$transaction(async (tx) => {
+      const total = await tx.bazaar.count({ where });
+      const rows = await tx.bazaar.findMany({
+        where,
+        select: adminBazaarRowSelect,
+        orderBy: { createdAt: 'desc' },
+        skip: (params.page - 1) * params.limit,
+        take: params.limit,
+      });
+      return { rows, total };
+    });
+
+    const locations = await this.findLocationsByIds(rows.map((row) => row.id));
+    const data = rows.map((row) => ({ ...row, location: locations.get(row.id) ?? null }));
+    return { data, total };
+  }
+
+  /** Admin detail: no status/ownership/deletedAt filter. */
+  async findByIdForAdmin(id: string): Promise<AdminBazaarDetail | null> {
+    const bazaar = await this.prisma.bazaar.findUnique({
+      where: { id },
+      select: { ...adminBazaarRowSelect, boothLayout: { select: { id: true } } },
+    });
+    if (!bazaar) return null;
+
+    const [locations, grouped] = await Promise.all([
+      this.findLocationsByIds([id]),
+      this.prisma.boothListing.groupBy({
+        by: ['applicationStatus'],
+        where: { bazaarId: id },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const applicationCounts: Record<ApplicationStatus, number> = { PENDING: 0, ACCEPTED: 0, REJECTED: 0 };
+    for (const row of grouped) applicationCounts[row.applicationStatus] = row._count._all;
+
+    const { boothLayout, ...rest } = bazaar;
+    return { ...rest, location: locations.get(id) ?? null, applicationCounts, hasLayout: boothLayout !== null };
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A4) ---
+
+  /** Every application on every bazaar — no organizer or vendor scope. */
+  findApplicationsForAdmin(params: {
+    bazaarId?: string;
+    vendorId?: string;
+    status?: ApplicationStatus;
+    page: number;
+    limit: number;
+  }): Promise<{ data: AdminApplication[]; total: number }> {
+    const where: Prisma.BoothListingWhereInput = {};
+    if (params.bazaarId) where.bazaarId = params.bazaarId;
+    if (params.vendorId) where.vendorId = params.vendorId;
+    if (params.status) where.applicationStatus = params.status;
+
+    return this.prisma.$transaction(async (tx) => {
+      const total = await tx.boothListing.count({ where });
+      const data = await tx.boothListing.findMany({
+        where,
+        select: adminApplicationSelect,
+        orderBy: { appliedAt: 'desc' },
+        skip: (params.page - 1) * params.limit,
+        take: params.limit,
+      });
+      return { data, total };
+    });
+  }
+
+  findApplicationByIdForAdmin(id: string): Promise<AdminApplication | null> {
+    return this.prisma.boothListing.findUnique({
+      where: { id },
+      select: adminApplicationSelect,
+    });
+  }
+
+  /**
+   * Application decision, organizer or admin (spec3 B5): PENDING → status only.
+   * The status guard lives in the WHERE, so two concurrent decisions can't
+   * overwrite each other — the loser sees 0 rows and the service reports a
+   * conflict. Returns rows moved.
+   */
+  async transitionApplication(id: string, status: 'ACCEPTED' | 'REJECTED'): Promise<number> {
+    const { count } = await this.prisma.boothListing.updateMany({
+      where: { id, applicationStatus: ApplicationStatus.PENDING },
+      data: { applicationStatus: status, decidedAt: new Date() },
+    });
+    return count;
   }
 
   /** One GROUP BY, not one count per status. Excludes soft-deleted bazaars. */

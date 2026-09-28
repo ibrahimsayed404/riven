@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(pnpm typecheck 2>&1)",
+      "PowerShell(\\(Get-Command node -ErrorAction SilentlyContinue\\).Source; \\(Get-Command npx -ErrorAction SilentlyContinue\\).Source; Test-Path \"apps\\\\api\\\\node_modules\\\\.bin\\\\tsc.cmd\"; Test-Path \"node_modules\")",
+      "PowerShell(Test-Path \"apps\\\\api\\\\node_modules\"; \\(Get-Command pnpm, corepack -ErrorAction SilentlyContinue | Select-Object Name, Source | Format-Table -AutoSize | Out-String\\).Trim\\(\\))",
+      "PowerShell(corepack pnpm typecheck 2>&1)",
+      "PowerShell(corepack pnpm --filter @riven/api typecheck 2>&1)",
+      "PowerShell(foreach \\($p in 5433,6379\\) { $r = Test-NetConnection -ComputerName localhost -Port $p -InformationLevel Quiet -WarningAction SilentlyContinue; \"port $p open=$r\" }; \"docker: \" + [bool]\\(Get-Command docker -ErrorAction SilentlyContinue\\); \"env file: \" + \\(Test-Path \".env\"\\))",
+      "PowerShell(Copy-Item .env.example .env; \"created: \" + \\(Test-Path \".env\"\\))"
+    ]
+  }
+}

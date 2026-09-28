@@ -1,6 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { FavorableType, FollowableType } from '@prisma/client';
+import { AdminAction, AdminTargetType, FavorableType, FollowableType, RatingTargetType } from '@prisma/client';
 
+import { pageMeta } from '../../common/dto/pagination-query.dto';
+import { AuditService } from '../audit/audit.service';
 import { BazaarsService } from '../bazaars/bazaars.service';
 import { OrdersService } from '../orders/orders.service';
 import { ProductsService } from '../products/products.service';
@@ -16,7 +18,9 @@ import {
   GetRatingSummaryQueryDto,
   GetRatingsQueryDto,
 } from './dto';
-import { KeysetPage, SocialRepository } from './social.repository';
+import { AdminRatingRow, KeysetPage, SocialRepository } from './social.repository';
+
+const ratingNotFound = () => new NotFoundException({ code: 'RATING_NOT_FOUND', message: 'Rating not found.' });
 
 type Cursor = { s: string; id: string };
 
@@ -31,6 +35,7 @@ export class SocialService {
     private readonly vendorsService: VendorsService,
     private readonly bazaarsService: BazaarsService,
     private readonly productsService: ProductsService,
+    private readonly auditService: AuditService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -163,6 +168,63 @@ export class SocialService {
       })),
       nextCursor,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Admin (specs/admin-module-spec2.md A6) — read-only; delete / clear-comment is Open Item B3
+  // ---------------------------------------------------------------------------
+
+  async listRatingsForAdmin(params: {
+    targetType?: RatingTargetType;
+    targetId?: string;
+    userId?: string;
+    hasComment?: boolean;
+    maxScore?: number;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.socialRepository.findRatingsForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
+  }
+
+  /**
+   * Admin rating delete (specs/admin-module-spec3.md B3c): removes the rating —
+   * score and comment — for fake or abusive ratings. The average recomputes on read.
+   */
+  async deleteRatingForAdmin(adminId: string, id: string): Promise<void> {
+    if (!(await this.socialRepository.findRatingByIdForAdmin(id))) {
+      throw ratingNotFound();
+    }
+    await this.socialRepository.deleteRating(id);
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.RATING_DELETED,
+      targetType: AdminTargetType.RATING,
+      targetId: id,
+    });
+  }
+
+  /**
+   * Admin clear-comment (spec3 B3c): removes abusive text, keeps the score.
+   * A comment that is already null or empty is a no-op.
+   */
+  async clearRatingCommentForAdmin(adminId: string, id: string): Promise<AdminRatingRow> {
+    const rating = await this.socialRepository.findRatingByIdForAdmin(id);
+    if (!rating) {
+      throw ratingNotFound();
+    }
+    if (!rating.comment) {
+      return rating;
+    }
+
+    const cleared = await this.socialRepository.clearRatingComment(id);
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.RATING_COMMENT_CLEARED,
+      targetType: AdminTargetType.RATING,
+      targetId: id,
+    });
+    return cleared;
   }
 
   // ---------------------------------------------------------------------------

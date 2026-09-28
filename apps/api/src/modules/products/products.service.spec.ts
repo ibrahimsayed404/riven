@@ -1,4 +1,3 @@
-import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ProductsService } from './products.service';
 import { ProductsRepository } from './products.repository';
@@ -15,13 +14,15 @@ describe('ProductsService', () => {
     const productsRepositoryMock = {
       findManyPaginated: jest.fn(),
       findById: jest.fn(),
-      updateAdminStatus: jest.fn(),
       findForSearch: jest.fn(),
       findCategoryPath: jest.fn(),
       listIdsByVendor: jest.fn(),
       listPublicIds: jest.fn(),
-      findModerationState: jest.fn(),
+      findDeletionState: jest.fn(),
       findManyForAdmin: jest.fn(),
+      findByIdForAdmin: jest.fn(),
+      updateContentForAdmin: jest.fn(),
+      softDeleteForAdmin: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -63,101 +64,118 @@ describe('ProductsService', () => {
     });
   });
 
-  // specs/admin-module-spec.md §4.3 — idempotent approve/reject with audit.
-  describe('approveProduct / rejectProduct', () => {
-    const state = (approvalStatus: 'PENDING' | 'APPROVED' | 'REJECTED', rejectionReason: string | null, deletedAt: Date | null = null) =>
-      ({ id: 'prod-1', approvalStatus, rejectionReason, deletedAt }) as any;
-
-    beforeEach(() => {
-      productsRepository.updateAdminStatus.mockImplementation(async (_id, data: any) => ({ id: 'prod-1', ...data }) as any);
-    });
-
-    it('PENDING → approve: writes, enqueues, audits PRODUCT_APPROVED', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('PENDING', null));
-
-      const result = await service.approveProduct('admin-1', 'prod-1');
-
-      expect(productsRepository.updateAdminStatus).toHaveBeenCalledWith('prod-1', { approvalStatus: 'APPROVED', rejectionReason: null });
-      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'PRODUCT', id: 'prod-1' });
-      expect(auditService.record).toHaveBeenCalledWith({
-        actorId: 'admin-1', action: 'PRODUCT_APPROVED', targetType: 'PRODUCT', targetId: 'prod-1', reason: null,
-      });
-      expect(result).toEqual({ id: 'prod-1', approvalStatus: 'APPROVED', rejectionReason: null });
-    });
-
-    it('PENDING → reject: writes the reason, enqueues, audits PRODUCT_REJECTED with it', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('PENDING', null));
-
-      await service.rejectProduct('admin-1', 'prod-1', 'Blurry photos');
-
-      expect(productsRepository.updateAdminStatus).toHaveBeenCalledWith('prod-1', { approvalStatus: 'REJECTED', rejectionReason: 'Blurry photos' });
-      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'PRODUCT', id: 'prod-1' });
-      expect(auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'PRODUCT_REJECTED', reason: 'Blurry photos' }));
-    });
-
-    it('APPROVED → reject (revoke): enqueues so the product leaves the index', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('APPROVED', null));
-
-      await service.rejectProduct('admin-1', 'prod-1', 'Counterfeit');
-
-      expect(searchIndexQueue.enqueue).toHaveBeenCalledTimes(1);
-      expect(auditService.record).toHaveBeenCalledTimes(1);
-    });
-
-    it('APPROVED → approve: no-op — no write, no enqueue, no audit', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('APPROVED', null));
-
-      const result = await service.approveProduct('admin-1', 'prod-1');
-
-      expect(productsRepository.updateAdminStatus).not.toHaveBeenCalled();
-      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
-      expect(auditService.record).not.toHaveBeenCalled();
-      expect(result).toEqual({ id: 'prod-1', approvalStatus: 'APPROVED', rejectionReason: null });
-    });
-
-    it('REJECTED → reject with a different reason: writes + audits but does NOT enqueue (status unchanged)', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('REJECTED', 'Old'));
-
-      await service.rejectProduct('admin-1', 'prod-1', 'New');
-
-      expect(productsRepository.updateAdminStatus).toHaveBeenCalledWith('prod-1', { approvalStatus: 'REJECTED', rejectionReason: 'New' });
-      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
-      expect(auditService.record).toHaveBeenCalledWith(expect.objectContaining({ reason: 'New' }));
-    });
-
-    it('REJECTED → reject with the same reason: no-op', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('REJECTED', 'Same'));
-
-      await service.rejectProduct('admin-1', 'prod-1', 'Same');
-
-      expect(productsRepository.updateAdminStatus).not.toHaveBeenCalled();
-      expect(auditService.record).not.toHaveBeenCalled();
-    });
-
-    it('404 PRODUCT_NOT_FOUND when missing', async () => {
-      productsRepository.findModerationState.mockResolvedValue(null);
-
-      await expect(service.approveProduct('admin-1', 'nope')).rejects.toMatchObject({
-        response: { code: 'PRODUCT_NOT_FOUND' },
-      });
-    });
-
-    it('404 when soft-deleted — a deleted product is not moderatable (previously updated blindly)', async () => {
-      productsRepository.findModerationState.mockResolvedValue(state('PENDING', null, new Date()));
-
-      await expect(service.approveProduct('admin-1', 'prod-1')).rejects.toThrow(NotFoundException);
-      expect(productsRepository.updateAdminStatus).not.toHaveBeenCalled();
-    });
-  });
-
   describe('listForAdmin', () => {
     it('passes filters through and wraps the page in { data, meta }', async () => {
       productsRepository.findManyForAdmin.mockResolvedValue({ data: [], total: 5 });
 
-      const result = await service.listForAdmin({ approvalStatus: 'PENDING', page: 1, limit: 2 });
+      const result = await service.listForAdmin({ page: 1, limit: 2 });
 
-      expect(productsRepository.findManyForAdmin).toHaveBeenCalledWith({ approvalStatus: 'PENDING', page: 1, limit: 2 });
+      expect(productsRepository.findManyForAdmin).toHaveBeenCalledWith({ page: 1, limit: 2 });
       expect(result.meta).toEqual({ total: 5, page: 1, limit: 2, totalPages: 3 });
+    });
+  });
+
+  describe('updateProductForAdmin (specs/admin-module-spec3.md B2)', () => {
+    const existing = {
+      id: 'p1',
+      title: 'Dress',
+      description: 'Old',
+      images: ['a.jpg'],
+      deletedAt: null,
+    };
+
+    it('writes only the changed content fields, enqueues and audits after the write', async () => {
+      productsRepository.findByIdForAdmin.mockResolvedValue(existing as any);
+
+      await service.updateProductForAdmin('admin-1', 'p1', { title: 'Dress', description: 'New', images: ['a.jpg'] });
+
+      expect(productsRepository.updateContentForAdmin).toHaveBeenCalledWith('p1', { description: 'New' });
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'PRODUCT', id: 'p1' });
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'PRODUCT_EDITED',
+        targetType: 'PRODUCT',
+        targetId: 'p1',
+      });
+      expect(productsRepository.updateContentForAdmin.mock.invocationCallOrder[0]).toBeLessThan(
+        auditService.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('is a no-op when nothing changes: no write, no search job, no audit', async () => {
+      productsRepository.findByIdForAdmin.mockResolvedValue(existing as any);
+
+      await expect(
+        service.updateProductForAdmin('admin-1', 'p1', { title: 'Dress', images: ['a.jpg'] }),
+      ).resolves.toBe(existing);
+      expect(productsRepository.updateContentForAdmin).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 PRODUCT_NOT_FOUND for a missing or soft-deleted product', async () => {
+      for (const found of [null, { ...existing, deletedAt: new Date() }]) {
+        productsRepository.findByIdForAdmin.mockResolvedValueOnce(found as any);
+        await expect(service.updateProductForAdmin('admin-1', 'p1', { title: 'X' })).rejects.toMatchObject({
+          response: { code: 'PRODUCT_NOT_FOUND' },
+        });
+      }
+      expect(productsRepository.updateContentForAdmin).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deleteProductForAdmin (specs/admin-module-spec3.md B3a)', () => {
+    it('soft-deletes, re-indexes and audits after the write', async () => {
+      productsRepository.findDeletionState.mockResolvedValue({ id: 'p1', deletedAt: null } as any);
+
+      await service.deleteProductForAdmin('admin-1', 'p1');
+
+      expect(productsRepository.softDeleteForAdmin).toHaveBeenCalledWith('p1');
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'PRODUCT', id: 'p1' });
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'PRODUCT_DELETED',
+        targetType: 'PRODUCT',
+        targetId: 'p1',
+      });
+      expect(productsRepository.softDeleteForAdmin.mock.invocationCallOrder[0]).toBeLessThan(
+        auditService.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('an already deleted product is a no-op', async () => {
+      productsRepository.findDeletionState.mockResolvedValue({ id: 'p1', deletedAt: new Date() } as any);
+
+      await service.deleteProductForAdmin('admin-1', 'p1');
+
+      expect(productsRepository.softDeleteForAdmin).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 PRODUCT_NOT_FOUND for an unknown product', async () => {
+      productsRepository.findDeletionState.mockResolvedValue(null);
+      await expect(service.deleteProductForAdmin('admin-1', 'x')).rejects.toMatchObject({
+        response: { code: 'PRODUCT_NOT_FOUND' },
+      });
+    });
+  });
+
+  describe('getProductForAdmin', () => {
+    it('returns an inactive product without the public visibility filter', async () => {
+      productsRepository.findByIdForAdmin.mockResolvedValue({ id: 'p1', isActive: false } as any);
+
+      await expect(service.getProductForAdmin('p1')).resolves.toEqual({ id: 'p1', isActive: false });
+      expect(productsRepository.findByIdForAdmin).toHaveBeenCalledWith('p1');
+      expect(productsRepository.findById).not.toHaveBeenCalled();
+    });
+
+    it('throws a coded 404 for an unknown id', async () => {
+      productsRepository.findByIdForAdmin.mockResolvedValue(null);
+
+      await expect(service.getProductForAdmin('missing')).rejects.toMatchObject({
+        response: { code: 'PRODUCT_NOT_FOUND' },
+      });
     });
   });
 

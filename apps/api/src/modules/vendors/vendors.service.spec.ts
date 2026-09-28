@@ -32,6 +32,8 @@ describe('VendorsService', () => {
       findManyForAdmin: jest.fn(),
       findPublicById: jest.fn(),
       countPendingForAdmin: jest.fn(),
+      findByIdForAdmin: jest.fn(),
+      countProducts: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -84,26 +86,56 @@ describe('VendorsService', () => {
       expect(result).toEqual({ id: 'prod-1' });
       expect(vendorsRepository.createProduct).toHaveBeenCalledWith('vendor-1', expect.objectContaining({
         title: 'Test Product',
-        approvalStatus: 'PENDING',
       }));
     });
   });
 
   describe('updateProduct', () => {
-    it('should reset approvalStatus to PENDING', async () => {
+    it('writes exactly the given fields, with no approval reset', async () => {
       vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', verified: true } as any);
       vendorsRepository.findProductByIdAndVendor.mockResolvedValue({ id: 'prod-1', vendorId: 'vendor-1' } as any);
-      vendorsRepository.updateProduct.mockResolvedValue({ id: 'prod-1', approvalStatus: 'PENDING' } as any);
+      vendorsRepository.updateProduct.mockResolvedValue({ id: 'prod-1', title: 'Updated Title' } as any);
 
       await service.updateProduct('owner-1', 'prod-1', {
         title: 'Updated Title',
       });
 
-      expect(vendorsRepository.updateProduct).toHaveBeenCalledWith('prod-1', expect.objectContaining({
-        title: 'Updated Title',
-        approvalStatus: 'PENDING',
-        rejectionReason: null,
-      }));
+      expect(vendorsRepository.updateProduct).toHaveBeenCalledWith('prod-1', { title: 'Updated Title' });
+    });
+  });
+
+  describe('updateMyProfile', () => {
+    beforeEach(() => {
+      vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', name: 'Nour' } as any);
+      vendorsRepository.update.mockResolvedValue({ id: 'vendor-1' } as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue(null);
+    });
+
+    it('a rename also re-indexes the products, whose documents carry vendorName', async () => {
+      await service.updateMyProfile('owner-1', { businessName: 'Nour Atelier' });
+
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([
+        { type: 'VENDOR', id: 'vendor-1' },
+        { type: 'VENDOR_PRODUCTS', vendorId: 'vendor-1' },
+      ]);
+    });
+
+    it.each([
+      ['another field', { description: 'Linen' }],
+      ['the same name', { businessName: 'Nour' }],
+    ])('%s re-indexes the vendor only', async (_label, dto) => {
+      await service.updateMyProfile('owner-1', dto);
+
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([{ type: 'VENDOR', id: 'vendor-1' }]);
+    });
+
+    it('404s with VENDOR_PROFILE_NOT_FOUND when the owner has no vendor profile', async () => {
+      vendorsRepository.findByOwnerId.mockResolvedValue(null);
+
+      await expect(service.updateMyProfile('owner-1', { businessName: 'X' })).rejects.toMatchObject({
+        response: { code: 'VENDOR_PROFILE_NOT_FOUND' },
+      });
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
     });
   });
 
@@ -254,13 +286,108 @@ describe('VendorsService', () => {
     });
   });
 
+  describe('updateVendorForAdmin (specs/admin-module-spec3.md B2)', () => {
+    const verified = {
+      id: 'v1',
+      name: 'Old Shop',
+      description: 'Desc',
+      coverMedia: ['a.jpg'],
+      verified: true,
+      rejectionReason: null,
+      deletedAt: null,
+    };
+
+    beforeEach(() => {
+      vendorsRepository.findByIdForAdmin.mockResolvedValue(verified as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue(null);
+      vendorsRepository.countProducts.mockResolvedValue(0);
+    });
+
+    it('maps businessName to name, writes only changes, never touches verification, and re-indexes products on rename', async () => {
+      await service.updateVendorForAdmin('admin-1', 'v1', { businessName: 'New Shop', description: 'Desc' });
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('v1', { name: 'New Shop' });
+      const written = vendorsRepository.update.mock.calls[0][1] as Record<string, unknown>;
+      expect(written).not.toHaveProperty('verified');
+      expect(written).not.toHaveProperty('rejectionReason');
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([
+        { type: 'VENDOR', id: 'v1' },
+        { type: 'VENDOR_PRODUCTS', vendorId: 'v1' },
+      ]);
+      expect(auditService.record).toHaveBeenCalledWith({
+        actorId: 'admin-1',
+        action: 'VENDOR_EDITED',
+        targetType: 'VENDOR',
+        targetId: 'v1',
+      });
+      expect(vendorsRepository.update.mock.invocationCallOrder[0]).toBeLessThan(
+        auditService.record.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('a non-name edit re-indexes the vendor only', async () => {
+      await service.updateVendorForAdmin('admin-1', 'v1', { coverMedia: ['b.jpg'] });
+
+      expect(vendorsRepository.update).toHaveBeenCalledWith('v1', { coverMedia: ['b.jpg'] });
+      expect(searchIndexQueue.enqueueMany).toHaveBeenCalledWith([{ type: 'VENDOR', id: 'v1' }]);
+    });
+
+    it('is a no-op when nothing changes: no write, no search job, no audit', async () => {
+      await service.updateVendorForAdmin('admin-1', 'v1', { businessName: 'Old Shop', coverMedia: ['a.jpg'] });
+
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+      expect(searchIndexQueue.enqueueMany).not.toHaveBeenCalled();
+      expect(auditService.record).not.toHaveBeenCalled();
+    });
+
+    it('404 VENDOR_NOT_FOUND for a missing or soft-deleted vendor', async () => {
+      for (const found of [null, { ...verified, deletedAt: new Date() }]) {
+        vendorsRepository.findByIdForAdmin.mockResolvedValueOnce(found as any);
+        await expect(service.updateVendorForAdmin('admin-1', 'v1', { description: 'X' })).rejects.toMatchObject({
+          response: { code: 'VENDOR_NOT_FOUND' },
+        });
+      }
+      expect(vendorsRepository.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getVendorForAdmin', () => {
+    it('returns an unverified, soft-deleted vendor with location and product count', async () => {
+      const deletedAt = new Date('2026-09-01T00:00:00Z');
+      vendorsRepository.findByIdForAdmin.mockResolvedValue({ id: 'v1', verified: false, deletedAt } as any);
+      vendorsRepository.findVendorLocation.mockResolvedValue({ lat: 30, lng: 31 });
+      vendorsRepository.countProducts.mockResolvedValue(3);
+
+      const result = await service.getVendorForAdmin('v1');
+
+      expect(vendorsRepository.findByIdForAdmin).toHaveBeenCalledWith('v1');
+      expect(vendorsRepository.findPublicById).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        id: 'v1',
+        verified: false,
+        deletedAt,
+        location: { lat: 30, lng: 31 },
+        productCount: 3,
+      });
+    });
+
+    it('throws a coded 404 for an unknown id', async () => {
+      vendorsRepository.findByIdForAdmin.mockResolvedValue(null);
+
+      await expect(service.getVendorForAdmin('missing')).rejects.toMatchObject({
+        response: { code: 'VENDOR_NOT_FOUND' },
+      });
+      expect(vendorsRepository.countProducts).not.toHaveBeenCalled();
+    });
+  });
+
   describe('product writes enqueue a PRODUCT sync', () => {
     beforeEach(() => {
       vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', verified: true } as any);
       vendorsRepository.findProductByIdAndVendor.mockResolvedValue({ id: 'prod-1', variants: [{ id: 'var-1' }] } as any);
     });
 
-    it('createProduct enqueues even though the product starts PENDING', async () => {
+    it('createProduct enqueues so the new product is indexed immediately', async () => {
       vendorsRepository.createProduct.mockResolvedValue({ id: 'prod-new' } as any);
 
       await service.createProduct('owner-1', { title: 'T', description: 'D', categoryId: 'c', basePrice: 1, images: [] });

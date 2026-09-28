@@ -1,37 +1,35 @@
-import { IsEnum, IsNumber, IsOptional, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsLatitude,
+  IsLongitude,
+  IsNumber,
+  IsOptional,
+  Max,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ScheduleType } from '@prisma/client';
 
-import { MAX_PAGE_SIZE } from '../../../common/dto/pagination-query.dto';
+import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 
-export class ListBazaarsQueryDto {
+export class ListBazaarsQueryDto extends PaginationQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
-  @Min(1)
-  page?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  @Min(1)
-  @Max(MAX_PAGE_SIZE)
-  limit?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
+  @IsLatitude()
   lat?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
+  @IsLongitude()
   lng?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0.1)
+  @Max(150)
   radiusKm?: number;
 
   @IsOptional()

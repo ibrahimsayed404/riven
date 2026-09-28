@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
@@ -67,7 +67,9 @@ export class PaymobService {
    */
   async createIntention(amountCents: number, reference: string): Promise<PaymobIntent> {
     if (!this.apiKey || !this.integrationId) {
-      throw new InternalServerErrorException({
+      // Missing credentials is a deployment state, not a crash: 503 so clients
+      // and monitors can tell "payments off" from a genuine 500.
+      throw new ServiceUnavailableException({
         code: 'PAYMENTS_NOT_CONFIGURED',
         message: 'Paymob credentials are not configured.',
       });

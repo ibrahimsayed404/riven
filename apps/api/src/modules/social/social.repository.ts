@@ -16,6 +16,23 @@ function keysetWhere(after?: KeysetPage['after']) {
 
 const KEYSET_ORDER = [{ createdAt: 'desc' }, { id: 'desc' }] as const;
 
+// Admin moderation row: the full rating plus who wrote it (email and account
+// state included, so the admin can act on the reviewer). /admin/* only — the
+// public list exposes the reviewer's name and nothing else.
+const ADMIN_RATING_SELECT = {
+  id: true,
+  targetType: true,
+  targetId: true,
+  score: true,
+  comment: true,
+  orderId: true,
+  createdAt: true,
+  updatedAt: true,
+  user: { select: { id: true, name: true, email: true, isActive: true } },
+} satisfies Prisma.RatingSelect;
+
+export type AdminRatingRow = Prisma.RatingGetPayload<{ select: typeof ADMIN_RATING_SELECT }>;
+
 /** Every Prisma call of the social module (fix.js ARCH-01). */
 @Injectable()
 export class SocialRepository {
@@ -115,5 +132,56 @@ export class SocialRepository {
         user: { select: { name: true } },
       },
     });
+  }
+
+  // --- Admin (specs/admin-module-spec2.md A6) ---
+
+  /**
+   * Moderation queue over every rating. Page-based like the other admin lists,
+   * not keyset like the public one. `hasComment` treats '' as no comment.
+   */
+  async findRatingsForAdmin(params: {
+    targetType?: RatingTargetType;
+    targetId?: string;
+    userId?: string;
+    hasComment?: boolean;
+    maxScore?: number;
+    page: number;
+    limit: number;
+  }): Promise<{ data: AdminRatingRow[]; total: number }> {
+    const where: Prisma.RatingWhereInput = {};
+    if (params.targetType) where.targetType = params.targetType;
+    if (params.targetId) where.targetId = params.targetId;
+    if (params.userId) where.userId = params.userId;
+    if (params.maxScore !== undefined) where.score = { lte: params.maxScore };
+    if (params.hasComment === true) where.AND = [{ comment: { not: null } }, { comment: { not: '' } }];
+    if (params.hasComment === false) where.OR = [{ comment: null }, { comment: '' }];
+
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.rating.count({ where }),
+      this.prisma.rating.findMany({
+        where,
+        select: ADMIN_RATING_SELECT,
+        orderBy: [...KEYSET_ORDER],
+        skip: (params.page - 1) * params.limit,
+        take: params.limit,
+      }),
+    ]);
+    return { data, total };
+  }
+
+  // --- Admin moderation writes (spec3 B3c) ---
+
+  findRatingByIdForAdmin(id: string): Promise<AdminRatingRow | null> {
+    return this.prisma.rating.findUnique({ where: { id }, select: ADMIN_RATING_SELECT });
+  }
+
+  /** Hard delete: Rating has no deletedAt; summaries are aggregated at read time. */
+  async deleteRating(id: string): Promise<void> {
+    await this.prisma.rating.delete({ where: { id } });
+  }
+
+  clearRatingComment(id: string): Promise<AdminRatingRow> {
+    return this.prisma.rating.update({ where: { id }, data: { comment: null }, select: ADMIN_RATING_SELECT });
   }
 }

@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { BazaarsModule } from '../bazaars/bazaars.module';
 import { ProductsModule } from '../products/products.module';
 import { SocialModule } from '../social/social.module';
+import { AuditModule } from '../audit/audit.module';
 import { VendorsModule } from '../vendors/vendors.module';
 import { AdminSearchController } from './admin-search.controller';
 import { SearchSyncProcessor } from './jobs/search-sync.processor';
@@ -16,7 +17,7 @@ import { SearchService } from './search.service';
  * Meilisearch client come from the global SearchInfraModule.
  */
 @Module({
-  imports: [ProductsModule, VendorsModule, BazaarsModule, SocialModule],
+  imports: [ProductsModule, VendorsModule, BazaarsModule, SocialModule, AuditModule],
   controllers: [PublicSearchController, AdminSearchController],
   providers: [SearchService, SearchAdminService, SearchSyncProcessor],
 })

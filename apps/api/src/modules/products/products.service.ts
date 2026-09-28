@@ -1,11 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AdminAction, AdminTargetType, ApprovalStatus } from '@prisma/client';
+import { AdminAction, AdminTargetType } from '@prisma/client';
 import { ProductsRepository, IdPage } from './products.repository';
 import { AuditService } from '../audit/audit.service';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
 import { DEFAULT_PAGE_SIZE, pageMeta } from '../../common/dto/pagination-query.dto';
 import { SearchIndexQueue } from '../../infra/search/search-index.queue';
 import { ProductSearchDocument, toPriceNumber } from '../../infra/search/search-documents';
+import { changedFields } from '../../common/changed-fields';
+import { AdminUpdateProductDto } from './dto/admin-update-product.dto';
 
 @Injectable()
 export class ProductsService {
@@ -39,12 +41,64 @@ export class ProductsService {
 
   // --- Admin moderation (specs/admin-module-spec.md §4.3) ---
 
-  async listForAdmin(params: {
-    approvalStatus?: ApprovalStatus;
-    vendorId?: string;
-    page: number;
-    limit: number;
-  }) {
+  /** Admin detail (specs/admin-module-spec2.md A2): inactive and soft-deleted included. */
+  async getProductForAdmin(id: string) {
+    const product = await this.productsRepository.findByIdForAdmin(id);
+    if (!product) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+    return product;
+  }
+
+  /** Admin edit (specs/admin-module-spec3.md B2): title, description and images only. */
+  async updateProductForAdmin(adminId: string, id: string, dto: AdminUpdateProductDto) {
+    const product = await this.productsRepository.findByIdForAdmin(id);
+    if (!product || product.deletedAt) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+
+    const changes = changedFields(product, dto);
+    if (Object.keys(changes).length === 0) {
+      return product;
+    }
+
+    await this.productsRepository.updateContentForAdmin(id, changes);
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.PRODUCT_EDITED,
+      targetType: AdminTargetType.PRODUCT,
+      targetId: id,
+    });
+
+    return this.getProductForAdmin(id);
+  }
+
+  /**
+   * Admin delete (specs/admin-module-spec3.md B3a): soft delete. Cart lines are
+   * left in place — checkout already refuses them as PRODUCT_UNAVAILABLE, since
+   * PUBLIC_PRODUCT_WHERE excludes deleted products. Already deleted = no-op.
+   */
+  async deleteProductForAdmin(adminId: string, id: string): Promise<void> {
+    const product = await this.productsRepository.findDeletionState(id);
+    if (!product) {
+      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
+    }
+    if (product.deletedAt) {
+      return;
+    }
+
+    await this.productsRepository.softDeleteForAdmin(id);
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
+    await this.auditService.record({
+      actorId: adminId,
+      action: AdminAction.PRODUCT_DELETED,
+      targetType: AdminTargetType.PRODUCT,
+      targetId: id,
+    });
+  }
+
+  async listForAdmin(params: { vendorId?: string; page: number; limit: number }) {
     const { data, total } = await this.productsRepository.findManyForAdmin(params);
     return {
       data,
@@ -52,63 +106,11 @@ export class ProductsService {
     };
   }
 
-  countPendingForAdmin(): Promise<number> {
-    return this.productsRepository.countPendingForAdmin();
-  }
-
-  approveProduct(adminId: string, id: string) {
-    return this.moderateProduct(adminId, id, { approvalStatus: 'APPROVED', rejectionReason: null }, AdminAction.PRODUCT_APPROVED);
-  }
-
-  rejectProduct(adminId: string, id: string, reason: string) {
-    return this.moderateProduct(adminId, id, { approvalStatus: 'REJECTED', rejectionReason: reason }, AdminAction.PRODUCT_REJECTED);
-  }
-
-  /**
-   * One transition function for approve and reject. Idempotent: when the
-   * target state equals the current one nothing is written, audited or
-   * enqueued. Soft-deleted products 404 — they are not moderatable.
-   */
-  private async moderateProduct(
-    adminId: string,
-    id: string,
-    target: { approvalStatus: ApprovalStatus; rejectionReason: string | null },
-    action: AdminAction,
-  ) {
-    const current = await this.productsRepository.findModerationState(id);
-    if (!current || current.deletedAt) {
-      throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' });
-    }
-
-    const unchanged =
-      current.approvalStatus === target.approvalStatus && current.rejectionReason === target.rejectionReason;
-    if (unchanged) {
-      return { id: current.id, approvalStatus: current.approvalStatus, rejectionReason: current.rejectionReason };
-    }
-
-    const updated = await this.productsRepository.updateAdminStatus(id, target);
-
-    if (current.approvalStatus !== target.approvalStatus) {
-      // Only an approval-status change moves the product in or out of the index.
-      await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id });
-    }
-
-    await this.auditService.record({
-      actorId: adminId,
-      action,
-      targetType: AdminTargetType.PRODUCT,
-      targetId: id,
-      reason: target.rejectionReason,
-    });
-
-    return { id: updated.id, approvalStatus: updated.approvalStatus, rejectionReason: updated.rejectionReason };
-  }
-
   // --- Search index support (read-only; the single authority on product eligibility) ---
 
   /**
    * The product's search document, or null when it must not be in the index
-   * (pending/rejected/inactive/deleted, or its vendor unverified/deleted).
+   * (inactive/deleted, or its vendor unverified/deleted).
    */
   async getSearchDocument(id: string): Promise<ProductSearchDocument | null> {
     const product = await this.productsRepository.findForSearch(id);
@@ -143,6 +145,10 @@ export class ProductsService {
 
   listProductIdsByVendor(vendorId: string, cursor: string | null, take: number): Promise<IdPage> {
     return this.productsRepository.listIdsByVendor(vendorId, cursor, take);
+  }
+
+  listProductIdsByCategory(categoryId: string, cursor: string | null, take: number): Promise<IdPage> {
+    return this.productsRepository.listIdsByCategory(categoryId, cursor, take);
   }
 
   listPublicProductIds(cursor: string | null, take: number): Promise<IdPage> {

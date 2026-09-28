@@ -13,7 +13,7 @@ A discovery platform connecting shoppers, local brands/vendors, and bazaar/event
 
 > **When reading specs:** `specs/riven-spec.md` §1 still says "Not e-commerce — no cart, no checkout for products." That was overridden by `specs/fashion-marketplace-addendum.md` and is contradicted by merged code. `specs/payments-module-spec.md` §1 repeats the outdated claim. Treat `riven-spec.md` as the base vision and the addendum as authoritative where they conflict.
 
-Four roles, one per account, no multi-role: `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`. `role` is set at registration and immutable; public registration must reject `role: ADMIN` **in the service layer**, not just the DTO enum. Approval-gated visibility is platform-wide — vendors, organizers and products are invisible to shoppers until an admin approves, and editing a product resets it to `PENDING`.
+Four roles, one per account, no multi-role: `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`. `role` is set at registration and immutable; public registration must reject `role: ADMIN` **in the service layer**, not just the DTO enum. Approval-gated visibility applies to **vendors and organizers only** — they're invisible to shoppers until an admin approves. **Products have no approval gate** (product decision, 2026-09-27, `specs/vendor-module-spec2.md`, superseding the addendum's "Approval-gated visibility applies to Products"): a vendor's product is public as soon as it's created, subject only to `isActive` and its vendor being verified and not deleted. A vendor or admin edit never resets anything on the product.
 
 Ibrahim is the product decision-maker. Each module spec ends with an "Open Items" list — those go back to him rather than being resolved unilaterally.
 
@@ -24,14 +24,34 @@ pnpm monorepo + Turborepo. **Only `apps/api` exists** (NestJS + Prisma + Postgre
 ```
 apps/api/src/
   main.ts, app.module.ts
-  common/{filters,validators}/
-  infra/{prisma,config,queue,paymob}/
-  modules/{auth,users,vendors,products,cart,checkout,orders,bazaars,booths}/
+  common/{dto,events,filters,guards,validators}/, money.ts
+  infra/{config,paymob,prisma,queue,search,storage}/
+  modules/{admin,audit,auth,bazaars,booths,cart,categories,checkout,discovery,media,orders,products,search,social,users,vendors}/
 ```
 
 Merged modules: auth, users, vendors, products, cart, checkout, orders, bazaars, booths, discovery, social, search, categories, media, audit, admin. Specced but not built: payments, notifications. No spec yet: events.
 
 `modules/admin/` is cross-cutting only (`GET /admin/overview`, `GET /admin/audit-log`); approval endpoints stay in their domain modules (`admin-vendors.controller.ts`, …). `modules/audit/` is a leaf module every domain module may import to write audit rows — keeping it out of `admin/` avoids a Vendors → Admin → Vendors cycle. See `specs/admin-module-spec.md`.
+
+**Admin surface (pass 2 + Part B: `specs/admin-module-spec2.md`, `specs/admin-module-spec3.md`).** Admin gets dedicated `/admin/*` routes, never a bypass in `RolesGuard` — owner routes (`/vendors/me/*`, `/cart`, `/organizers/me/*`) resolve data from `currentUser.id` and must keep their ownership checks. Each `admin-*.controller.ts` lives in its domain module and calls `*ForAdmin` service/repository methods that look up globally by id:
+
+| Route prefix | Controller | Admin can |
+|---|---|---|
+| `/admin/users` | `users/admin-users.controller.ts` | list, view, deactivate, reactivate |
+| `/admin/vendors` | `vendors/admin-vendors.controller.ts` | list, view (any state), verify, reject (= suspend), edit text/images |
+| `/admin/products` | `products/admin-products.controller.ts` | list, view, edit text/images, soft delete — no approve/reject, products have no approval gate |
+| `/admin/organizers` | `bazaars/admin-organizers.controller.ts` | list, verify, reject |
+| `/admin/bazaars` | `bazaars/admin-bazaars.controller.ts` | list and view every bazaar, DRAFT included; cancel (organizer rule) |
+| `/admin/bazaars/:id/layout`, `/admin/booths` | `booths/admin-booths.controller.ts` | booth layout CRUD, assign/unassign (audited) |
+| `/admin/applications` | `bazaars/admin-applications.controller.ts` | list, view, accept/reject PENDING only (no reversals) |
+| `/admin/orders` | `orders/admin-orders.controller.ts` | list, view incl. Paymob record, cancel unpaid (group-level, restocks); no refunds |
+| `/admin/ratings` | `social/admin-ratings.controller.ts` | moderation list, delete, clear comment |
+| `/admin/categories` | `categories/admin-categories.controller.ts` | list, create, update, delete if unused (audited; re-indexes search) |
+| `/admin/search/reindex`, `/admin/overview`, `/admin/audit-log` | `search/`, `admin/` | reindex (audited), dashboard counts, audit trail |
+
+Every admin write is audited and every no-op records nothing. The exact rules (editable fields, what "unused category" means, allowed transitions) are in spec3 §1 — follow them, don't re-decide. **Still not built, by decision:** refunds (need a Payments spec), a separate vendor-suspend state (vendor reject covers it), a product hide switch (products have no approval gate now — soft-delete is the only lever), application reversals, status overrides on paid orders.
+
+**Bazaar visibility** mirrors products (`bazaars/bazaar-visibility.ts`): public only if PUBLISHED, not deleted, **and the organizer is verified and not deleted**. Use `PUBLIC_BAZAAR_WHERE` / `PUBLIC_ORGANIZER_SQL` / `hasPublicOrganizer` in any new public bazaar read.
 
 ## Read before starting work
 
@@ -84,9 +104,11 @@ Controllers are split by audience, not merged: `public-bazaars.controller.ts`, `
 
 **Paymob has one webhook route** (`infra/paymob`). A module that takes payments implements `PaymobWebhookHandler`, registers with `PaymobWebhookDispatcher` in `onModuleInit`, uses a prefixed `special_reference`, and matches only on signed ids.
 
+**Search sync goes through `SearchIndexQueue`** (global, `infra/search`), enqueued after the commit. Jobs carry ids only; the processor re-reads the database and decides eligibility per entity. When a write changes *other* entities' search documents without touching their rows, enqueue a fan-out job instead of per-product jobs: `VENDOR_PRODUCTS` (vendor verified/deleted/renamed), `CATEGORY_PRODUCTS` (category slug or parent changed — one job per category of the subtree) and `ORGANIZER_BAZAARS` (organizer verified/rejected/deleted). Job ids must not contain `:` (BullMQ rejects it).
+
 **Lint is real now:** `pnpm --filter @riven/api lint` (ESLint 9, `eslint.config.mjs`) fails on `console.*`, on `PrismaService` outside `*.repository.ts`/`infra/`, and on importing another module's repository. `no-explicit-any` is a warning.
 
-**Admin writes are audited by hand, not by magic.** A new admin action is recorded only if you add an `AdminAction` enum value (migration) **and** call `auditService.record()` in the service method, after the domain write. `actorId` always comes from `@CurrentUser()`, never the body. Audit is best-effort: `record()` logs failures and never fails the request (`specs/admin-module-spec.md` §5). Moderation transitions are idempotent — a no-op repeat writes nothing and records nothing.
+**Admin writes are audited by hand, not by magic.** A new admin action is recorded only if you add an `AdminAction` enum value — plus an `AdminTargetType` value if the target kind is new (one migration; enum-only migrations can be hand-written as `ALTER TYPE "public"."X" ADD VALUE 'Y';`) — **and** call `auditService.record()` in the service method, after the domain write. `actorId` always comes from `@CurrentUser()`, never the body. Audit is best-effort: `record()` logs failures and never fails the request (`specs/admin-module-spec.md` §5). Moderation transitions are idempotent — a no-op repeat writes nothing and records nothing.
 
 ## Process
 
@@ -111,14 +133,16 @@ pnpm --filter @riven/api prisma generate
 pnpm --filter @riven/api prisma migrate dev
 pnpm --filter @riven/api start:dev
 pnpm --filter @riven/api test
+pnpm --filter @riven/api smoke                    # live HTTP run over every route (see Gotchas)
 pnpm typecheck
 ```
 
 ## Gotchas
 
 - **Postgres is on host port 5433**, not 5432 — deliberate, to avoid colliding with a local Postgres install.
-- **`test` wipes the database.** Unit and e2e specs run together (`testRegex: .*\.spec\.ts$`), and the e2e specs `deleteMany()` users, vendors, bazaars and booths against the configured database. There is no separate test DB and no seed script.
+- **`test` wipes the database.** Unit and e2e specs run together (`testRegex: .*\.spec\.ts$`), and the e2e specs `deleteMany()` users, vendors, bazaars and booths against the configured database. There is no separate test DB. The seed script (`pnpm --filter @riven/api prisma db seed`, `prisma/seed.ts`) only upserts the placeholder category tree — safe to re-run. It does **not** create an ADMIN user: the first admin is still a manual DB insert (`specs/admin-module-spec.md` Open Item 1).
+- **`smoke`** (`apps/api/scripts/smoke-live.mjs`) builds the API, boots it on port 3100 against `<db>_test` (it refuses any other database) with `NODE_ENV=test`, Redis database 1 and Paymob off, then walks all routes in real order and checks every status code and the key behaviour (stock, audit rows, visibility, search documents). It fails if a controller route is left untested, so **a new endpoint needs a step in the script**. It wipes nothing, since each run's data is unique, but it shares `<db>_test` with the e2e suites, so don't run both at once.
 - **CI** runs lint + typecheck + `check:env`, then unit tests, then `prisma migrate deploy` + e2e against throwaway postgis/redis/meilisearch containers (`.github/workflows/ci.yml`). Locally: `test:unit` needs no services; `test:e2e` and `test` wipe the configured database.
 - **Env vars are Zod-validated at boot** (`infra/config/env.validation.ts`), including `S3_*` (required) and `PAYMOB_*` (optional, but must be well-formed when set). `pnpm --filter @riven/api check:env` verifies `.env.example` still lists every required key.
-- **`apps/api/prisma/schema.prisma` is the source of truth**; `specs/schema.prisma` is a reference copy that has drifted.
+- **`apps/api/prisma/schema.prisma` is the source of truth**; `specs/schema.prisma` is now an empty pointer to it (it used to be a copy that drifted).
 - **Paymob webhook ID-matching is still unverified against a real sandbox.** The handler (`modules/checkout/paymob-webhook.service.ts`) matches only on signed fields (`order.id`, `id`) against `OrderGroup.paymobOrderId` / `paymobIntentId`, and `paymobOrderId` is read from `intention_order_id` in the intention response — both field names need confirming with a sandbox payload before any other payment work. Money is integer piastres end to end (`common/money.ts`).

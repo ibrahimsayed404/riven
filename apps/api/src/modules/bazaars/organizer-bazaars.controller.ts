@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
-import { Role, ApplicationStatus } from '@prisma/client';
+import { ApplicationStatus, Role } from '@prisma/client';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -40,7 +40,8 @@ export class OrganizerBazaarsController {
     @CurrentUser('id') ownerId: string,
     @Query() query: PaginationQueryDto,
   ) {
-    return this.bazaarsService.getMyBazaars(ownerId, query.page ?? 1, query.limit ?? 10);
+    const { page = 1, limit = 20 } = query;
+    return this.bazaarsService.getMyBazaars(ownerId, page, limit);
   }
 
   @Post('bazaars')
@@ -92,7 +93,14 @@ export class OrganizerBazaarsController {
     @Param('id') bazaarId: string,
     @Query() query: ListApplicationsQueryDto,
   ) {
-    return this.bazaarsService.getBazaarApplications(ownerId, bazaarId, query.page ?? 1, query.limit ?? 10, query.status);
+    const { page = 1, limit = 20, status } = query;
+    return this.bazaarsService.getBazaarApplications(
+      ownerId,
+      bazaarId,
+      page,
+      limit,
+      status,
+    );
   }
 
   @Patch('bazaars/:id/applications/:applicationId/accept')
@@ -101,7 +109,12 @@ export class OrganizerBazaarsController {
     @Param('id') bazaarId: string,
     @Param('applicationId') applicationId: string,
   ) {
-    return this.bazaarsService.decideApplication(ownerId, bazaarId, applicationId, ApplicationStatus.ACCEPTED);
+    return this.bazaarsService.decideApplication(
+      ownerId,
+      bazaarId,
+      applicationId,
+      ApplicationStatus.ACCEPTED,
+    );
   }
 
   @Patch('bazaars/:id/applications/:applicationId/reject')
@@ -110,6 +123,11 @@ export class OrganizerBazaarsController {
     @Param('id') bazaarId: string,
     @Param('applicationId') applicationId: string,
   ) {
-    return this.bazaarsService.decideApplication(ownerId, bazaarId, applicationId, ApplicationStatus.REJECTED);
+    return this.bazaarsService.decideApplication(
+      ownerId,
+      bazaarId,
+      applicationId,
+      ApplicationStatus.REJECTED,
+    );
   }
 }
