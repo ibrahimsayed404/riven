@@ -118,11 +118,11 @@ export class VendorsService {
       throw new NotFoundException({ code: 'VENDOR_NOT_FOUND', message: 'Vendor not found.' });
     }
 
-    const [location, productCounts] = await Promise.all([
+    const [location, productCount] = await Promise.all([
       this.vendorsRepository.findVendorLocation(vendor.id),
-      this.vendorsRepository.countProductsByApprovalStatus(vendor.id),
+      this.vendorsRepository.countProducts(vendor.id),
     ]);
-    return { ...vendor, location, productCounts };
+    return { ...vendor, location, productCount };
   }
 
   /**
@@ -294,10 +294,9 @@ async getMyProducts(ownerId: string, page: number = 1, limit: number = 20) {
       basePrice: createDto.basePrice,
       images: createDto.images,
       isActive: createDto.isActive ?? true,
-      approvalStatus: 'PENDING',
     });
-    // A new product is PENDING, so this resolves to "not eligible" → no-op on the
-    // index. Enqueued anyway: eligibility is decided in one place, not here.
+    // No approval gate: the product is immediately eligible, subject only to
+    // isActive / vendor.verified (product decision, specs/vendor-module-spec2.md).
     await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: product.id });
     return product;
   }
@@ -318,12 +317,7 @@ async getMyProducts(ownerId: string, page: number = 1, limit: number = 20) {
     // getMyProduct ensures it exists and belongs to the vendor
     await this.getMyProduct(ownerId, productId);
 
-    const updated = await this.vendorsRepository.updateProduct(productId, {
-      ...updateDto,
-      approvalStatus: 'PENDING',
-      rejectionReason: null,
-    });
-    // Reset to PENDING means the sync job *removes* it from the index until re-approved.
+    const updated = await this.vendorsRepository.updateProduct(productId, updateDto);
     await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
     return updated;
   }

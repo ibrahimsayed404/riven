@@ -1,13 +1,14 @@
 import { Prisma } from '@prisma/client';
 
 /**
- * A product a shopper may see: active, approved, not deleted, and its vendor
- * verified and not deleted. Every public read, cart add and checkout check
- * uses this one object so they cannot drift apart (fix.js LOGIC-04, ARCH-02).
+ * A product a shopper may see: active, not deleted, and its vendor verified
+ * and not deleted. Every public read, cart add and checkout check uses this
+ * one object so they cannot drift apart (fix.js LOGIC-04, ARCH-02). There is
+ * no admin approval gate on products (product decision, 2026-09-27 —
+ * specs/vendor-module-spec2.md).
  */
 export const PUBLIC_PRODUCT_WHERE = {
   isActive: true,
-  approvalStatus: 'APPROVED',
   deletedAt: null,
   vendor: { verified: true, deletedAt: null },
 } satisfies Prisma.ProductWhereInput;

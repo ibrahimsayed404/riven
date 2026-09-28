@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ApprovalStatus, Prisma, Product, ProductVariant } from '@prisma/client';
+import { Prisma, Product, ProductVariant } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ACTIVE_VARIANT_WHERE } from '../products/product-visibility';
@@ -197,16 +197,9 @@ export class VendorsRepository {
     });
   }
 
-  /** Non-deleted products of one vendor, counted per approval status. */
-  async countProductsByApprovalStatus(vendorId: string): Promise<Record<ApprovalStatus, number>> {
-    const rows = await this.prisma.product.groupBy({
-      by: ['approvalStatus'],
-      where: { vendorId, deletedAt: null },
-      _count: { _all: true },
-    });
-    const counts: Record<ApprovalStatus, number> = { PENDING: 0, APPROVED: 0, REJECTED: 0 };
-    for (const row of rows) counts[row.approvalStatus] = row._count._all;
-    return counts;
+  /** Non-deleted product count of one vendor, for the admin detail view. */
+  countProducts(vendorId: string): Promise<number> {
+    return this.prisma.product.count({ where: { vendorId, deletedAt: null } });
   }
 
   async findManyForAdmin(params: {
@@ -276,8 +269,7 @@ export class VendorsRepository {
     });
   }
 
-  // "All statuses" means every approvalStatus — not deleted rows. A deleted
-  // product must not be editable or re-submitted for approval (fix.js LOGIC-02).
+  // A soft-deleted product must not be editable (fix.js LOGIC-02).
   findProductByIdAndVendor(productId: string, vendorId: string): Promise<(Product & { variants: ProductVariant[] }) | null> {
     return this.prisma.product.findFirst({
       where: {

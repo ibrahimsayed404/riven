@@ -165,7 +165,6 @@ describe('SocialModule (e2e)', () => {
         title: 'Handmade Mug',
         description: 'Ceramic coffee mug',
         basePrice: 25.0,
-        approvalStatus: 'APPROVED',
       },
     });
     productId = product.id;

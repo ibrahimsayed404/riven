@@ -88,7 +88,6 @@ describe('SearchModule (e2e)', () => {
     description?: string;
     categoryId: string;
     basePrice: number;
-    approvalStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
     isActive?: boolean;
     variants?: { sku: string; size?: string; color?: string; priceOverride?: number }[];
   }): Promise<string> {
@@ -100,7 +99,6 @@ describe('SearchModule (e2e)', () => {
         categoryId: opts.categoryId,
         basePrice: opts.basePrice,
         images: ['https://cdn.example/1.jpg'],
-        approvalStatus: opts.approvalStatus ?? 'APPROVED',
         isActive: opts.isActive ?? true,
         variants: opts.variants
           ? { create: opts.variants.map((v) => ({ sku: v.sku, size: v.size, color: v.color, priceOverride: v.priceOverride })) }
@@ -292,13 +290,6 @@ describe('SearchModule (e2e)', () => {
       categoryId: womenCategoryId,
       basePrice: 2000,
     });
-    ids.pending = await seedProduct({
-      vendorId: verifiedVendorId,
-      title: 'Pending linen dress',
-      categoryId: maxiCategoryId,
-      basePrice: 300,
-      approvalStatus: 'PENDING',
-    });
     ids.inactive = await seedProduct({
       vendorId: verifiedVendorId,
       title: 'Inactive linen dress',
@@ -306,7 +297,7 @@ describe('SearchModule (e2e)', () => {
       basePrice: 300,
       isActive: false,
     });
-    // Approved but owned by an unverified vendor: must not be searchable.
+    // Owned by an unverified vendor: must not be searchable.
     ids.hidden = await seedProduct({
       vendorId: unverifiedVendorId,
       title: 'Hidden linen dress',
@@ -340,8 +331,7 @@ describe('SearchModule (e2e)', () => {
   // ---------------------------------------------------------------------------
 
   describe('index membership', () => {
-    it('indexes only approved, active products of verified vendors', async () => {
-      await waitForIndexed('products', ids.pending, false, 2_000);
+    it('indexes only active products of verified vendors', async () => {
       await waitForIndexed('products', ids.inactive, false, 2_000);
       await waitForIndexed('products', ids.hidden, false, 2_000);
     });
@@ -370,22 +360,7 @@ describe('SearchModule (e2e)', () => {
   // ---------------------------------------------------------------------------
 
   describe('sync', () => {
-    it('approving a product adds it; rejecting removes it', async () => {
-      const approve = await request(app.getHttpServer())
-        .patch(`/admin/products/${ids.pending}/approve`)
-        .set('Authorization', `Bearer ${adminToken}`);
-      expect(approve.status).toBe(200);
-      await waitForIndexed('products', ids.pending, true);
-
-      const reject = await request(app.getHttpServer())
-        .patch(`/admin/products/${ids.pending}/reject`)
-        .set('Authorization', `Bearer ${adminToken}`)
-        .send({ reason: 'not now' });
-      expect(reject.status).toBe(200);
-      await waitForIndexed('products', ids.pending, false);
-    });
-
-    it('verifying a vendor indexes the vendor and fans out to its approved products', async () => {
+    it('verifying a vendor indexes the vendor and fans out to its products', async () => {
       const res = await request(app.getHttpServer())
         .patch(`/admin/vendors/${unverifiedVendorId}/verify`)
         .set('Authorization', `Bearer ${adminToken}`);
@@ -395,7 +370,7 @@ describe('SearchModule (e2e)', () => {
       await waitForIndexed('products', ids.hidden, true);
     });
 
-    it('a vendor editing a product resets it to PENDING and drops it from the index', async () => {
+    it('a vendor editing a product re-indexes it without dropping it (no approval gate)', async () => {
       const vendorToken = await jwtService.signAsync({ sub: unverifiedOwnerId, role: Role.VENDOR });
       const res = await request(app.getHttpServer())
         .patch(`/vendors/me/products/${ids.hidden}`)
@@ -403,7 +378,15 @@ describe('SearchModule (e2e)', () => {
         .send({ title: 'Hidden linen dress v2' });
       expect(res.status).toBe(200);
 
-      await waitForIndexed('products', ids.hidden, false);
+      // Already indexed before the edit, so poll for the new title rather than presence.
+      const deadline = Date.now() + 15_000;
+      let title: unknown;
+      while (Date.now() < deadline) {
+        title = (await registry.index('products').getDocument(ids.hidden).catch(() => null))?.title;
+        if (title === 'Hidden linen dress v2') break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      expect(title).toBe('Hidden linen dress v2');
     });
   });
 

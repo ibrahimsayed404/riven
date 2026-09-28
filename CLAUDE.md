@@ -13,7 +13,7 @@ A discovery platform connecting shoppers, local brands/vendors, and bazaar/event
 
 > **When reading specs:** `specs/riven-spec.md` §1 still says "Not e-commerce — no cart, no checkout for products." That was overridden by `specs/fashion-marketplace-addendum.md` and is contradicted by merged code. `specs/payments-module-spec.md` §1 repeats the outdated claim. Treat `riven-spec.md` as the base vision and the addendum as authoritative where they conflict.
 
-Four roles, one per account, no multi-role: `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`. `role` is set at registration and immutable; public registration must reject `role: ADMIN` **in the service layer**, not just the DTO enum. Approval-gated visibility is platform-wide — vendors, organizers and products are invisible to shoppers until an admin approves, and a vendor editing a product resets it to `PENDING` (an admin edit of text/images does not — spec3 B2).
+Four roles, one per account, no multi-role: `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`. `role` is set at registration and immutable; public registration must reject `role: ADMIN` **in the service layer**, not just the DTO enum. Approval-gated visibility applies to **vendors and organizers only** — they're invisible to shoppers until an admin approves. **Products have no approval gate** (product decision, 2026-09-27, `specs/vendor-module-spec2.md`, superseding the addendum's "Approval-gated visibility applies to Products"): a vendor's product is public as soon as it's created, subject only to `isActive` and its vendor being verified and not deleted. A vendor or admin edit never resets anything on the product.
 
 Ibrahim is the product decision-maker. Each module spec ends with an "Open Items" list — those go back to him rather than being resolved unilaterally.
 
@@ -39,7 +39,7 @@ Merged modules: auth, users, vendors, products, cart, checkout, orders, bazaars,
 |---|---|---|
 | `/admin/users` | `users/admin-users.controller.ts` | list, view, deactivate, reactivate |
 | `/admin/vendors` | `vendors/admin-vendors.controller.ts` | list, view (any state), verify, reject (= suspend), edit text/images |
-| `/admin/products` | `products/admin-products.controller.ts` | list, view (any state), approve, reject, edit text/images (stays APPROVED), soft delete |
+| `/admin/products` | `products/admin-products.controller.ts` | list, view, edit text/images, soft delete — no approve/reject, products have no approval gate |
 | `/admin/organizers` | `bazaars/admin-organizers.controller.ts` | list, verify, reject |
 | `/admin/bazaars` | `bazaars/admin-bazaars.controller.ts` | list and view every bazaar, DRAFT included; cancel (organizer rule) |
 | `/admin/bazaars/:id/layout`, `/admin/booths` | `booths/admin-booths.controller.ts` | booth layout CRUD, assign/unassign (audited) |
@@ -49,7 +49,7 @@ Merged modules: auth, users, vendors, products, cart, checkout, orders, bazaars,
 | `/admin/categories` | `categories/admin-categories.controller.ts` | list, create, update, delete if unused (audited; re-indexes search) |
 | `/admin/search/reindex`, `/admin/overview`, `/admin/audit-log` | `search/`, `admin/` | reindex (audited), dashboard counts, audit trail |
 
-Every admin write is audited and every no-op records nothing. The exact rules (editable fields, what "unused category" means, allowed transitions) are in spec3 §1 — follow them, don't re-decide. **Still not built, by decision:** refunds (need a Payments spec), a separate vendor-suspend state and a product hide switch (reject covers both), application reversals, status overrides on paid orders.
+Every admin write is audited and every no-op records nothing. The exact rules (editable fields, what "unused category" means, allowed transitions) are in spec3 §1 — follow them, don't re-decide. **Still not built, by decision:** refunds (need a Payments spec), a separate vendor-suspend state (vendor reject covers it), a product hide switch (products have no approval gate now — soft-delete is the only lever), application reversals, status overrides on paid orders.
 
 **Bazaar visibility** mirrors products (`bazaars/bazaar-visibility.ts`): public only if PUBLISHED, not deleted, **and the organizer is verified and not deleted**. Use `PUBLIC_BAZAAR_WHERE` / `PUBLIC_ORGANIZER_SQL` / `hasPublicOrganizer` in any new public bazaar read.
 

@@ -1,12 +1,7 @@
-import { ApprovalStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 
 export class AdminListProductsQueryDto {
-  @IsOptional()
-  @IsEnum(ApprovalStatus)
-  approvalStatus?: ApprovalStatus;
-
   @IsOptional()
   @IsUUID()
   vendorId?: string;

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ApprovalStatus, Prisma, Product, ProductVariant } from '@prisma/client';
+import { Prisma, Product, ProductVariant } from '@prisma/client';
 
 /** Max category nesting the ancestor walk will follow; also guards against cycles. */
 const CATEGORY_PATH_MAX_DEPTH = 10;
@@ -12,8 +12,8 @@ export type PublicProductDetail = Prisma.ProductGetPayload<{
   select: typeof PUBLIC_PRODUCT_SELECT & { variants: { select: typeof PUBLIC_VARIANT_SELECT } };
 }>;
 
-// Admin queue row: the fields an admin needs to decide, plus the vendor's
-// verification flag so the UI can flag "approved but vendor unverified".
+// Admin row: the fields an admin needs, plus the vendor's verification flag
+// so the UI can flag "active but vendor unverified".
 const adminProductRowSelect = {
   id: true,
   vendorId: true,
@@ -22,8 +22,6 @@ const adminProductRowSelect = {
   categoryId: true,
   basePrice: true,
   images: true,
-  approvalStatus: true,
-  rejectionReason: true,
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -32,8 +30,8 @@ const adminProductRowSelect = {
 
 export type AdminProductRow = Prisma.ProductGetPayload<{ select: typeof adminProductRowSelect }>;
 
-// Admin detail: any approval state, inactive and soft-deleted included, every
-// variant (deletedAt flags the removed ones). /admin/* only, never public.
+// Admin detail: inactive and soft-deleted included, every variant (deletedAt
+// flags the removed ones). /admin/* only, never public.
 const adminProductDetailSelect = {
   ...adminProductRowSelect,
   deletedAt: true,
@@ -53,13 +51,6 @@ const adminProductDetailSelect = {
 } satisfies Prisma.ProductSelect;
 
 export type AdminProductDetail = Prisma.ProductGetPayload<{ select: typeof adminProductDetailSelect }>;
-
-export interface ProductModerationState {
-  id: string;
-  approvalStatus: ApprovalStatus;
-  rejectionReason: string | null;
-  deletedAt: Date | null;
-}
 
 export type ProductForSearch = Product & {
   vendor: { name: string };
@@ -176,12 +167,12 @@ export class ProductsRepository {
     return rows.map((row) => row.slug);
   }
 
-  /** Every product of a vendor regardless of status — eligibility is decided per product later. */
+  /** Every product of a vendor, active or not — eligibility is decided per product later. */
   async listIdsByVendor(vendorId: string, cursor: string | null, take: number): Promise<IdPage> {
     return this.pageIds({ vendorId }, cursor, take);
   }
 
-  /** Every product filed directly under a category, any status — eligibility is decided per product later. */
+  /** Every product filed directly under a category, active or not — eligibility is decided per product later. */
   async listIdsByCategory(categoryId: string, cursor: string | null, take: number): Promise<IdPage> {
     return this.pageIds({ categoryId }, cursor, take);
   }
@@ -202,23 +193,6 @@ export class ProductsRepository {
     return { ids, nextCursor: hasMore ? ids[ids.length - 1] : null };
   }
 
-  updateAdminStatus(id: string, data: { approvalStatus: Prisma.ProductUpdateInput['approvalStatus'], rejectionReason: string | null }): Promise<Product> {
-    return this.prisma.product.update({
-      where: { id },
-      data,
-    });
-  }
-
-  // --- Admin moderation ---
-
-  /** Minimal state for an approve/reject decision. Unlike findById this does not hide soft-deleted rows. */
-  findModerationState(id: string): Promise<ProductModerationState | null> {
-    return this.prisma.product.findUnique({
-      where: { id },
-      select: { id: true, approvalStatus: true, rejectionReason: true, deletedAt: true },
-    });
-  }
-
   /** Admin detail: no visibility filter at all — admin sees every state. */
   findByIdForAdmin(id: string): Promise<AdminProductDetail | null> {
     return this.prisma.product.findUnique({
@@ -227,10 +201,14 @@ export class ProductsRepository {
     });
   }
 
-  /**
-   * Admin content edit (spec3 B2). The parameter type is the whole allow-list:
-   * approvalStatus, price, category and isActive cannot reach this write.
-   */
+  /** Minimal state for a delete decision. Unlike findById this does not hide soft-deleted rows. */
+  findDeletionState(id: string): Promise<{ id: string; deletedAt: Date | null } | null> {
+    return this.prisma.product.findUnique({
+      where: { id },
+      select: { id: true, deletedAt: true },
+    });
+  }
+
   /**
    * Admin delete (spec3 B3a): soft delete only — order_items point at the
    * product. Variants are left alone, exactly like the vendor's own delete.
@@ -239,6 +217,7 @@ export class ProductsRepository {
     await this.prisma.product.update({ where: { id }, data: { deletedAt: new Date() } });
   }
 
+  /** Admin content edit (spec3 B2). The parameter type is the whole allow-list: price, category and isActive cannot reach this write. */
   async updateContentForAdmin(
     id: string,
     data: { title?: string; description?: string; images?: string[] },
@@ -247,19 +226,16 @@ export class ProductsRepository {
   }
 
   /**
-   * Admin queue. Deliberately NOT built on visibilityFilter: that hides
-   * PENDING/REJECTED rows and products of unverified vendors, which is exactly
-   * what the queue exists to show. Soft-deleted rows are always excluded;
-   * isActive is not filtered (an inactive PENDING product still needs a decision).
+   * Admin list. Deliberately NOT built on visibilityFilter: that hides
+   * products of unverified vendors, which an admin still needs to see.
+   * Soft-deleted rows are always excluded; isActive is not filtered.
    */
   async findManyForAdmin(params: {
-    approvalStatus?: ApprovalStatus;
     vendorId?: string;
     page: number;
     limit: number;
   }): Promise<{ data: AdminProductRow[]; total: number }> {
     const where: Prisma.ProductWhereInput = { deletedAt: null };
-    if (params.approvalStatus) where.approvalStatus = params.approvalStatus;
     if (params.vendorId) where.vendorId = params.vendorId;
 
     return this.prisma.$transaction(async (tx) => {
@@ -273,10 +249,5 @@ export class ProductsRepository {
       });
       return { data, total };
     });
-  }
-
-  /** Overview tile: products awaiting a decision. */
-  countPendingForAdmin(): Promise<number> {
-    return this.prisma.product.count({ where: { approvalStatus: 'PENDING', deletedAt: null } });
   }
 }

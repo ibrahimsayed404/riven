@@ -141,7 +141,7 @@ describe('Admin management — pass 2 (e2e)', () => {
 
     vendorId = (await prisma.vendor.findFirstOrThrow({ where: { owner: { email: 'mgmt-vendor@example.com' } } })).id;
 
-    // Unverified vendor → a PENDING, inactive product with a soft-deleted variant: invisible on every public route.
+    // Unverified vendor → an inactive product with a soft-deleted variant: invisible on every public route.
     const category = await prisma.category.upsert({
       where: { slug: 'mgmt-e2e-cat' },
       update: {},
@@ -285,7 +285,7 @@ describe('Admin management — pass 2 (e2e)', () => {
         deletedAt: null,
         location: null,
         owner: { email: 'mgmt-vendor@example.com', isActive: true },
-        productCounts: { PENDING: 1, APPROVED: 0, REJECTED: 0 },
+        productCount: 1,
       });
       expect(res.body.owner).not.toHaveProperty('passwordHash');
     });
@@ -314,13 +314,12 @@ describe('Admin management — pass 2 (e2e)', () => {
   describe('GET /admin/products/:id', () => {
     authMatrix('get', () => `/admin/products/${productId}`);
 
-    it('returns a PENDING, inactive product with every variant, which the public route hides', async () => {
+    it('returns an inactive product with every variant, which the public route hides', async () => {
       await request(app.getHttpServer()).get(`/products/${productId}`).expect(404);
 
       const res = await asAdmin('get', `/admin/products/${productId}`).expect(200);
       expect(res.body).toMatchObject({
         id: productId,
-        approvalStatus: 'PENDING',
         isActive: false,
         deletedAt: null,
         vendor: { id: vendorId, verified: false },
@@ -792,8 +791,7 @@ describe('Admin management — pass 2 (e2e)', () => {
   describe('PATCH /admin/products/:id (B2)', () => {
     authMatrix('patch', () => `/admin/products/${productId}`);
 
-    it('edits an APPROVED product and it stays APPROVED (no re-review); repeat = no audit', async () => {
-      await prisma.product.update({ where: { id: productId }, data: { approvalStatus: 'APPROVED' } });
+    it('edits title and images; repeat = no audit', async () => {
       try {
         const res = await asAdmin('patch', `/admin/products/${productId}`)
           .send({ title: 'Hidden (fixed typo)', images: ['https://cdn.example.com/p.jpg'] })
@@ -802,19 +800,18 @@ describe('Admin management — pass 2 (e2e)', () => {
           id: productId,
           title: 'Hidden (fixed typo)',
           images: ['https://cdn.example.com/p.jpg'],
-          approvalStatus: 'APPROVED',
         });
         expect(await auditFor('PRODUCT_EDITED', productId)).toHaveLength(1);
 
         await asAdmin('patch', `/admin/products/${productId}`).send({ title: 'Hidden (fixed typo)' }).expect(200);
         expect(await auditFor('PRODUCT_EDITED', productId)).toHaveLength(1);
       } finally {
-        await prisma.product.update({ where: { id: productId }, data: { approvalStatus: 'PENDING', title: 'Hidden', images: [] } });
+        await prisma.product.update({ where: { id: productId }, data: { title: 'Hidden', images: [] } });
       }
     });
 
-    it('400 on fields outside the text/image scope (price, category, isActive, approvalStatus)', async () => {
-      for (const body of [{ basePrice: 1 }, { categoryId: productCategoryId }, { isActive: true }, { approvalStatus: 'APPROVED' }]) {
+    it('400 on fields outside the text/image scope (price, category, isActive)', async () => {
+      for (const body of [{ basePrice: 1 }, { categoryId: productCategoryId }, { isActive: true }]) {
         await asAdmin('patch', `/admin/products/${productId}`).send(body).expect(400);
       }
     });
@@ -824,24 +821,6 @@ describe('Admin management — pass 2 (e2e)', () => {
         .send({ title: 'x' })
         .expect(404);
       expect(res.body.code).toBe('PRODUCT_NOT_FOUND');
-    });
-
-    it('the owner route is unchanged: a vendor edit still resets the product to PENDING', async () => {
-      // Owner routes need a verified vendor; flip it for this check only.
-      await prisma.vendor.update({ where: { id: vendorId }, data: { verified: true } });
-      await prisma.product.update({ where: { id: productId }, data: { approvalStatus: 'APPROVED', isActive: true } });
-      try {
-        await request(app.getHttpServer())
-          .patch(`/vendors/me/products/${productId}`)
-          .set('Authorization', `Bearer ${tokens.vendor}`)
-          .send({ description: 'vendor edit' })
-          .expect(200);
-        const row = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
-        expect(row.approvalStatus).toBe('PENDING');
-      } finally {
-        await prisma.vendor.update({ where: { id: vendorId }, data: { verified: false } });
-        await prisma.product.update({ where: { id: productId }, data: { description: 'D', isActive: false } });
-      }
     });
   });
 
