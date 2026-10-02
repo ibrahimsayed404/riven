@@ -1,0 +1,326 @@
+# Riven Project Startup Plan
+
+## Goal
+
+Build and stabilize the Riven backend from the current repo state, with a working database connection, validated auth flow, vendor/product/bazaar features, and a clean path to checkout/payment and deployment.
+
+## Current State Summary
+
+- Repo structure is a NestJS API monorepo with Prisma and PostgreSQL/Supabase integration.
+- Core modules already exist: auth, users, vendors, products, cart, checkout, orders, bazaars, booths, discovery, social, search, categories, media, audit, admin.
+- Lint currently passes without errors, but there are 174 warnings, mostly `no-explicit-any` warnings.
+- Test suite currently passes: 44 suites, 682 tests.
+- Database schema push is currently failing because Prisma is hitting the Supabase transaction pooler instead of the direct session URL.
+- Paymob is not configured in the current environment, so checkout/payment integration is not ready without env setup.
+
+## Phase 0 — Stabilize environment and database
+
+### Task 0.1: Validate `.env` setup
+
+- Confirm `.env.supabase.local` is present and gitignored.
+- Keep secrets out of source control.
+- Do not commit production DB URLs.
+
+### Task 0.2: Fix Prisma database connection
+
+Use the direct URL for Prisma schema work.
+
+Commands:
+
+```bash
+cd /d/Youssef/riven
+set -a
+. ./.env.supabase.local
+set +a
+export DATABASE_URL="$DIRECT_URL"
+
+pnpm --filter @riven/api prisma db push
+pnpm --filter @riven/api prisma generate
+```
+
+### Task 0.3: Confirm app boots
+
+```bash
+pnpm --filter @riven/api start:dev
+```
+
+### Task 0.4: Validate environment variables for runtime services
+
+- Confirm all required env vars exist.
+- Validate Paymob env is set before checkout and payment tests are relied on.
+- Ensure local/test DB is not accidentally pointed at production.
+
+## Phase 1 — Authentication and identity
+
+### Task 1.1: Fix and verify auth flow
+
+- Register user
+- Login
+- JWT creation
+- refresh token flow
+- role assignment and immutability
+- admin user restrictions
+
+### Task 1.2: Validate role rules
+
+- `SHOPPER`, `VENDOR`, `ORGANIZER`, `ADMIN`
+- one role per account
+- admin registration should be rejected in the service layer
+- role must be immutable after registration
+
+### Task 1.3: Verify user visibility rules
+
+- vendors and organizers should be hidden until admin approval
+- shoppers see only approved vendor/organizer records
+
+### Deliverables
+
+- Auth endpoints working end-to-end
+- Protected routes validated
+- Role-based access works correctly
+
+## Phase 2 — Vendor and marketplace setup
+
+### Task 2.1: Vendor onboarding
+
+- vendor create/update flow
+- vendor verification state
+- vendor visibility and status handling
+
+### Task 2.2: Product model and rules
+
+- product create/update/delete
+- public status rules
+- active/inactive checks
+- vendor ownership checks
+- no product approval gate by current rules
+
+### Task 2.3: Product visibility logic
+
+- product is public when created if vendor is verified and not deleted
+- active flag and vendor status still apply
+- admin soft-delete is the override lever
+
+### Task 2.4: Repository discipline
+
+- keep Prisma calls inside each module repository
+- no cross-module repository access
+- use service layers for business rules
+
+### Deliverables
+
+- vendor profile and product management work end-to-end
+- visibility logic matches spec
+
+## Phase 3 — Bazaar and organizer flow
+
+### Task 3.1: Organizer onboarding
+
+- organizer creation and verification
+- approval-gated visibility rules
+
+### Task 3.2: Bazaar creation and publication
+
+- draft and published states
+- organizer ownership checks
+- public visibility when published and organizer is verified/not deleted
+
+### Task 3.3: Booth layout management
+
+- booth CRUD
+- layout assignment/unassignment
+- admin booth moderation rules
+
+### Task 3.4: Bazaar applications
+
+- apply to a bazaar
+- accept/reject pending applications
+- no reversals allowed for accepted/rejected status
+
+### Deliverables
+
+- organizer and bazaar flows working cleanly
+- admin moderation functions preserved
+
+## Phase 4 — Cart, checkout, and orders
+
+### Task 4.1: Cart logic
+
+- add/remove item
+- update quantity
+- validate product and vendor ownership
+- per-vendor sub-orders
+
+### Task 4.2: Checkout flow
+
+- create order group
+- per-vendor order split
+- pay via Paymob
+- order state machine
+
+### Task 4.3: Paymob configuration
+
+- load all required Paymob env values
+- validate integration ID and secret
+- verify webhook signature handling
+- ensure signed ID checks follow safest pattern
+
+### Task 4.4: Order lifecycle
+
+- pending / paid / cancelled / refunded flow based on spec
+- admin cancellation for unpaid orders
+- no refund implementation unless payments spec is ready
+
+### Deliverables
+
+- checkout logic works with real credentials or mocked config
+- order states consistent and auditable
+
+## Phase 5 — Admin controls
+
+### Task 5.1: Admin management routes
+
+- user administration
+- vendor moderation
+- product moderation
+- organizer verification
+- bazaar moderation
+- application moderation
+- order moderation
+- rating moderation
+- category moderation
+
+### Task 5.2: Admin auditing
+
+- every admin write is recorded by hand
+- no-op actions record nothing
+- actor ID comes from authenticated user
+- record failures do not fail the request
+
+### Task 5.3: Admin spec compliance
+
+Follow specs in:
+
+- specs/admin-module-spec.md
+- specs/admin-module-spec2.md
+- specs/admin-module-spec3.md
+
+### Deliverables
+
+- admin actions are consistent with spec and audited properly
+
+## Phase 6 — Search and indexing
+
+### Task 6.1: Reindex pipeline
+
+- verify search documents are generated correctly
+- ensure search sync via `SearchIndexQueue`
+- fan-out jobs for related entity changes
+
+### Task 6.2: Eligibility checks
+
+- vendor verified/deleted/renamed changes
+- category subtree updates
+- organizer verified/rejected/deleted changes
+
+### Deliverables
+
+- search reindex works reliably
+- products and bazaars remain discoverable when eligible
+
+## Phase 7 — Cleanup and hardening
+
+### Task 7.1: Reduce `any` warnings
+
+- prefer explicit DTO/interface types
+- replace loose `any` values in services, controllers, and tests
+
+### Task 7.2: Harden validation and security
+
+- class-validator on all DTOs
+- strict whitelist config remains enforced
+- never leak internal fields on public endpoints
+- validate owner-scoped routes in the service layer
+- verify error payloads return stable codes
+
+### Task 7.3: DB constraints and soft deletion
+
+- use DB constraints for invariants
+- soft-delete history-linked records
+- avoid accidental hard-delete of rating/follow/order history
+
+### Deliverables
+
+- codebase is easier to maintain and safer to deploy
+
+## Phase 8 — QA and release readiness
+
+### Task 8.1: Run targeted validation
+
+```bash
+pnpm --filter @riven/api lint
+pnpm --filter @riven/api test
+```
+
+### Task 8.2: Run smoke validation
+
+```bash
+pnpm --filter @riven/api smoke
+```
+
+### Task 8.3: Final checklist
+
+- DB push works with `DIRECT_URL`
+- app boots cleanly
+- required env vars set
+- auth works
+- vendor flow works
+- product flow works
+- bazaar flow works
+- checkout/payment works with live config or mocks
+- admin moderation works
+- smoke route checks pass
+
+## Recommended order for this project
+
+1. Database connection fix
+2. Auth and user roles
+3. Vendor + product flows
+4. Bazaar + organizer flows
+5. Cart + orders
+6. Checkout + Paymob
+7. Admin management
+8. Search indexing
+9. Hardening and cleanup
+10. Final smoke + deployment
+
+## Recommended branch strategy
+
+Use a focused feature branch for each major milestone, for example:
+
+- `feature/auth-foundation`
+- `feature/vendor-product-core`
+- `feature/bazaar-organizer-flow`
+- `feature/cart-checkout-orders`
+- `feature/admin-management`
+- `feature/search-and-hardening`
+
+## Key caution areas
+
+- Do not use the pooled transaction URL for Prisma schema commands.
+- Do not trust payment flows without valid Paymob env config.
+- Do not bypass service-level ownership checks.
+- Do not perform cross-module repository access.
+- Do not treat warnings as harmless if they hide unvalidated payloads.
+
+## Recommended first milestone
+
+The first milestone should be:
+
+"Stabilize database, auth, and user roles"
+
+This creates the foundation for every other module and ensures the rest of the app is built on a working base.
+
+## Final note
+
+The repo is close to being a strong backend, but it still needs the same foundation discipline the architecture doc expects: DB stability, auth integrity, proper ownership checks, and service-layer validation before anything else.

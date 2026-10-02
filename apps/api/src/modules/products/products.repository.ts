@@ -263,3 +263,4 @@ export class ProductsRepository {
       return { data, total };
     });
   }
+}

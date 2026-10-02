@@ -133,7 +133,7 @@ describe('BoothsService', () => {
       mockBoothsRepository.findLayoutByBazaarId.mockResolvedValue({ id: 'l1', bazaarId: 'b1' });
       mockBoothsRepository.assignBooth.mockResolvedValue(null);
 
-      await expect(service.assignBooth('booth1', 'app1')).rejects.toMatchObject({
+      await expect(service.assignBooth('admin-1', 'booth1', 'app1')).rejects.toMatchObject({
         response: { code: 'BOOTH_ASSIGNED' },
       });
     });

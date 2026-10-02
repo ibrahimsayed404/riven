@@ -5,7 +5,6 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { BoothsRepository, PublicBooth } from './booths.repository';
-import { GridConfigDto } from './dto/create-booth-layout.dto';
 import { BazaarsService } from '../bazaars/bazaars.service';
 import { AuditService } from '../audit/audit.service';
 import {
