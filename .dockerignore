@@ -1,0 +1,15 @@
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+assets
+report
+specs
+plan
+apps/api/cart_error.json
