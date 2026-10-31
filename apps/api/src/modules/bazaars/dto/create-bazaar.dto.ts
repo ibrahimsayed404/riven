@@ -1,4 +1,4 @@
-import { IsArray, IsDateString, IsEnum, IsLatitude, IsLongitude, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsDateString, IsEnum, IsLatitude, IsLongitude, IsNotEmpty, IsNumber, IsOptional, IsString, IsUrl } from 'class-validator';
 import { ScheduleType } from '@prisma/client';
 
 export class CreateBazaarDto {
@@ -10,8 +10,11 @@ export class CreateBazaarDto {
   @IsOptional()
   description?: string;
 
+  // Same rule as a vendor's coverMedia: URLs only (no javascript: or data:
+  // strings a client would render), require_tld: false for local MinIO.
   @IsArray()
-  @IsString({ each: true })
+  @ArrayMaxSize(10)
+  @IsUrl({ require_tld: false, require_protocol: true, protocols: ['http', 'https'] }, { each: true })
   @IsOptional()
   coverMedia?: string[];
 

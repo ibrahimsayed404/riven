@@ -40,6 +40,7 @@ describe('MediaModule (e2e)', () => {
     prisma = app.get(PrismaService);
     const jwtService = app.get(JwtService);
 
+    await prisma.$executeRawUnsafe('TRUNCATE "inventory_movements"'); // append-only ledger (commerce/25 S3) → variants, groups, users are RESTRICT
     await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany({ where: { email: { startsWith: 'media-' } } });
 
@@ -59,6 +60,7 @@ describe('MediaModule (e2e)', () => {
   });
 
   afterAll(async () => {
+    await prisma.$executeRawUnsafe('TRUNCATE "inventory_movements"'); // append-only ledger (commerce/25 S3) → variants, groups, users are RESTRICT
     await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany({ where: { email: { startsWith: 'media-' } } });
     await app.close();
@@ -68,7 +70,7 @@ describe('MediaModule (e2e)', () => {
     const res = await request(app.getHttpServer())
       .post('/media/upload-url')
       .set('Authorization', `Bearer ${vendorToken}`)
-      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png' })
+      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png', contentLength: 2048 })
       .expect(200);
 
     expect(res.body.key).toMatch(new RegExp(`^product-image/${vendorUserId}/[0-9a-f-]{36}\\.png$`));
@@ -82,7 +84,7 @@ describe('MediaModule (e2e)', () => {
     const res = await request(app.getHttpServer())
       .post('/media/upload-url')
       .set('Authorization', `Bearer ${organizerToken}`)
-      .send({ purpose: 'BAZAAR_COVER', contentType: 'image/jpeg' })
+      .send({ purpose: 'BAZAAR_COVER', contentType: 'image/jpeg', contentLength: 2048 })
       .expect(200);
     expect(res.body.key).toMatch(/^bazaar-cover\/.+\.jpg$/);
   });
@@ -91,16 +93,33 @@ describe('MediaModule (e2e)', () => {
     const res = await request(app.getHttpServer())
       .post('/media/upload-url')
       .set('Authorization', `Bearer ${vendorToken}`)
-      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'application/pdf' })
+      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'application/pdf', contentLength: 2048 })
       .expect(400);
     expect(res.body.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('requires the file size and refuses more than 10 MB (signed into the URL, commerce/25 §10)', async () => {
+    for (const contentLength of [undefined, 0, 10 * 1024 * 1024 + 1]) {
+      const res = await request(app.getHttpServer())
+        .post('/media/upload-url')
+        .set('Authorization', `Bearer ${vendorToken}`)
+        .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png', contentLength })
+        .expect(400);
+      expect(res.body.code).toBe('VALIDATION_ERROR');
+    }
+    const ok = await request(app.getHttpServer())
+      .post('/media/upload-url')
+      .set('Authorization', `Bearer ${vendorToken}`)
+      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png', contentLength: 10 * 1024 * 1024 })
+      .expect(200);
+    expect(new URL(ok.body.uploadUrl).searchParams.get('X-Amz-SignedHeaders')).toContain('content-length');
   });
 
   it('rejects an unknown purpose', async () => {
     await request(app.getHttpServer())
       .post('/media/upload-url')
       .set('Authorization', `Bearer ${vendorToken}`)
-      .send({ purpose: 'AVATAR', contentType: 'image/png' })
+      .send({ purpose: 'AVATAR', contentType: 'image/png', contentLength: 2048 })
       .expect(400);
   });
 
@@ -108,11 +127,11 @@ describe('MediaModule (e2e)', () => {
     await request(app.getHttpServer())
       .post('/media/upload-url')
       .set('Authorization', `Bearer ${shopperToken}`)
-      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png' })
+      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png', contentLength: 2048 })
       .expect(403);
     await request(app.getHttpServer())
       .post('/media/upload-url')
-      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png' })
+      .send({ purpose: 'PRODUCT_IMAGE', contentType: 'image/png', contentLength: 2048 })
       .expect(401);
   });
 });

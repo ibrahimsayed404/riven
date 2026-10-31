@@ -23,7 +23,10 @@ import { JwtStrategy } from './strategies/jwt.strategy';
           secret: configService.getOrThrow<string>('JWT_SECRET'),
           signOptions: {
             expiresIn,
+            algorithm: 'HS256',
           },
+          // Only the algorithm we sign with is accepted on verification.
+          verifyOptions: { algorithms: ['HS256'] },
         };
       },
     }),

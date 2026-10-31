@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { isContentionError } from '../../infra/prisma/retryable-tx';
 
 /**
  * The one error shape every endpoint returns. Success bodies are the bare
@@ -98,6 +99,26 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (exception instanceof Prisma.PrismaClientKnownRequestError) {
       const mapped = fromPrismaError(exception);
       if (mapped) return mapped;
+    }
+
+    // Contention that outlived its retries (serialization failure, deadlock,
+    // lock or transaction timeout) is a busy system, not a bug: a coded 503 the
+    // client may retry (commerce/25 §11).
+    if (isContentionError(exception)) {
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        body: { code: 'SERVICE_BUSY', message: 'The system is busy right now. Please try again in a moment.' },
+      };
+    }
+
+    // A CHECK constraint (e.g. stockQuantity >= 0, specs/commerce/25 S2) refused
+    // the write. Prisma 6 has no known-request code for it, only the Postgres
+    // SQLSTATE 23514 inside an unknown-request error.
+    if (exception instanceof Prisma.PrismaClientUnknownRequestError && /code: "23514"/.test(exception.message)) {
+      return {
+        status: HttpStatus.CONFLICT,
+        body: { code: 'CONSTRAINT_VIOLATION', message: 'The change would break a data rule (for example, stock below zero).' },
+      };
     }
 
     return {

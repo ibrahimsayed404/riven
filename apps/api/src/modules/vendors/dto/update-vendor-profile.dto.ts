@@ -11,7 +11,8 @@ import {
   MinLength,
 } from 'class-validator';
 
-const URL_OPTS = { require_tld: false }; // local MinIO URLs have no TLD
+// http(s) with a scheme; local MinIO URLs have no TLD (commerce/25 §10).
+const URL_OPTS = { require_tld: false, require_protocol: true, protocols: ['http', 'https'] };
 
 export class UpdateVendorProfileDto {
   @IsOptional()

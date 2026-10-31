@@ -31,13 +31,15 @@ describe('RolesGuard', () => {
     expect(guard.canActivate(createContext(Role.VENDOR))).toBe(true);
   });
 
-  it('rejects a user without a required role', () => {
+  it('rejects a user without a required role with a coded 403 FORBIDDEN_ROLE', () => {
     const reflector = {
       getAllAndOverride: jest.fn().mockReturnValue([Role.VENDOR]),
     } as unknown as Reflector;
     const guard = new RolesGuard(reflector);
 
-    expect(guard.canActivate(createContext(Role.SHOPPER))).toBe(false);
+    expect(() => guard.canActivate(createContext(Role.SHOPPER))).toThrow(
+      expect.objectContaining({ response: expect.objectContaining({ code: 'FORBIDDEN_ROLE' }) }),
+    );
   });
 
   it('allows any authenticated user when no roles are specified', () => {

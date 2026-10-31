@@ -40,7 +40,7 @@ export class CreateProductDto {
 
   @IsArray()
   @ArrayMaxSize(PRODUCT_IMAGES_MAX)
-  @IsUrl({ require_tld: false }, { each: true }) // require_tld: false keeps local MinIO URLs valid
+  @IsUrl({ require_tld: false, require_protocol: true, protocols: ['http', 'https'] }, { each: true }) // require_tld: false keeps local MinIO URLs valid
   images!: string[];
 
   @IsOptional()

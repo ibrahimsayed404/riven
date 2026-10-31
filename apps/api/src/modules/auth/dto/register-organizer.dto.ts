@@ -1,4 +1,4 @@
-import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsString, Matches, MinLength } from 'class-validator';
 
 export class RegisterOrganizerDto {
   @IsEmail()
@@ -7,6 +7,7 @@ export class RegisterOrganizerDto {
 
   @IsString()
   @MinLength(8)
+  @Matches(/\d/, { message: 'password must contain at least one number' })
   @IsNotEmpty()
   password!: string;
 

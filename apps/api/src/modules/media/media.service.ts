@@ -21,12 +21,12 @@ const PREFIX: Record<UploadPurpose, string> = {
 export class MediaService {
   constructor(private readonly storageService: StorageService) {}
 
-  createUploadUrl(userId: string, purpose: UploadPurpose, contentType: AllowedImageType): Promise<UploadTarget> {
+  createUploadUrl(userId: string, purpose: UploadPurpose, contentType: AllowedImageType, contentLength: number): Promise<UploadTarget> {
     // Key is namespaced by purpose and uploader and ends in a fresh uuid, so a
     // signed URL can only ever write under the caller's own prefix and never
     // overwrites an existing object.
     const key = `${PREFIX[purpose]}/${userId}/${randomUUID()}.${EXTENSION[contentType]}`;
-    return this.storageService.createUploadUrl(key, contentType);
+    return this.storageService.createUploadUrl(key, contentType, contentLength);
   }
 }
 

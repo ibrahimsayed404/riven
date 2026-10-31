@@ -21,7 +21,7 @@ describe('StorageService', () => {
 
   it('signs a path-style PUT for the bucket and key with the content type locked in', async () => {
     const service = new StorageService(configService);
-    const target = await service.createUploadUrl('product-image/u1/abc.png', 'image/png');
+    const target = await service.createUploadUrl('product-image/u1/abc.png', 'image/png', 1234);
 
     const url = new URL(target.uploadUrl);
     expect(url.origin).toBe('http://localhost:9000');
@@ -29,6 +29,8 @@ describe('StorageService', () => {
     expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
     expect(url.searchParams.get('X-Amz-Expires')).toBe(String(UPLOAD_URL_TTL_SECONDS));
     expect(url.searchParams.get('X-Amz-SignedHeaders')).toContain('content-type');
+    // The size is signed too: the store refuses a PUT of any other length (commerce/25 §10).
+    expect(url.searchParams.get('X-Amz-SignedHeaders')).toContain('content-length');
     // No empty-body checksum pinned into the URL — that would reject every real upload.
     expect(url.searchParams.has('x-amz-checksum-crc32')).toBe(false);
 
@@ -38,7 +40,7 @@ describe('StorageService', () => {
 
   it('builds publicUrl from S3_PUBLIC_URL without doubling the slash', async () => {
     const service = new StorageService(configService);
-    const target = await service.createUploadUrl('vendor-logo/u1/x.webp', 'image/webp');
+    const target = await service.createUploadUrl('vendor-logo/u1/x.webp', 'image/webp', 1);
     expect(target.publicUrl).toBe('http://localhost:9000/riven-media/vendor-logo/u1/x.webp');
   });
 });

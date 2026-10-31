@@ -22,6 +22,14 @@ import { RegisterOrganizerDto } from './dto/register-organizer.dto';
 const PASSWORD_SALT_ROUNDS = 12;
 
 /**
+ * A bcrypt hash (cost 12) of a random value nobody knows. Login compares against
+ * it when the email does not exist, so an unknown email costs the same bcrypt
+ * time as a wrong password and response timing does not reveal which emails
+ * have accounts.
+ */
+const TIMING_EQUALIZER_HASH = '$2b$12$C6UzMDM.H6dfI/f/IKcEeO5u7Q0yZ.sPbE9yE9bQfJm8m8Kc6m3eG';
+
+/**
  * One canonical form for every email we store or look up, so Foo@x.com and
  * foo@x.com are the same account (fix.js AUTH-03). Done here rather than in a
  * DTO @Transform so it also applies when a test boots without transform: true.
@@ -191,13 +199,11 @@ export class AuthService {
 
     const user = await this.authRepository.findUserByEmail(normalizeEmail(loginDto.email));
 
-    if (!user) {
-      throw invalidCredentialsException;
-    }
+    // Always run one bcrypt comparison — against a dummy hash when the email is
+    // unknown — so timing does not distinguish "no such account" from "wrong password".
+    const passwordMatches = await compare(loginDto.password, user?.passwordHash ?? TIMING_EQUALIZER_HASH);
 
-    const passwordMatches = await compare(loginDto.password, user.passwordHash);
-
-    if (!passwordMatches) {
+    if (!user || !passwordMatches) {
       throw invalidCredentialsException;
     }
 

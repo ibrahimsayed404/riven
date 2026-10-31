@@ -39,14 +39,15 @@ export class StorageService {
     });
   }
 
-  async createUploadUrl(key: string, contentType: string): Promise<UploadTarget> {
-    // Content-Type is explicitly signed (the SDK only signs host by default),
-    // so a PUT that lies about its type fails the signature check at the store
-    // and the allowlist enforced upstream actually holds.
-    const command = new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: contentType });
+  async createUploadUrl(key: string, contentType: string, contentLength: number): Promise<UploadTarget> {
+    // Content-Type and Content-Length are explicitly signed (the SDK only signs
+    // host by default), so a PUT that lies about its type or its size fails the
+    // signature check at the store: the type allowlist and the 10 MB limit
+    // enforced upstream actually hold (commerce/25 §10).
+    const command = new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: contentType, ContentLength: contentLength });
     const uploadUrl = await getSignedUrl(this.client, command, {
       expiresIn: UPLOAD_URL_TTL_SECONDS,
-      signableHeaders: new Set(['content-type']),
+      signableHeaders: new Set(['content-type', 'content-length']),
     });
 
     return {

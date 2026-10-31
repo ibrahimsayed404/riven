@@ -58,6 +58,38 @@ describe('AllExceptionsFilter', () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
+  it('a CHECK constraint violation (SQLSTATE 23514) is 409 CONSTRAINT_VIOLATION, not a 500 (commerce/25 S2)', () => {
+    const { host, status, json } = hostWith();
+    const error = new Prisma.PrismaClientUnknownRequestError(
+      'ConnectorError(... PostgresError { code: "23514", message: "new row for relation \\"product_variants\\" violates check constraint ..." })',
+      { clientVersion: 't' },
+    );
+    filter.catch(error, host);
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CONSTRAINT_VIOLATION' }));
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a serialization failure that outlived its retries (P2034)', new Prisma.PrismaClientKnownRequestError('conflict', { code: 'P2034', clientVersion: 't' })],
+    ['a deadlock from a raw query (P2010 / 40P01)', new Prisma.PrismaClientKnownRequestError('raw', { code: 'P2010', clientVersion: 't', meta: { code: '40P01' } })],
+    ['a lock timeout (55P03)', new Prisma.PrismaClientKnownRequestError('raw', { code: 'P2010', clientVersion: 't', meta: { code: '55P03' } })],
+    ['a transaction timeout (P2028)', new Prisma.PrismaClientKnownRequestError('Transaction already closed', { code: 'P2028', clientVersion: 't' })],
+    ['a statement timeout (57014)', new Prisma.PrismaClientKnownRequestError('raw', { code: 'P2010', clientVersion: 't', meta: { code: '57014' } })],
+  ])('%s is a coded, retryable 503 SERVICE_BUSY, never a 500 (commerce/25 §11)', (_label, error) => {
+    const { host, status, json } = hostWith();
+    filter.catch(error, host);
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ code: 'SERVICE_BUSY' }));
+  });
+
+  it('other unknown Prisma errors stay a logged 500', () => {
+    const { host, status } = hostWith();
+    filter.catch(new Prisma.PrismaClientUnknownRequestError('connection reset', { clientVersion: 't' }), host);
+    expect(status).toHaveBeenCalledWith(500);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('unknown errors are a generic 500 AND are logged with the stack and user (LOG-02)', () => {
     const { host, status, json } = hostWith({ user: { id: 'user-9' } });
     const boom = new Error('db down');

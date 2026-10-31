@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Role } from '@prisma/client';
 
@@ -28,6 +28,10 @@ export class RolesGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<RequestWithUser>();
     const user = request.user;
 
-    return Boolean(user && requiredRoles.includes(user.role));
+    if (user && requiredRoles.includes(user.role)) {
+      return true;
+    }
+    // Coded, so clients can tell "wrong role" from other 403s (was HTTP_ERROR).
+    throw new ForbiddenException({ code: 'FORBIDDEN_ROLE', message: 'Your role cannot use this endpoint.' });
   }
 }

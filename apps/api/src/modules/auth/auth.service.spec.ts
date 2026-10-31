@@ -124,7 +124,20 @@ describe('AuthService', () => {
       await expect(service.login({ email: 'gone@example.com', password: 'x' })).rejects.toMatchObject({
         response: { code: 'INVALID_CREDENTIALS' },
       });
-      expect(bcrypt.compare).not.toHaveBeenCalled();
+    });
+
+    it('an unknown email still costs one bcrypt comparison (against a dummy hash), so timing does not reveal which emails exist', async () => {
+      repository.findUserByEmail.mockResolvedValue(null);
+      // Even if the comparison "matched", an unknown email can never log in.
+      (bcrypt.compare as jest.Mock).mockResolvedValueOnce(true);
+
+      await expect(service.login({ email: 'nobody@example.com', password: 'Password1' })).rejects.toMatchObject({
+        response: { code: 'INVALID_CREDENTIALS' },
+      });
+      expect(bcrypt.compare).toHaveBeenCalledTimes(1);
+      const [, hashUsed] = (bcrypt.compare as jest.Mock).mock.calls[0];
+      expect(hashUsed).toMatch(/^\$2b\$12\$/); // same cost as real password hashes
+      expect(repository.createRefreshToken).not.toHaveBeenCalled();
     });
 
     it('an admin-deactivated user with the right password gets 403 ACCOUNT_DEACTIVATED', async () => {

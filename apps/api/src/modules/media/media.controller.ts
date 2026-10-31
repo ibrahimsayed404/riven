@@ -1,4 +1,5 @@
 import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Role } from '@prisma/client';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -18,7 +19,8 @@ export class MediaController {
   // resource — so 200 rather than the POST default of 201.
   @Post('upload-url')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   createUploadUrl(@CurrentUser('id') userId: string, @Body() dto: CreateUploadUrlDto) {
-    return this.mediaService.createUploadUrl(userId, dto.purpose, dto.contentType);
+    return this.mediaService.createUploadUrl(userId, dto.purpose, dto.contentType, dto.contentLength);
   }
 }
