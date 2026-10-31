@@ -28,10 +28,14 @@ import { SearchModule } from './modules/search/search.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { MediaModule } from './modules/media/media.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { HealthModule } from './modules/health/health.module';
+import { OutboxModule } from './modules/outbox/outbox.module';
+import { BarcodesModule } from './modules/barcodes/barcodes.module';
 import { AdminModule } from './modules/admin/admin.module';
 
+/** Public liveness check (the hosting health check); the detailed monitor endpoints live in HealthModule. */
 @Controller('health')
-class HealthController {
+export class LivenessController {
   @Get()
   health() {
     return { status: 'ok' };
@@ -69,8 +73,11 @@ class HealthController {
     MediaModule,
     AuditModule,
     AdminModule,
+    HealthModule,
+    OutboxModule,
+    BarcodesModule,
   ],
-  controllers: [HealthController],
+  controllers: [LivenessController],
   providers: [{ provide: APP_GUARD, useClass: UserThrottlerGuard }],
 })
 export class AppModule {}
