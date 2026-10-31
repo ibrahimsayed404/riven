@@ -9,6 +9,9 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 
 // specs/admin-module-spec2.md — admin reads across domains, category management.
 // Every route gets the same auth matrix: ADMIN 200, other roles 403, no token 401.
+// Today's exact answer when an organizer decides another organizer's application (characterization, plan §3.8).
+const PINNED_FOREIGN_DECISION = { status: 404, code: 'BAZAAR_NOT_FOUND', message: 'Bazaar not found.' };
+
 describe('Admin management — pass 2 (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
@@ -975,11 +978,11 @@ describe('Admin management — pass 2 (e2e)', () => {
       expect(res.body.code).toBe('APPLICATION_NOT_FOUND');
     });
 
-    it('the organizer route is unchanged: another organizer still cannot decide it', async () => {
-      await request(app.getHttpServer())
-        .patch(`/organizers/me/bazaars/${publishedBazaarId}/applications/${pendingApplicationId}/accept`)
-        .set('Authorization', `Bearer ${otherOrganizerToken}`)
-        .expect((r) => expect([403, 404]).toContain(r.status));
+    it.each(['accept', 'reject'])('the organizer route is unchanged: another organizer still cannot %s it (exact answer pinned, plan §3.8)', async (decision) => {
+      const res = await request(app.getHttpServer())
+        .patch(`/organizers/me/bazaars/${publishedBazaarId}/applications/${pendingApplicationId}/${decision}`)
+        .set('Authorization', `Bearer ${otherOrganizerToken}`);
+      expect({ status: res.status, code: res.body?.code, message: res.body?.message }).toEqual(PINNED_FOREIGN_DECISION);
       const row = await prisma.boothListing.findUniqueOrThrow({ where: { id: pendingApplicationId } });
       expect(row.applicationStatus).toBe('PENDING');
     });
