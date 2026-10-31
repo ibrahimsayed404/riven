@@ -13,6 +13,8 @@
     "test:e2e": "jest --runInBand --testPathPatterns e2e",
     "check:env": "node scripts/check-env-example.mjs",
     "check:drift": "node scripts/check-schema-drift.mjs",
+    "bench": "node scripts/bench-queries.mjs",
+    "env-guard": "node scripts/env-guard.mjs",
     "smoke": "nest build && node scripts/smoke-live.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.seed.json",
     "prisma": "prisma"
