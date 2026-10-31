@@ -115,5 +115,13 @@ jobs:
       - name: Apply migrations to the throwaway database
         run: pnpm --filter @riven/api prisma migrate deploy
 
+      - name: Schema drift check (TD-02)
+        # Migrations replayed on an empty shadow database must match schema.prisma;
+        # only the hand-written indexes in prisma/hand-sql-objects.json may differ.
+        # The hand-SQL existence test (hand-sql-objects.e2e.spec.ts) runs with the e2e step.
+        run: |
+          echo 'CREATE DATABASE "riven_shadow_test";' | pnpm --filter @riven/api exec prisma db execute --url "$DATABASE_URL" --stdin
+          SHADOW_DATABASE_URL=postgresql://riven:riven@localhost:5433/riven_shadow_test?schema=public pnpm --filter @riven/api check:drift
+
       - name: E2E tests
         run: pnpm --filter @riven/api test:e2e

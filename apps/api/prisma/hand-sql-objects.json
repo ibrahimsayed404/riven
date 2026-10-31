@@ -1,0 +1,172 @@
+{
+  "$comment": "TD-02 (specs/commerce/08, 06 §6): every database object Prisma cannot model or diff — CHECK constraints, triggers, trigger functions, GIST and partial indexes. Created in migration SQL; asserted to exist (and to be complete) by src/infra/prisma/hand-sql-objects.e2e.spec.ts after `prisma migrate deploy`. Add an entry in the same change as the migration that creates the object.",
+  "checks": [
+    {
+      "table": "barcodes",
+      "name": "barcodes_config_version_check"
+    },
+    {
+      "table": "barcodes",
+      "name": "barcodes_namespace_check"
+    },
+    {
+      "table": "barcodes",
+      "name": "barcodes_units_check"
+    },
+    {
+      "table": "barcodes",
+      "name": "barcodes_value_length_check"
+    },
+    {
+      "table": "bazaars",
+      "name": "bazaars_end_date_not_before_start"
+    },
+    {
+      "table": "cart_items",
+      "name": "cart_items_quantity_positive"
+    },
+    {
+      "table": "idempotency_keys",
+      "name": "idempotency_keys_completed_has_response"
+    },
+    {
+      "table": "idempotency_keys",
+      "name": "idempotency_keys_key_not_blank"
+    },
+    {
+      "table": "inventory_movements",
+      "name": "inventory_movements_after_non_negative"
+    },
+    {
+      "table": "inventory_movements",
+      "name": "inventory_movements_arithmetic"
+    },
+    {
+      "table": "inventory_movements",
+      "name": "inventory_movements_delta_non_zero"
+    },
+    {
+      "table": "inventory_movements",
+      "name": "inventory_movements_direction"
+    },
+    {
+      "table": "inventory_movements",
+      "name": "inventory_movements_order_link"
+    },
+    {
+      "table": "order_items",
+      "name": "order_items_quantity_positive"
+    },
+    {
+      "table": "outbox_deliveries",
+      "name": "outbox_deliveries_attempts_check"
+    },
+    {
+      "table": "outbox_deliveries",
+      "name": "outbox_deliveries_lease_check"
+    },
+    {
+      "table": "payment_exceptions",
+      "name": "payment_exceptions_amount_non_negative"
+    },
+    {
+      "table": "payment_exceptions",
+      "name": "payment_exceptions_group_required"
+    },
+    {
+      "table": "payment_exceptions",
+      "name": "payment_exceptions_resolution_consistent"
+    },
+    {
+      "table": "payment_provider_events",
+      "name": "payment_provider_events_amount_non_negative"
+    },
+    {
+      "table": "product_variants",
+      "name": "product_variants_stock_quantity_non_negative"
+    },
+    {
+      "table": "ratings",
+      "name": "rating_score_range"
+    }
+  ],
+  "triggers": [
+    {
+      "table": "barcode_events",
+      "name": "barcode_events_no_delete"
+    },
+    {
+      "table": "barcode_events",
+      "name": "barcode_events_no_update"
+    },
+    {
+      "table": "barcodes",
+      "name": "barcodes_mapping_immutable"
+    },
+    {
+      "table": "barcodes",
+      "name": "barcodes_no_delete"
+    },
+    {
+      "table": "inventory_movements",
+      "name": "inventory_movements_append_only"
+    },
+    {
+      "table": "outbox_deliveries",
+      "name": "outbox_deliveries_no_delete"
+    },
+    {
+      "table": "outbox_events",
+      "name": "outbox_events_no_delete"
+    },
+    {
+      "table": "outbox_events",
+      "name": "outbox_events_no_update"
+    },
+    {
+      "table": "payment_exceptions",
+      "name": "payment_exceptions_guard"
+    },
+    {
+      "table": "payment_provider_events",
+      "name": "payment_provider_events_guard"
+    },
+    {
+      "table": "processed_events",
+      "name": "processed_events_no_delete"
+    }
+  ],
+  "functions": [
+    "barcodes_mapping_guard",
+    "inventory_movements_append_only",
+    "outbox_append_only_guard",
+    "payment_exceptions_guard",
+    "payment_provider_events_guard"
+  ],
+  "indexes": [
+    {
+      "table": "barcodes",
+      "name": "barcodes_internal_value_key"
+    },
+    {
+      "table": "barcodes",
+      "name": "barcodes_vendor_value_key"
+    },
+    {
+      "table": "bazaars",
+      "name": "bazaar_location_gist"
+    },
+    {
+      "table": "events",
+      "name": "event_location_gist"
+    },
+    {
+      "table": "users",
+      "name": "user_location_gist"
+    },
+    {
+      "table": "vendors",
+      "name": "vendor_home_location_gist"
+    }
+  ]
+}
