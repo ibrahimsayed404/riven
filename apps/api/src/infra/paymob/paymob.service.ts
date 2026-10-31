@@ -49,6 +49,7 @@ export class PaymobService {
   private readonly logger = new Logger(PaymobService.name);
   private readonly hmacSecret: string;
   private readonly integrationId: string;
+  private readonly merchantId: string;
   private readonly apiKey: string;
   private readonly baseUrl = 'https://accept.paymob.com/v1/intention';
 
@@ -56,6 +57,7 @@ export class PaymobService {
     // Validated as optional at boot (env.validation.ts); absent in dev.
     this.hmacSecret = this.configService.get<string>('PAYMOB_HMAC_SECRET') || '';
     this.integrationId = this.configService.get<string>('PAYMOB_INTEGRATION_ID') || '';
+    this.merchantId = this.configService.get<string>('PAYMOB_MERCHANT_ID') || '';
     this.apiKey = this.configService.get<string>('PAYMOB_API_KEY') || '';
   }
 
@@ -119,6 +121,23 @@ export class PaymobService {
       this.logger.error('Paymob createIntention failed', error instanceof Error ? error.stack : String(error));
       throw error;
     }
+  }
+
+  /**
+   * The integration id this deployment created its intentions with, or null in
+   * dev. A signed callback for any other integration is not ours (and pins the
+   * id ↔ integration_id boundary of the delimiter-less HMAC string).
+   */
+  expectedIntegrationId(): string | null {
+    return this.integrationId || null;
+  }
+
+  /**
+   * The merchant id Paymob signs as `owner`, or null when not configured. Pins
+   * the order.id ↔ owner boundary of the delimiter-less HMAC string.
+   */
+  expectedMerchantId(): string | null {
+    return this.merchantId || null;
   }
 
   /**

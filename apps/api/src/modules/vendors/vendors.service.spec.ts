@@ -26,6 +26,8 @@ describe('VendorsService', () => {
       createProductVariant: jest.fn(),
       updateProductVariant: jest.fn(),
       deleteProductVariant: jest.fn(),
+      adjustVariantStock: jest.fn(),
+      findVariantMovements: jest.fn(),
       findForSearch: jest.fn(),
       listPublicIds: jest.fn(),
       findModerationState: jest.fn(),
@@ -412,7 +414,7 @@ describe('VendorsService', () => {
       vendorsRepository.deleteProductVariant.mockResolvedValue({ id: 'var-1' } as any);
 
       await service.createProductVariant('owner-1', 'prod-1', { sku: 'S2' });
-      await service.updateProductVariant('owner-1', 'prod-1', 'var-1', { stockQuantity: 3 });
+      await service.updateProductVariant('owner-1', 'prod-1', 'var-1', { color: 'Red' });
       await service.deleteProductVariant('owner-1', 'prod-1', 'var-1');
 
       expect(searchIndexQueue.enqueue).toHaveBeenCalledTimes(3);
@@ -458,6 +460,58 @@ describe('VendorsService', () => {
 
       expect(doc).toEqual(vendor);
       expect(doc).not.toHaveProperty('_geo');
+    });
+  });
+
+  describe('stock adjustments (TD-08, commerce/25 S3)', () => {
+    const product = { id: 'prod-1', vendorId: 'vendor-1', variants: [{ id: 'var-1' }] } as any;
+    beforeEach(() => {
+      vendorsRepository.findByOwnerId.mockResolvedValue({ id: 'vendor-1', verified: true } as any);
+      vendorsRepository.findProductByIdAndVendor.mockResolvedValue(product);
+    });
+
+    it('applies a signed change with its reason, re-indexes the product, returns the new stock and the ledger row', async () => {
+      (vendorsRepository as any).adjustVariantStock.mockResolvedValue({ stockQuantity: 8, movement: { id: 'm-1' } });
+      await expect(service.adjustVariantStock('owner-1', 'prod-1', 'var-1', { change: -2, reason: 'two damaged' })).resolves.toEqual({
+        variantId: 'var-1',
+        stockQuantity: 8,
+        movement: { id: 'm-1' },
+      });
+      expect((vendorsRepository as any).adjustVariantStock).toHaveBeenCalledWith({ variantId: 'var-1', change: -2, reason: 'two damaged', actorUserId: 'owner-1' });
+      expect(searchIndexQueue.enqueue).toHaveBeenCalledWith({ type: 'PRODUCT', id: 'prod-1' });
+    });
+
+    it('409 STOCK_BELOW_ZERO when the change would go below zero (reserved units are no longer in the counter)', async () => {
+      (vendorsRepository as any).adjustVariantStock.mockResolvedValue(null);
+      await expect(service.adjustVariantStock('owner-1', 'prod-1', 'var-1', { change: -50, reason: 'count' })).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'STOCK_BELOW_ZERO' },
+      });
+      expect(searchIndexQueue.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('404 for a variant of another product or vendor; the repository is never reached', async () => {
+      await expect(service.adjustVariantStock('owner-1', 'prod-1', 'other-var', { change: 1, reason: 'x y z' })).rejects.toMatchObject({
+        response: { code: 'VARIANT_NOT_FOUND' },
+      });
+      vendorsRepository.findProductByIdAndVendor.mockResolvedValue(null);
+      await expect(service.adjustVariantStock('owner-1', 'prod-1', 'var-1', { change: 1, reason: 'x y z' })).rejects.toMatchObject({ status: 404 });
+      expect((vendorsRepository as any).adjustVariantStock).not.toHaveBeenCalled();
+    });
+
+    it('stock history is owner-scoped and paginated', async () => {
+      (vendorsRepository as any).findVariantMovements.mockResolvedValue({ data: [], total: 0 });
+      await expect(service.getVariantStockMovements('owner-1', 'prod-1', 'var-1', 2, 10)).resolves.toEqual({
+        data: [],
+        meta: expect.objectContaining({ page: 2, limit: 10, total: 0 }),
+      });
+      expect((vendorsRepository as any).findVariantMovements).toHaveBeenCalledWith('var-1', 2, 10);
+    });
+
+    it('a new variant passes the vendor as the actor of its initial-stock ledger row', async () => {
+      vendorsRepository.createProductVariant.mockResolvedValue({ id: 'var-2' } as any);
+      await service.createProductVariant('owner-1', 'prod-1', { sku: 'S2', stockQuantity: 4 });
+      expect(vendorsRepository.createProductVariant).toHaveBeenCalledWith('prod-1', { sku: 'S2', stockQuantity: 4 }, 'owner-1');
     });
   });
 });

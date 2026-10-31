@@ -77,20 +77,58 @@ const envSchema = z.object({
   // Paymob is optional at boot (no credentials in dev) but must be well-formed
   // when present, so a typo fails at startup rather than at the first payment.
   PAYMOB_API_KEY: z.preprocess(blankToUndefined, z.string().min(1).optional()),
-  PAYMOB_INTEGRATION_ID: z.preprocess(blankToUndefined, z.string().regex(/^[0-9]+$/).optional()),
+  // No leading zero: the webhook compares it with the signed integer as a string (commerce/25 §11).
+  PAYMOB_INTEGRATION_ID: z.preprocess(blankToUndefined, z.string().regex(/^[1-9][0-9]*$/).optional()),
   PAYMOB_HMAC_SECRET: z.preprocess(blankToUndefined, z.string().min(1).optional()),
+  // The merchant id Paymob signs as `owner` in every callback. Pinned together
+  // with PAYMOB_INTEGRATION_ID because the webhook HMAC concatenates fields
+  // without delimiters (commerce/25 §11): required whenever the secret is set.
+  PAYMOB_MERCHANT_ID: z.preprocess(blankToUndefined, z.string().regex(/^[1-9][0-9]*$/).optional()),
   // How long a PENDING checkout keeps its stock before the expiry job cancels
   // it and releases the inventory (fix.js PAY-03).
   CHECKOUT_PENDING_TTL_MINUTES: z.coerce.number().int().positive().default(60),
+  // Which process runs the reservation-expiry worker and owns its schedule
+  // (specs/commerce/23 R1, 22 §5.4): "all" = this API process (today), "api" =
+  // HTTP only (a separate worker runs it), "worker" = the worker entry point.
+  // Exactly one component type may own the schedule at a time.
+  PROCESS_ROLE: z.preprocess(blankToUndefined, z.enum(['all', 'api', 'worker']).default('all')),
+  // Optional external heartbeat (specs/commerce/22 §4.3, M1): pinged after every
+  // successful expiry run, "/fail" appended after a failed one. Unset = no ping.
+  EXPIRY_HEARTBEAT_URL: z.preprocess(blankToUndefined, z.string().url().optional()),
+  // Shared secret for the monitor endpoints /health/dependencies and
+  // /health/maintenance (header x-health-token). Unset = those endpoints are off.
+  HEALTH_CHECK_TOKEN: z.preprocess(blankToUndefined, z.string().min(16).optional()),
 });
 
 export type Env = z.infer<typeof envSchema>;
+
+/** Values published in .env.example / docker-compose.yml: fine locally, never in production. */
+export const PUBLISHED_DEV_SECRETS = ['riven_dev_password', 'riven_dev_master_key'];
 
 export function validateEnv(config: Record<string, unknown>): Env {
   const parsed = envSchema.safeParse(config);
 
   if (!parsed.success) {
     throw new Error(`Invalid environment configuration: ${parsed.error.message}`);
+  }
+
+  if (parsed.data.PAYMOB_HMAC_SECRET && (!parsed.data.PAYMOB_INTEGRATION_ID || !parsed.data.PAYMOB_MERCHANT_ID)) {
+    // Without both pins a signed callback's digits could be shifted between
+    // id / integration_id or order.id / owner and still verify.
+    throw new Error('Invalid environment configuration: PAYMOB_HMAC_SECRET requires PAYMOB_INTEGRATION_ID and PAYMOB_MERCHANT_ID');
+  }
+
+  if (parsed.data.NODE_ENV === 'production') {
+    // The published .env.example placeholder is fine locally, never in production (commerce/25 §10).
+    if (/replace_with/i.test(parsed.data.JWT_SECRET)) {
+      throw new Error('Invalid environment configuration: JWT_SECRET is still the .env.example placeholder; generate a random secret');
+    }
+    const leaked = (['DATABASE_URL', 'MEILISEARCH_API_KEY', 'S3_SECRET_ACCESS_KEY'] as const).filter((name) =>
+      PUBLISHED_DEV_SECRETS.some((secret) => String(parsed.data[name]).includes(secret)),
+    );
+    if (leaked.length > 0) {
+      throw new Error(`Invalid environment configuration: ${leaked.join(', ')} still use the published development secrets`);
+    }
   }
 
   return parsed.data;

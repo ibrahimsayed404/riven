@@ -7,6 +7,9 @@ import { Prisma } from '@prisma/client';
  */
 export type Cents = number;
 
+/** The only currency Riven charges in; a provider payment in anything else is never applied. */
+export const PLATFORM_CURRENCY = 'EGP';
+
 export function toCents(amount: Prisma.Decimal | number | string): Cents {
   return new Prisma.Decimal(amount).mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP).toNumber();
 }

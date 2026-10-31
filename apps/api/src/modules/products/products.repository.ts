@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Product, ProductVariant } from '@prisma/client';
+import { InventoryMovementType, Prisma, Product, ProductVariant } from '@prisma/client';
 
 /** Max category nesting the ancestor walk will follow; also guards against cycles. */
 const CATEGORY_PATH_MAX_DEPTH = 10;
@@ -262,5 +262,47 @@ export class ProductsRepository {
 
       return { data, total };
     });
+  }
+
+  /** The stock ledger (commerce/25 S3), newest first, with the variant, its product and the actor. */
+  async findInventoryMovementsForAdmin(params: {
+    variantId?: string;
+    productId?: string;
+    orderGroupId?: string;
+    type?: InventoryMovementType;
+    page: number;
+    limit: number;
+  }) {
+    const where: Prisma.InventoryMovementWhereInput = {};
+    if (params.variantId) where.variantId = params.variantId;
+    if (params.productId) where.variant = { productId: params.productId };
+    if (params.orderGroupId) where.orderGroupId = params.orderGroupId;
+    if (params.type) where.type = params.type;
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.inventoryMovement.count({ where }),
+      this.prisma.inventoryMovement.findMany({
+        where,
+        include: {
+          variant: { select: { id: true, sku: true, product: { select: { id: true, title: true, vendorId: true } } } },
+          actor: { select: { id: true, name: true, role: true } },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (params.page - 1) * params.limit,
+        take: params.limit,
+      }),
+    ]);
+    return { data, total };
+  }
+
+  /**
+   * Variants whose ledger does not add up to their stock (commerce/25 §10):
+   * SUM(quantityDelta) must equal stockQuantity for every variant. Non-zero
+   * means a stock write skipped the ledger (e.g. old code during a deploy).
+   */
+  async countLedgerMismatches(): Promise<number> {
+    const [row] = await this.prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS n FROM "product_variants" v
+      WHERE v."stockQuantity" <> COALESCE((SELECT SUM(m."quantityDelta") FROM "inventory_movements" m WHERE m."variantId" = v."id"), 0)`;
+    return Number(row?.n ?? 0);
   }
 }

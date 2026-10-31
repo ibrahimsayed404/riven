@@ -17,6 +17,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
+import { StockAdjustmentDto } from './dto/stock-adjustment.dto';
 
 @Controller('vendors')
 export class VendorsController {
@@ -130,6 +131,31 @@ export class VendorsController {
     @Body() updateVariantDto: UpdateProductVariantDto,
   ) {
     return this.vendorsService.updateProductVariant(user.id, productId, variantId, updateVariantDto);
+  }
+
+  // Stock is changed only by a signed delta with a reason (TD-08, specs/commerce/25 S3).
+  @Post('me/products/:id/variants/:variantId/stock-adjustments')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR)
+  adjustVariantStock(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') productId: string,
+    @Param('variantId') variantId: string,
+    @Body() dto: StockAdjustmentDto,
+  ) {
+    return this.vendorsService.adjustVariantStock(user.id, productId, variantId, dto);
+  }
+
+  @Get('me/products/:id/variants/:variantId/stock-movements')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR)
+  getVariantStockMovements(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') productId: string,
+    @Param('variantId') variantId: string,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.vendorsService.getVariantStockMovements(user.id, productId, variantId, query.page ?? 1, query.limit ?? 20);
   }
 
   @Delete('me/products/:id/variants/:variantId')

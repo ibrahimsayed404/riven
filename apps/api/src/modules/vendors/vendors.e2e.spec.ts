@@ -31,6 +31,18 @@ describe('VendorsModule (e2e)', () => {
     prisma = moduleFixture.get(PrismaService);
     
     // Clean up
+    // Rows that reference variants / users (RESTRICT) may be left by other suites or the smoke run.
+    await prisma.rating.deleteMany();
+    await prisma.orderItem.deleteMany();
+    await prisma.order.deleteMany();
+    // payment_exceptions → order_groups is RESTRICT and its rows are never deleted (trigger); TRUNCATE skips row triggers.
+    await prisma.$executeRawUnsafe('TRUNCATE "payment_exceptions", "inventory_movements"');
+    await prisma.idempotencyKey.deleteMany(); // key → order group is RESTRICT (keys left by smoke runs, commerce/25 S4)
+    await prisma.orderGroup.deleteMany();
+    await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany();
+    // Barcodes reference variants / vendors (RESTRICT) and refuse DELETE: reset them first.
+    await prisma.$executeRawUnsafe('TRUNCATE "barcode_events", "barcodes"');
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     await prisma.vendor.deleteMany();
@@ -82,6 +94,18 @@ describe('VendorsModule (e2e)', () => {
   });
 
   afterAll(async () => {
+    // Rows that reference variants / users (RESTRICT) may be left by other suites or the smoke run.
+    await prisma.rating.deleteMany();
+    await prisma.orderItem.deleteMany();
+    await prisma.order.deleteMany();
+    // payment_exceptions → order_groups is RESTRICT and its rows are never deleted (trigger); TRUNCATE skips row triggers.
+    await prisma.$executeRawUnsafe('TRUNCATE "payment_exceptions", "inventory_movements"');
+    await prisma.idempotencyKey.deleteMany(); // key → order group is RESTRICT (keys left by smoke runs, commerce/25 S4)
+    await prisma.orderGroup.deleteMany();
+    await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany();
+    // Barcodes reference variants / vendors (RESTRICT) and refuse DELETE: reset them first.
+    await prisma.$executeRawUnsafe('TRUNCATE "barcode_events", "barcodes"');
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     await prisma.vendor.deleteMany();

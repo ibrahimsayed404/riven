@@ -1,5 +1,5 @@
 import { Body, Controller, Headers, HttpCode, Post, Query } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
 
 import { PaymobWebhookDispatcher } from './paymob-webhook.dispatcher';
 
@@ -13,8 +13,9 @@ import { PaymobWebhookDispatcher } from './paymob-webhook.dispatcher';
 export class PaymobWebhookController {
   constructor(private readonly dispatcher: PaymobWebhookDispatcher) {}
 
-  // Paymob retries aggressively; the HMAC is the gate here, not the rate limit.
-  @SkipThrottle()
+  // Paymob retries aggressively, so the limit is high; it only stops a replayed
+  // signed body from being used to hammer the database (commerce/25 §10).
+  @Throttle({ default: { limit: 600, ttl: 60_000 } })
   @Post()
   @HttpCode(200)
   handleWebhook(

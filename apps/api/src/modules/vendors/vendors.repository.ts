@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, Product, ProductVariant } from '@prisma/client';
+import { InventoryMovement, Prisma, Product, ProductVariant } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { MOVEMENT_SOURCE } from '../products/inventory-ledger';
 import { ACTIVE_VARIANT_WHERE } from '../products/product-visibility';
 
 const vendorProfileSelect = {
@@ -315,13 +316,94 @@ export class VendorsRepository {
 
   // --- Product Variant Methods ---
 
-  createProductVariant(productId: string, data: Omit<Prisma.ProductVariantUncheckedCreateInput, 'productId'>): Promise<ProductVariant> {
-    return this.prisma.productVariant.create({
-      data: {
-        ...data,
-        productId,
-      },
+  /**
+   * Creates the variant and, when it starts with stock, its first ledger row —
+   * one transaction (commerce/25 S3: every stock change is a movement).
+   */
+  createProductVariant(
+    productId: string,
+    data: Omit<Prisma.ProductVariantUncheckedCreateInput, 'productId'>,
+    actorUserId: string,
+  ): Promise<ProductVariant> {
+    return this.prisma.$transaction(async (tx) => {
+      const variant = await tx.productVariant.create({ data: { ...data, productId } });
+      if (variant.stockQuantity > 0) {
+        await tx.inventoryMovement.create({
+          data: {
+            variantId: variant.id,
+            type: 'VENDOR_ADJUSTMENT',
+            quantityDelta: variant.stockQuantity,
+            quantityBefore: 0,
+            quantityAfter: variant.stockQuantity,
+            actorUserId,
+            source: MOVEMENT_SOURCE.VENDOR,
+            reason: 'initial stock',
+          },
+        });
+      }
+      return variant;
     });
+  }
+
+  /**
+   * The vendor's signed stock change (TD-08). One atomic UPDATE that only
+   * applies while the result stays >= 0, so it can never take back units a
+   * checkout has already reserved (they are no longer in the counter), plus its
+   * ledger row in the same transaction. null = it would go below zero.
+   */
+  adjustVariantStock(input: {
+    variantId: string;
+    change: number;
+    reason: string;
+    actorUserId: string;
+  }): Promise<{ stockQuantity: number; movement: InventoryMovement } | null> {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ stockQuantity: number }[]>`
+        UPDATE "product_variants" SET "stockQuantity" = "stockQuantity" + ${input.change}
+        WHERE "id" = ${input.variantId} AND "deletedAt" IS NULL AND "stockQuantity" + ${input.change} >= 0
+        RETURNING "stockQuantity"`;
+      if (rows.length === 0) return null;
+      const after = Number(rows[0].stockQuantity);
+      const movement = await tx.inventoryMovement.create({
+        data: {
+          variantId: input.variantId,
+          type: 'VENDOR_ADJUSTMENT',
+          quantityDelta: input.change,
+          quantityBefore: after - input.change,
+          quantityAfter: after,
+          actorUserId: input.actorUserId,
+          source: MOVEMENT_SOURCE.VENDOR,
+          reason: input.reason,
+        },
+      });
+      return { stockQuantity: after, movement };
+    });
+  }
+
+  /** The vendor's view of a variant's ledger: no user ids (an admin cancel would expose the admin's), `source` says who. */
+  async findVariantMovements(variantId: string, page: number, limit: number) {
+    const where = { variantId };
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.inventoryMovement.count({ where }),
+      this.prisma.inventoryMovement.findMany({
+        where,
+        select: {
+          id: true,
+          type: true,
+          quantityDelta: true,
+          quantityBefore: true,
+          quantityAfter: true,
+          orderGroupId: true,
+          source: true,
+          reason: true,
+          createdAt: true,
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+    return { data, total };
   }
 
   updateProductVariant(variantId: string, data: Prisma.ProductVariantUpdateInput): Promise<ProductVariant> {

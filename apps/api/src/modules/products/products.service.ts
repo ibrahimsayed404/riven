@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AdminAction, AdminTargetType } from '@prisma/client';
+import { AdminAction, AdminTargetType, InventoryMovementType } from '@prisma/client';
 import { ProductsRepository, IdPage } from './products.repository';
 import { AuditService } from '../audit/audit.service';
 import { ListProductsQueryDto } from './dto/list-products-query.dto';
@@ -153,6 +153,24 @@ export class ProductsService {
 
   listPublicProductIds(cursor: string | null, take: number): Promise<IdPage> {
     return this.productsRepository.listPublicIds(cursor, take);
+  }
+
+  /** For monitoring (GET /health/maintenance): variants whose ledger does not equal their stock. */
+  countLedgerMismatches(): Promise<number> {
+    return this.productsRepository.countLedgerMismatches();
+  }
+
+  /** Read-only stock ledger for admins (commerce/25 S3). */
+  async listInventoryMovementsForAdmin(params: {
+    variantId?: string;
+    productId?: string;
+    orderGroupId?: string;
+    type?: InventoryMovementType;
+    page: number;
+    limit: number;
+  }) {
+    const { data, total } = await this.productsRepository.findInventoryMovementsForAdmin(params);
+    return { data, meta: pageMeta(total, params.page, params.limit) };
   }
 }
 

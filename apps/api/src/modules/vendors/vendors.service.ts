@@ -11,6 +11,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
+import { StockAdjustmentDto } from './dto/stock-adjustment.dto';
 import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { changedFields } from '../../common/changed-fields';
 import { AdminUpdateVendorDto } from './dto/admin-update-vendor.dto';
@@ -329,7 +330,7 @@ export class VendorsService {
   async createProductVariant(ownerId: string, productId: string, createVariantDto: CreateProductVariantDto) {
     await this.getMyProduct(ownerId, productId);
     try {
-      const variant = await this.vendorsRepository.createProductVariant(productId, createVariantDto);
+      const variant = await this.vendorsRepository.createProductVariant(productId, createVariantDto, ownerId);
       // minPrice/maxPrice/sizes/colors derive from variants → re-index the parent.
       await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
       return variant;
@@ -369,5 +370,35 @@ export class VendorsService {
     const variant = await this.vendorsRepository.deleteProductVariant(variantId);
     await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
     return variant;
+  }
+
+  // --- Stock (TD-08, specs/commerce/25 S3) ---
+
+  /** Signed change with a reason; refused (409) when it would take stock below zero. */
+  async adjustVariantStock(ownerId: string, productId: string, variantId: string, dto: StockAdjustmentDto) {
+    await this.assertOwnVariant(ownerId, productId, variantId);
+    const result = await this.vendorsRepository.adjustVariantStock({ variantId, change: dto.change, reason: dto.reason, actorUserId: ownerId });
+    if (!result) {
+      throw new ConflictException({
+        code: 'STOCK_BELOW_ZERO',
+        message: 'This change would take stock below zero. Units already in shoppers\' orders cannot be removed.',
+      });
+    }
+    await this.searchIndexQueue.enqueue({ type: 'PRODUCT', id: productId });
+    return { variantId, stockQuantity: result.stockQuantity, movement: result.movement };
+  }
+
+  /** The variant's stock history, newest first (who, when, why, before → after). */
+  async getVariantStockMovements(ownerId: string, productId: string, variantId: string, page: number, limit: number) {
+    await this.assertOwnVariant(ownerId, productId, variantId);
+    const { data, total } = await this.vendorsRepository.findVariantMovements(variantId, page, limit);
+    return { data, meta: pageMeta(total, page, limit) };
+  }
+
+  private async assertOwnVariant(ownerId: string, productId: string, variantId: string): Promise<void> {
+    const product = await this.getMyProduct(ownerId, productId);
+    if (!product.variants.some((v) => v.id === variantId)) {
+      throw variantNotFound();
+    }
   }
 }
