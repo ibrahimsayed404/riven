@@ -144,6 +144,77 @@ const results = [];
 const covered = new Set();
 const future = (days) => new Date(Date.now() + days * 86_400_000).toISOString();
 
+// ---------------------------------------------------------------- behaviour snapshot
+// specs/architecture-and-query-performance-plan.md §5: SMOKE_SNAPSHOT=<file> with
+// SMOKE_SNAPSHOT_MODE=record|compare records (or compares against) everything a
+// refactor must not change: status, error code + message, key headers, body key
+// paths with value types, list order, and the run's side-effect rows.
+const SNAPSHOT_FILE = process.env.SMOKE_SNAPSHOT;
+const SNAPSHOT_MODE = process.env.SMOKE_SNAPSHOT_MODE || 'record';
+const snapshot = [];
+const idLabels = new Map();
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+function mask(text) {
+  if (typeof text !== 'string') return text;
+  return text.split(run).join('<run>').replace(UUID, '<id>').replace(/\d{5,}/g, '<n>');
+}
+function typeOf(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+// riven_test keeps earlier runs' rows (smoke wipes nothing), so lists are judged by
+// this run's own rows only: ids are remembered (and labelled, in creation order)
+// from every 201 POST.
+const ownIds = new Set();
+function rememberCreated(json) {
+  if (json && typeof json.id === 'string') {
+    ownIds.add(json.id);
+    label(json.id);
+  }
+}
+const isRowList = (list) => list.length > 0 && list.every((row) => row && typeof row === 'object' && typeof row.id === 'string');
+function shape(value, path = '$', out = {}, allRows = false) {
+  const add = (p, t) => (out[p] = out[p] && out[p] !== t ? [...new Set([...out[p].split('|'), t])].sort().join('|') : t);
+  add(path, typeOf(value));
+  if (Array.isArray(value)) {
+    // element shape = union over this run's own rows; a row list holding none of
+    // ours (e.g. search not yet indexed) contributes no element shape
+    const items = isRowList(value) && !allRows ? value.filter((row) => ownIds.has(row.id)) : value;
+    for (const item of items) shape(item, `${path}[]`, out, allRows);
+  } else if (value && typeof value === 'object') {
+    for (const key of Object.keys(value).sort()) shape(value[key], `${path}.${key}`, out, allRows);
+  }
+  return out;
+}
+function label(id) {
+  if (!idLabels.has(id)) idLabels.set(id, `#${idLabels.size + 1}`);
+  return idLabels.get(id);
+}
+// Two documented exceptions to exact types (plan §5), both caused by the shared
+// test database, not by the code: a cursor is null or a string depending on how
+// many rows earlier runs left, and search hits depend on Meilisearch indexing
+// timing / on how many nearby rows earlier runs left — search and discovery feeds
+// are compared by key paths (their types are covered by search.e2e and
+// discovery.e2e). Every other route compares exact types.
+function normalizeShape(route, out) {
+  for (const path of Object.keys(out)) {
+    if (/\.nextCursor$/.test(path)) out[path] = 'cursor';
+    else if (route.startsWith('GET /search') || route.startsWith('GET /discovery')) out[path] = 'present';
+  }
+  return out;
+}
+const SORT_KEYS = ['distanceMeters', 'startDate', 'createdAt'];
+function listOrder(json) {
+  const list = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : null;
+  if (!list || (list.length > 0 && !isRowList(list))) return undefined; // an empty list orders as []
+  const own = list.filter((row) => ownIds.has(row.id));
+  // equal sort values are ordered by a random-uuid tiebreak — not comparable across runs
+  const key = SORT_KEYS.find((k) => own.every((row) => k in row));
+  if (key && new Set(own.map((row) => JSON.stringify(row[key]))).size < own.length) return 'tie';
+  return own.map((row) => label(row.id));
+}
+
 async function call(name, method, tpl, { token, body, params = {}, query, expect, headers: extraHeaders = {} }) {
   covered.add(`${method} /${tpl}`);
   let path = tpl.replace(/:(\w+)/g, (_, k) => encodeURIComponent(params[k] ?? `missing-${k}`));
@@ -152,9 +223,11 @@ async function call(name, method, tpl, { token, body, params = {}, query, expect
   if (token) headers.Authorization = `Bearer ${token}`;
   let status = 0;
   let text = '';
+  let resHeaders = null;
   try {
     const res = await fetch(BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
     status = res.status;
+    resHeaders = res.headers;
     text = await res.text();
   } catch (error) {
     text = String(error);
@@ -168,6 +241,26 @@ async function call(name, method, tpl, { token, body, params = {}, query, expect
   const expected = Array.isArray(expect) ? expect : [expect];
   const ok = expected.includes(status);
   results.push({ kind: 'HTTP', name, method, path: '/' + path, expect: expected.join('|'), status, ok, code: json?.code, detail: ok ? '' : text.slice(0, 400) });
+  if (SNAPSHOT_FILE) {
+    if (method === 'POST' && status === 201) rememberCreated(json);
+    snapshot.push({
+      name,
+      route: `${method} /${tpl}`,
+      // a multi-status step compares membership, not the exact status
+      status: expected.length > 1 ? `one-of:${expected.join('|')}` : status,
+      code: json?.code,
+      message: Array.isArray(json?.message) ? json.message.map(mask) : mask(json?.message),
+      headers: {
+        contentType: resHeaders?.get('content-type') ?? null,
+        location: mask(resHeaders?.get('location') ?? null),
+        retryAfter: resHeaders?.has('retry-after') ?? false,
+        rateLimit: resHeaders?.has('x-ratelimit-limit') ?? false,
+      },
+      shape: json === null ? null : normalizeShape(`${method} /${tpl}`, shape(json, '$', {}, /^(search|discovery)/.test(tpl))),
+      // membership of search / discovery feeds depends on shared data (see normalizeShape): no order
+      order: expected.length > 1 || /^(search|discovery)/.test(tpl) ? undefined : listOrder(json),
+    });
+  }
   return { status, body: json };
 }
 
@@ -538,7 +631,17 @@ async function scenario(prisma) {
   await call('public bazaars', 'GET', 'bazaars', { expect: 200 });
   await call('public bazaar detail', 'GET', 'bazaars/:id', { params: { id: b1 }, expect: 200 });
   const disc = await call('discovery near me', 'GET', 'discovery/bazaars', { query: { lat: 30.0626, lng: 31.2197, radiusKm: 5 }, expect: 200 });
-  check('discovery finds bazaar 1', disc.body?.data?.some((x) => x.id === b1), `${disc.body?.data?.length} rows`);
+  // riven_test keeps earlier runs' bazaars at the same coordinates, so this run's
+  // bazaar may be past page 1: follow the cursor (plain fetch, outside call()).
+  let discRows = disc.body?.data ?? [];
+  let discFound = discRows.some((x) => x.id === b1);
+  for (let cursor = disc.body?.nextCursor, pages = 0; !discFound && cursor && pages < 50; pages++) {
+    const next = await (await fetch(`${BASE}discovery/bazaars?${new URLSearchParams({ lat: 30.0626, lng: 31.2197, radiusKm: 5, cursor })}`)).json();
+    discRows = next.data ?? [];
+    discFound = discRows.some((x) => x.id === b1);
+    cursor = next.nextCursor;
+  }
+  check('discovery finds bazaar 1', discFound, `not found after following the cursor`);
   await call('discovery lat without lng -> 400', 'GET', 'discovery/bazaars', { query: { lat: 30 }, expect: 400 });
 
   await call('vendor apply bazaar 1', 'POST', 'bazaars/:id/apply', { token: vendorToken, params: { id: b1 }, expect: 201 });
@@ -628,8 +731,8 @@ async function scenario(prisma) {
   const renamed = await eventually(async () => {
     const hits = (await searchQuiet('search/products', WORD))?.hits ?? [];
     return hits.length >= 2 && hits.every((h) => h.vendorName === `Renamed ${WORD}`) ? hits : null;
-  });
-  check('product documents carry the new vendorName', renamed, 'still the old name after 20 s');
+  }, 60_000); // a fan-out job (VENDOR_PRODUCTS) behind other index tasks: allow a minute
+  check('product documents carry the new vendorName', renamed, 'still the old name after 60 s');
   await call('reindex (test prefix)', 'POST', 'admin/search/reindex', { token: adminToken, body: { types: ['products'] }, expect: 202 });
   await call('reindex as vendor -> 403', 'POST', 'admin/search/reindex', { token: vendorToken, body: {}, expect: 403 });
 
@@ -687,6 +790,45 @@ try {
     await scenario(prisma);
   } catch (error) {
     results.push({ kind: 'CRASH', name: 'scenario crashed', ok: false, detail: error.stack });
+  }
+
+  if (SNAPSHOT_FILE) {
+    // side effects of this run, selected by the run's actors / entities (§5.4)
+    const mine = { contains: run };
+    const group = (rows, keyOf) => Object.fromEntries(Object.entries(rows.reduce((acc, row) => ((acc[keyOf(row)] = (acc[keyOf(row)] ?? 0) + 1), acc), {})).sort(([a], [b]) => (a < b ? -1 : 1)));
+    const audit = await prisma.adminAuditLog.findMany({ where: { actor: { email: mine } }, select: { action: true, targetType: true } });
+    const movements = await prisma.inventoryMovement.findMany({
+      where: { variant: { product: { vendor: { owner: { email: mine } } } } },
+      select: { type: true, quantityDelta: true, source: true },
+    });
+    const exceptions = await prisma.paymentException.findMany({ where: { providerTransactionId: mine }, select: { type: true, status: true } });
+    const outbox = await prisma.outboxEvent.count({ where: { aggregateId: mine } });
+    const sideEffects = {
+      audit: group(audit, (r) => `${r.action}/${r.targetType}`),
+      movements: group(movements, (r) => `${r.type}/${r.source}/${r.quantityDelta}`),
+      paymentExceptions: group(exceptions, (r) => `${r.type}/${r.status}`),
+      outboxEvents: outbox,
+    };
+    const current = { requests: snapshot, sideEffects };
+    if (SNAPSHOT_MODE === 'record') {
+      writeFileSync(SNAPSHOT_FILE, JSON.stringify(current, null, 2));
+      console.log(`smoke: snapshot recorded ${SNAPSHOT_FILE} (${snapshot.length} requests)`);
+    } else {
+      const baseline = JSON.parse(readFileSync(SNAPSHOT_FILE, 'utf8'));
+      const diffs = [];
+      const n = Math.max(baseline.requests.length, snapshot.length);
+      for (let i = 0; i < n; i++) {
+        const a = JSON.stringify(baseline.requests[i]);
+        const b = JSON.stringify(snapshot[i]);
+        if (a !== b) diffs.push(`#${i} ${snapshot[i]?.name ?? baseline.requests[i]?.name}\n   baseline: ${a}\n   current:  ${b}`);
+      }
+      if (JSON.stringify(baseline.sideEffects) !== JSON.stringify(sideEffects)) {
+        diffs.push(`side effects\n   baseline: ${JSON.stringify(baseline.sideEffects)}\n   current:  ${JSON.stringify(sideEffects)}`);
+      }
+      check('behaviour snapshot identical to the baseline', diffs.length === 0, diffs.slice(0, 5).join('\n'));
+      console.log(`smoke: snapshot compare — ${diffs.length} difference(s)`);
+      if (diffs.length) writeFileSync(`${SNAPSHOT_FILE}.diff.txt`, diffs.join('\n'));
+    }
   }
 
   const routes = controllerRoutes();
