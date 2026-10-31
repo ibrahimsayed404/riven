@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
+import { paginate } from '../../infra/prisma/paginate';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 
 const organizerProfileSelect = {
@@ -111,16 +112,16 @@ export class OrganizersRepository {
       ];
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.organizer.count({ where });
-      const data = await tx.organizer.findMany({
-        where,
-        select: adminOrganizerRowSelect,
-        orderBy: { createdAt: 'asc' },
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-      });
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.organizer.count({ where: w }),
+      page: (w) =>
+        this.prisma.organizer.findMany({
+          where: w,
+          select: adminOrganizerRowSelect,
+          orderBy: { createdAt: 'asc' },
+          skip: (params.page - 1) * params.limit,
+          take: params.limit,
+        }),
     });
   }
 

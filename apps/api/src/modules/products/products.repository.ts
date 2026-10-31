@@ -58,6 +58,7 @@ export type ProductForSearch = Product & {
   variants: Pick<ProductVariant, 'size' | 'color' | 'priceOverride'>[];
 };
 
+import { paginate } from '../../infra/prisma/paginate';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import {
   ACTIVE_VARIANT_WHERE,
@@ -96,16 +97,16 @@ export class ProductsRepository {
       ];
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.product.count({ where });
-      const data = await tx.product.findMany({
-        where,
-        select: PUBLIC_PRODUCT_SELECT,
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-        orderBy: { createdAt: 'desc' },
-      });
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.product.count({ where: w }),
+      page: (w) =>
+        this.prisma.product.findMany({
+          where: w,
+          select: PUBLIC_PRODUCT_SELECT,
+          skip: (params.page - 1) * params.limit,
+          take: params.limit,
+          orderBy: { createdAt: 'desc' },
+        }),
     });
   }
 
@@ -249,18 +250,16 @@ export class ProductsRepository {
       where.vendorId = params.vendorId;
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.product.count({ where });
-
-      const data = await tx.product.findMany({
-        where,
-        select: adminProductRowSelect,
-        orderBy: { createdAt: 'asc' },
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-      });
-
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.product.count({ where: w }),
+      page: (w) =>
+        this.prisma.product.findMany({
+          where: w,
+          select: adminProductRowSelect,
+          orderBy: { createdAt: 'asc' },
+          skip: (params.page - 1) * params.limit,
+          take: params.limit,
+        }),
     });
   }
 

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { Prisma, Bazaar, BoothListing, BazaarStatus, ApplicationStatus, ScheduleType } from '@prisma/client';
 
+import { paginate } from '../../infra/prisma/paginate';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { PUBLIC_BAZAAR_WHERE, PUBLIC_ORGANIZER_SQL, PUBLIC_ORGANIZER_WHERE } from './bazaar-visibility';
 
@@ -486,27 +487,27 @@ export class BazaarsRepository {
       where.applicationStatus = applicationStatus;
     }
 
-    const { rows, total } = await this.prisma.$transaction(async (tx) => {
-      const total = await tx.boothListing.count({ where });
-      const rows = await tx.boothListing.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { appliedAt: 'desc' },
-        include: {
-          bazaar: {
-            select: {
-              id: true,
-              name: true,
-              coverMedia: true,
-              startDate: true,
-              endDate: true,
-              status: true,
+    const { data: rows, total } = await paginate(this.prisma, where, {
+      count: (w) => this.prisma.boothListing.count({ where: w }),
+      page: (w) =>
+        this.prisma.boothListing.findMany({
+          where: w,
+          skip: (page - 1) * limit,
+          take: limit,
+          orderBy: { appliedAt: 'desc' },
+          include: {
+            bazaar: {
+              select: {
+                id: true,
+                name: true,
+                coverMedia: true,
+                startDate: true,
+                endDate: true,
+                status: true,
+              },
             },
           },
-        },
-      });
-      return { rows, total };
+        }),
     });
 
     // Prisma can't select the geography column, so the page's locations come
@@ -550,20 +551,20 @@ export class BazaarsRepository {
       where.applicationStatus = applicationStatus;
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.boothListing.count({ where });
-      const data = await tx.boothListing.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { appliedAt: 'desc' },
-        include: {
-          vendor: {
-            select: { name: true, logo: true },
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.boothListing.count({ where: w }),
+      page: (w) =>
+        this.prisma.boothListing.findMany({
+          where: w,
+          skip: (page - 1) * limit,
+          take: limit,
+          orderBy: { appliedAt: 'desc' },
+          include: {
+            vendor: {
+              select: { name: true, logo: true },
+            },
           },
-        },
-      });
-      return { data, total };
+        }),
     });
   }
 
@@ -587,16 +588,16 @@ export class BazaarsRepository {
     if (params.organizerId) where.organizerId = params.organizerId;
     if (params.search) where.name = { contains: params.search, mode: 'insensitive' };
 
-    const { rows, total } = await this.prisma.$transaction(async (tx) => {
-      const total = await tx.bazaar.count({ where });
-      const rows = await tx.bazaar.findMany({
-        where,
-        select: adminBazaarRowSelect,
-        orderBy: { createdAt: 'desc' },
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-      });
-      return { rows, total };
+    const { data: rows, total } = await paginate(this.prisma, where, {
+      count: (w) => this.prisma.bazaar.count({ where: w }),
+      page: (w) =>
+        this.prisma.bazaar.findMany({
+          where: w,
+          select: adminBazaarRowSelect,
+          orderBy: { createdAt: 'desc' },
+          skip: (params.page - 1) * params.limit,
+          take: params.limit,
+        }),
     });
 
     const locations = await this.findLocationsByIds(rows.map((row) => row.id));
@@ -643,16 +644,16 @@ export class BazaarsRepository {
     if (params.vendorId) where.vendorId = params.vendorId;
     if (params.status) where.applicationStatus = params.status;
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.boothListing.count({ where });
-      const data = await tx.boothListing.findMany({
-        where,
-        select: adminApplicationSelect,
-        orderBy: { appliedAt: 'desc' },
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-      });
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.boothListing.count({ where: w }),
+      page: (w) =>
+        this.prisma.boothListing.findMany({
+          where: w,
+          select: adminApplicationSelect,
+          orderBy: { appliedAt: 'desc' },
+          skip: (params.page - 1) * params.limit,
+          take: params.limit,
+        }),
     });
   }
 

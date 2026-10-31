@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AdminAction, AdminTargetType, Prisma } from '@prisma/client';
 
+import { paginate } from '../../infra/prisma/paginate';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 
 const auditLogRowSelect = {
@@ -57,16 +58,16 @@ export class AuditRepository {
     if (filter.targetId) where.targetId = filter.targetId;
     if (filter.action) where.action = filter.action;
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.adminAuditLog.count({ where });
-      const data = await tx.adminAuditLog.findMany({
-        where,
-        select: auditLogRowSelect,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        skip: (page - 1) * limit,
-        take: limit,
-      });
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.adminAuditLog.count({ where: w }),
+      page: (w) =>
+        this.prisma.adminAuditLog.findMany({
+          where: w,
+          select: auditLogRowSelect,
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
     });
   }
 }

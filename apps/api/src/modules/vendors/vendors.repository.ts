@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InventoryMovement, Prisma, Product, ProductVariant } from '@prisma/client';
 
+import { paginate } from '../../infra/prisma/paginate';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { MOVEMENT_SOURCE } from '../products/inventory-ledger';
 import { ACTIVE_VARIANT_WHERE } from '../products/product-visibility';
@@ -220,16 +221,16 @@ export class VendorsRepository {
       ];
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.vendor.count({ where });
-      const data = await tx.vendor.findMany({
-        where,
-        select: adminVendorRowSelect,
-        orderBy: { createdAt: 'asc' },
-        skip: (params.page - 1) * params.limit,
-        take: params.limit,
-      });
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.vendor.count({ where: w }),
+      page: (w) =>
+        this.prisma.vendor.findMany({
+          where: w,
+          select: adminVendorRowSelect,
+          orderBy: { createdAt: 'asc' },
+          skip: (params.page - 1) * params.limit,
+          take: params.limit,
+        }),
     });
   }
 
@@ -286,15 +287,15 @@ export class VendorsRepository {
 
   findProductsPaginated(vendorId: string, page: number, limit: number): Promise<{ data: Product[]; total: number }> {
     const where: Prisma.ProductWhereInput = { vendorId, deletedAt: null };
-    return this.prisma.$transaction(async (tx) => {
-      const total = await tx.product.count({ where });
-      const data = await tx.product.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
-      });
-      return { data, total };
+    return paginate(this.prisma, where, {
+      count: (w) => this.prisma.product.count({ where: w }),
+      page: (w) =>
+        this.prisma.product.findMany({
+          where: w,
+          skip: (page - 1) * limit,
+          take: limit,
+          orderBy: { createdAt: 'desc' },
+        }),
     });
   }
 
