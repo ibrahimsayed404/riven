@@ -54,6 +54,7 @@ Vendor-scoped — a vendor can only manage their own products (`vendorId` derive
 - `DELETE /vendors/me/products/:id` — soft-delete (`deletedAt`), not hard delete (matches schema, preserves order history integrity per the fashion marketplace addendum's snapshot design).
 - `POST /vendors/me/products/:id/variants` — add a variant (sku, size, color, priceOverride, stockQuantity)
 - `PATCH /vendors/me/products/:id/variants/:variantId` — update a variant (e.g. restock — bump `stockQuantity`)
+  > *Superseded 2026-10-31 (TD-08, `specs/commerce/25` §9 S3):* this PATCH no longer accepts `stockQuantity`; stock changes only by a signed delta with a reason (`POST …/variants/:variantId/stock-adjustments`), each recorded in the stock ledger.
 - `DELETE /vendors/me/products/:id/variants/:variantId` — remove a variant
 
 **Public product browsing** (Shopper-facing, separate from vendor dashboard):

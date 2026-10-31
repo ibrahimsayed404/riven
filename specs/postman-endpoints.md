@@ -2,12 +2,14 @@
 
 Generated from the controllers and DTOs in `apps/api/src` on 2026-09-19; re-checked route by route against the code on 2026-09-25 (all 120 routes). Paste each block into the request's **Description** in Postman.
 
-**Base URL:** `http://localhost:3000` (no prefix). In the Postman workspace "Riven" (15 collections, environment "Riven") it is `{{URL}}` **with a trailing slash** — requests look like `{{URL}}auth/login` — and the Login request's test script saves the access token to `{{token}}`.
+> **Update 2026-10-31:** the API now has **145 routes** and the workspace **17 collections**. Routes added since this file was written (payment exceptions, stock adjustments and history, the admin stock ledger, barcodes, maintenance, outbox, health) are listed in `specs/RIVEN-WORK-FLOW.md` §17 and described in the Postman requests themselves. Changed behaviour is marked below.
+
+**Base URL:** `http://localhost:3000` (no prefix). In the Postman workspace "Riven" (17 collections, environment "Riven") it is `{{URL}}` **with a trailing slash** — requests look like `{{URL}}auth/login` — and the Login request's test script saves the access token to `{{token}}`.
 
 **Conventions that apply everywhere**
 - Auth: `Authorization: Bearer <accessToken>` (15 min). Refresh with `POST /auth/refresh`.
 - Bodies are JSON. Unknown fields are rejected (`400 VALIDATION_ERROR`).
-- Errors are flat: `{ "code": "...", "message": "...", "details"?: {...} }`. For `VALIDATION_ERROR` the `message` is an array of strings. Codes that can come from any route: 400 `VALIDATION_ERROR` · 401 `INVALID_ACCESS_TOKEN` · 429 `RATE_LIMITED` · 409 `UNIQUE_VIOLATION` / 400 `INVALID_REFERENCE` / 404 `NOT_FOUND` (database constraint hits) · `HTTP_ERROR` (older routes without a specific code) · 500 `INTERNAL_SERVER_ERROR`. `TARGET_TYPE_UNSUPPORTED` (social) and 500 `INVALID_AMOUNT` (payment setup) are internal guards that validation normally prevents.
+- Errors are flat: `{ "code": "...", "message": "...", "details"?: {...} }`. For `VALIDATION_ERROR` the `message` is an array of strings. Codes that can come from any route: 400 `VALIDATION_ERROR` · 401 `INVALID_ACCESS_TOKEN` · 429 `RATE_LIMITED` · 409 `UNIQUE_VIOLATION` / 400 `INVALID_REFERENCE` / 404 `NOT_FOUND` (database constraint hits) · `HTTP_ERROR` (older routes without a specific code) · 403 `FORBIDDEN_ROLE` (wrong role) · 503 `SERVICE_BUSY` (database contention after retries; retry) · 500 `INTERNAL_SERVER_ERROR`. `TARGET_TYPE_UNSUPPORTED` (social) and 500 `INVALID_AMOUNT` (payment setup) are internal guards that validation normally prevents.
 - Lists: `?page=` (>=1) and `?limit=` (1–100) → `{ data: [...], meta: { total, page, limit, totalPages } }`. Social/discovery lists use `?cursor=` instead → `{ data, nextCursor }`.
 - Rate limits: 300 req/min per user or IP; 10/min on register/login; 30/min on refresh; 1/min on location updates → `429 RATE_LIMITED` + `Retry-After`.
 - Money (EGP) comes back as a **decimal string without fixed places**: `"420"`, `"449.5"` (Prisma Decimal). Search hits carry prices as numbers. Send numbers with at most 2 decimals (`"basePrice": 450`). `paidAmountCents` (admin order detail) is integer piastres.
@@ -165,12 +167,12 @@ Auth: VENDOR. 200 → the soft-deleted product row. Errors: 404 PRODUCT_NOT_FOUN
 ### POST /vendors/me/products/:id/variants
 Adds a sellable variant. Stock lives on the variant, not the product.
 Auth: VENDOR.
-Body: `{ "sku" (<=64, unique per vendor), "size"?, "color"?, "priceOverride"? (replaces basePrice), "stockQuantity"? (int >=0) }`
+Body: `{ "sku" (<=64, unique across the platform), "size"?, "color"?, "priceOverride"? (replaces basePrice), "stockQuantity"? (int >=0, the starting stock; recorded as the first ledger row) }`
 201 → variant. Errors: 404 PRODUCT_NOT_FOUND · 409 SKU_TAKEN.
 
 ### PATCH /vendors/me/products/:id/variants/:variantId
-Partial variant update (e.g. restock).
-Auth: VENDOR. Body: subset of the create body. 200 → variant. Errors: 404.
+Partial variant update: `sku`, `size`, `color`, `priceOverride`. **`stockQuantity` is no longer accepted (400 VALIDATION_ERROR)** — restock or correct stock with `POST /vendors/me/products/:id/variants/:variantId/stock-adjustments` `{ "change": int ≠ 0, "reason": 3–500 chars }` → 201 `{ variantId, stockQuantity, movement }`, 409 `STOCK_BELOW_ZERO` if the result would be negative. History: `GET …/variants/:variantId/stock-movements`.
+Auth: VENDOR. 200 → variant. Errors: 404.
 
 ### DELETE /vendors/me/products/:id/variants/:variantId
 Soft-deletes the variant; it disappears from carts and public reads.
@@ -288,20 +290,20 @@ Empties the cart (the cart itself and its id stay). Auth: SHOPPER. 200.
 
 ### POST /checkout
 Turns the cart into one **OrderGroup** with one **Order per vendor**, reserves stock, empties the cart, and asks Paymob for a payment intention. If Paymob is not configured (local dev) the orders are still created and `paymentSetupFailed: true` is returned — call retry-payment later.
-Auth: SHOPPER. Body: none.
+Auth: SHOPPER. Body: none. Optional header `Idempotency-Key` (8–128 chars of `A-Z a-z 0-9 . _ : -`): the same key within 24 h returns the same order instead of a second one; 400 IDEMPOTENCY_KEY_INVALID if malformed; 409 IDEMPOTENCY_KEY_IN_PROGRESS while the first request with that key is still running (up to 60 s). *(Added 2026-10-31.)*
 201 → the OrderGroup (`id` = orderGroupId, `orders: [{ id, vendorId, status: "PENDING", subtotal, items }]`, …) plus `paymobIntentId`, `clientUrl` and `paymentSetupFailed: false` — or the OrderGroup with only `paymentSetupFailed: true` when Paymob isn't configured.
-Errors: 400 CART_EMPTY · 400 CHECKOUT_ITEM_UNAVAILABLE (`details.items` lists the bad lines, each with `reason` PRODUCT_UNAVAILABLE or OUT_OF_STOCK) · 500 CHECKOUT_CONTENDED (too busy to reserve stock; retry) · 500 CHECKOUT_FAILED.
+Errors: 400 CART_EMPTY · 400 CHECKOUT_ITEM_UNAVAILABLE (`details.items` lists the bad lines, each with `reason` PRODUCT_UNAVAILABLE or OUT_OF_STOCK) · **503** CHECKOUT_CONTENDED (too busy to reserve stock; safe to retry — *was 500 before 2026-10-31*) · 500 CHECKOUT_FAILED. Two simultaneous submits of the same cart produce one order; the other gets 400 CART_EMPTY.
 Note: a PENDING group that is never paid is auto-cancelled after 60 min and its stock released.
 
 ### POST /checkout/:orderGroupId/retry-payment
-Requests a fresh Paymob intention for a still-PENDING group (e.g. after `paymentSetupFailed`).
-Auth: SHOPPER (owner). 201 → payment fields. Errors: 404 ORDER_GROUP_NOT_FOUND · 403 ORDER_GROUP_FORBIDDEN (another shopper's checkout) · 400 PAYMENT_ALREADY_SET_UP (an intention already exists) · 400 ORDER_GROUP_NOT_PENDING · 503 PAYMENTS_NOT_CONFIGURED.
+Sets up the Paymob payment page for a still-PENDING group (e.g. after `paymentSetupFailed`). *(Changed 2026-10-31:)* if the group already has a payment page, that **same page** is returned instead of an error, so two taps never create two live pages.
+Auth: SHOPPER (owner). 201 → `{ paymobIntentId, clientUrl }`. Errors: 404 ORDER_GROUP_NOT_FOUND · 403 ORDER_GROUP_FORBIDDEN (another shopper's checkout) · 400 ORDER_GROUP_NOT_PENDING · 400 PAYMENT_ALREADY_SET_UP (only for an old group whose page URL was never stored) · 503 PAYMENTS_NOT_CONFIGURED.
 
 ---
 
 ## 8. Orders — shopper (`/orders`) and vendor (`/vendors/me/orders`)
 
-Status flow: PENDING → PAID (webhook) → FULFILLED → SHIPPED (vendor) → DELIVERED (shopper). PENDING or PAID → CANCELLED.
+Status flow: PENDING → PAID (webhook) → FULFILLED → SHIPPED (vendor) → DELIVERED (shopper). Only PENDING → CANCELLED (shopper cancel, admin cancel, or expiry after 60 min); no route cancels a PAID order (paid-order cancellations are manual until a refunds spec exists).
 
 ### GET /orders
 The shopper's orders (one per vendor), newest first.
@@ -589,9 +591,9 @@ Auth: ADMIN. 200 → rating (`comment: null`). Errors: 404 RATING_NOT_FOUND.
 ## 14. Media (`/media`)
 
 ### POST /media/upload-url
-Returns a presigned **PUT** URL for MinIO/S3. Upload the file to `uploadUrl` with the same `Content-Type`, then store `publicUrl` in the product/vendor/bazaar field. URL is valid for a few minutes. Size limit (10 MB) is client-enforced.
+Returns a presigned **PUT** URL for MinIO/S3. Upload the file to `uploadUrl` with the same `Content-Type`, then store `publicUrl` in the product/vendor/bazaar field. URL is valid for 5 minutes. *(Changed 2026-10-31, breaking:)* the file size is required and signed into the URL — the `PUT` must send exactly `contentLength` bytes, and over 10 MB is refused.
 Auth: VENDOR or ORGANIZER.
-Body: `{ "purpose": PRODUCT_IMAGE|VENDOR_LOGO|VENDOR_COVER|BAZAAR_COVER, "contentType": image/jpeg|image/png|image/webp }`
+Body: `{ "purpose": PRODUCT_IMAGE|VENDOR_LOGO|VENDOR_COVER|BAZAAR_COVER, "contentType": image/jpeg|image/png|image/webp, "contentLength": 1–10485760 (bytes) }`
 200 → `{ uploadUrl, publicUrl, key, expiresInSeconds }`
 Errors: 400 VALIDATION_ERROR · 403.
 
@@ -600,8 +602,8 @@ Errors: 400 VALIDATION_ERROR · 403.
 ## 15. Admin dashboard (`/admin/overview`, `/admin/audit-log`)
 
 ### GET /admin/overview
-Home-screen counters: pending vendors/organizers (products have no approval gate — no `pending.products`), totals per role, orders by status.
-Auth: ADMIN. 200 → `{ pending: { vendors, organizers }, totals: {...}, orders: {...} }`.
+Home-screen counters: pending vendors/organizers (products have no approval gate — no `pending.products`), users per role, orders per status, bazaars per status.
+Auth: ADMIN. 200 → `{ pending: { vendors, organizers }, users: { SHOPPER, VENDOR, ORGANIZER, ADMIN }, orders: { <OrderStatus>: n }, bazaars: { <BazaarStatus>: n } }`.
 
 ### GET /admin/audit-log
 Who did what to whom. Newest first.

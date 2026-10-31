@@ -16,10 +16,10 @@ Local dev: `docker compose up -d` (Postgres, Redis, Meilisearch, MinIO), then `p
 - **Errors** always have this shape:
 
 ```json
-{ "success": false, "error": { "code": "VALIDATION_ERROR", "message": ["title must be a string"] } }
+{ "code": "VALIDATION_ERROR", "message": ["title must be a string"] }
 ```
 
-`code` is `VALIDATION_ERROR` (400, `message` is an array), a domain code like `LOCATION_RATE_LIMITED`, or `HTTP_ERROR` for generic 401/403/404/409 (`message` is a string).
+Flat, no envelope; some errors add `details`. `code` is `VALIDATION_ERROR` (400, `message` is an array), `INVALID_ACCESS_TOKEN` (401 — log in or refresh), `FORBIDDEN_ROLE` (403 — your role can't use this route), `SERVICE_BUSY` (503 — the database was too busy; retry), a domain code like `LOCATION_RATE_LIMITED`, or `HTTP_ERROR` for remaining older generic 404/409 (`message` is a string).
 
 ---
 
@@ -29,21 +29,22 @@ The API never receives file bytes. Ask for a signed URL, `PUT` the file straight
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| POST | `/media/upload-url` | `{ purpose, contentType }` | `{ uploadUrl, publicUrl, key, expiresInSeconds: 300 }` |
+| POST | `/media/upload-url` | `{ purpose, contentType, contentLength }` | `{ uploadUrl, publicUrl, key, expiresInSeconds: 300 }` |
 
 - `purpose`: `PRODUCT_IMAGE | VENDOR_LOGO | VENDOR_COVER | BAZAAR_COVER`
 - `contentType`: `image/jpeg | image/png | image/webp` — anything else → `400 VALIDATION_ERROR`
+- `contentLength`: the file size in bytes, 1 – 10,485,760 (10 MB) — required; it is signed into the URL, so the `PUT` must send exactly that many bytes
 - Roles: `VENDOR` or `ORGANIZER`. Shoppers → `403`.
 
 ```ts
-const { uploadUrl, publicUrl } = await api.post('/media/upload-url', { purpose: 'PRODUCT_IMAGE', contentType: file.type });
+const { uploadUrl, publicUrl } = await api.post('/media/upload-url', { purpose: 'PRODUCT_IMAGE', contentType: file.type, contentLength: file.size });
 await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file }); // must be the SAME content type
 await api.post('/vendors/me/products', { ..., images: [publicUrl] });
 ```
 
 - The `Content-Type` on the `PUT` must match what you asked for — it's part of the signature; a mismatch is `403 SignatureDoesNotMatch` from storage.
 - URL expires after 5 minutes; request a fresh one per file.
-- No server-side size limit yet — enforce **10 MB max** client-side.
+- The server enforces **10 MB max**: `contentLength` is signed into the URL, so check the size before asking for a URL and `PUT` exactly that many bytes.
 - `publicUrl` is readable without auth (local: `http://localhost:9000/riven-media/…`).
 
 ---
@@ -110,7 +111,9 @@ Note the request field is `businessName` but the response field is `name`. `reje
 | PATCH | `/vendors/me/products/:id` | any of the POST fields | Product |
 | DELETE | `/vendors/me/products/:id` | — | soft-delete |
 | POST | `/vendors/me/products/:id/variants` | `{ sku, size?, color?, priceOverride?, stockQuantity? }` | Variant |
-| PATCH | `/vendors/me/products/:id/variants/:variantId` | any of those fields | Variant |
+| PATCH | `/vendors/me/products/:id/variants/:variantId` | any of those fields **except `stockQuantity`** (400) | Variant |
+| POST | `/vendors/me/products/:id/variants/:variantId/stock-adjustments` | `{ change (int ≠ 0, ±1,000,000), reason (3–500) }` | `{ variantId, stockQuantity, movement }` — 409 `STOCK_BELOW_ZERO` |
+| GET | `/vendors/me/products/:id/variants/:variantId/stock-movements?page&limit` | — | the variant's stock ledger, newest first |
 | DELETE | `/vendors/me/products/:id/variants/:variantId` | — | — |
 
 **Product**
@@ -154,8 +157,8 @@ Note the request field is `businessName` but the response field is `name`. `reje
 }
 ```
 
-**Status lifecycle:** `PENDING → PAID → FULFILLED → SHIPPED → DELIVERED`, or `CANCELLED` from `PENDING`/`PAID`.
-The vendor may only move `PAID → FULFILLED` and `FULFILLED → SHIPPED`. Anything else → `400`. `PAID` is set by the payment webhook, `DELIVERED` by the shopper confirming, `CANCELLED` by the shopper (before payment) or admin. Use `?status=PAID` for the "needs fulfilment" queue.
+**Status lifecycle:** `PENDING → PAID → FULFILLED → SHIPPED → DELIVERED`, or `CANCELLED` from `PENDING` only.
+The vendor may only move `PAID → FULFILLED` and `FULFILLED → SHIPPED`. Anything else → `400`. `PAID` is set by the payment webhook, `DELIVERED` by the shopper confirming, `CANCELLED` only while unpaid (PENDING): by the shopper, by an admin, or automatically by expiry after 60 min. Use `?status=PAID` for the "needs fulfilment" queue.
 
 `user` is the shopper's contact (`phone` may be `null`). There is no delivery address — the schema has none yet.
 
@@ -279,11 +282,11 @@ Vendors and organizers share one state model: `verified: true` → verified; `ve
 | PATCH | `/admin/vendors/:id/reject` | `{ reason }` (1–1000 chars) | `{ id, verified: false, rejectionReason }`. On a verified vendor this is a revoke: their products leave the public catalogue and search. |
 | GET | `/admin/organizers` | same as vendors | `{ data: [{ id, ownerId, name, verified, rejectionReason, createdAt, owner }], meta }` |
 | PATCH | `/admin/organizers/:id/verify` | — | `{ id, verified, rejectionReason }` |
-| PATCH | `/admin/organizers/:id/reject` | `{ reason }` | Revoking does **not** un-publish the organizer's bazaars (open item). |
+| PATCH | `/admin/organizers/:id/reject` | `{ reason }` | `{ id, verified: false, rejectionReason }`. The organizer's bazaars keep their status (PUBLISHED stays PUBLISHED) but disappear from every public read while the organizer is not verified, and come back on re-verify (spec3 B8b). |
 | GET | `/admin/products` | `?vendorId=&page=&limit=` | `{ data: [{ …product, vendor: { id, name, verified } }], meta }`. Soft-deleted products never appear; `isActive` is not filtered. No approval gate — this is not a moderation queue, just a list. |
 | GET | `/admin/users` | `?role=&search=&includeDeleted=&page=&limit=` | `{ data: [User], meta }` |
 | GET | `/admin/users/:id` | — | User |
-| PATCH | `/admin/users/:id/deactivate` | — | `204`. Soft-delete. `400 CANNOT_DEACTIVATE_SELF` on your own id. Does not revoke existing tokens (open item). |
+| PATCH | `/admin/users/:id/deactivate` | — | `204`. Suspension, not a delete: `isActive=false`, the row stays. Every refresh token is revoked and existing access tokens stop working on their next request. `400 CANNOT_DEACTIVATE_SELF` on your own id; already deactivated → 204 no-op, no audit row. |
 | PATCH | `/admin/users/:id/reactivate` | — | `204` |
 
 Errors use stable codes: `VENDOR_NOT_FOUND`, `ORGANIZER_NOT_FOUND`, `PRODUCT_NOT_FOUND`, `USER_NOT_FOUND` (all `404`, also for soft-deleted rows).
@@ -292,9 +295,11 @@ Errors use stable codes: `VENDOR_NOT_FOUND`, `ORGANIZER_NOT_FOUND`, `PRODUCT_NOT
 
 | Method | Path | Query | Returns |
 |---|---|---|---|
-| GET | `/admin/audit-log` | `?actorId=&targetType=VENDOR\|ORGANIZER\|PRODUCT\|USER&targetId=&action=&page=&limit=` | `{ data: [{ id, action, targetType, targetId, reason, createdAt, actor: { id, name, email } }], meta }`, newest first. |
+| GET | `/admin/audit-log` | `?actorId=&targetType=<AdminTargetType>&targetId=&action=&page=&limit=` | `{ data: [{ id, action, targetType, targetId, reason, createdAt, actor: { id, name, email } }], meta }`, newest first. |
 
-`action` is one of `VENDOR_VERIFIED, VENDOR_REJECTED, ORGANIZER_VERIFIED, ORGANIZER_REJECTED, USER_DEACTIVATED, USER_REACTIVATED` (plus `PRODUCT_APPROVED`/`PRODUCT_REJECTED` on historical rows only — nothing writes them since products lost their approval gate on 2026-09-27). Only real state changes produce a row; a repeated identical decision does not. Booth-layout edits and search reindexes are **not** audited yet.
+`targetType` is one of `VENDOR, ORGANIZER, PRODUCT, USER, CATEGORY, RATING, APPLICATION, ORDER, BAZAAR, BOOTH, SEARCH_INDEX, MAINTENANCE_RUN, OUTBOX, BARCODE, PAYMENT_EXCEPTION`.
+
+`action` is one of: `VENDOR_VERIFIED, VENDOR_REJECTED, VENDOR_EDITED, ORGANIZER_VERIFIED, ORGANIZER_REJECTED, USER_DEACTIVATED, USER_REACTIVATED, PRODUCT_EDITED, PRODUCT_DELETED, CATEGORY_CREATED, CATEGORY_UPDATED, CATEGORY_DELETED, RATING_DELETED, RATING_COMMENT_CLEARED, APPLICATION_ACCEPTED, APPLICATION_REJECTED, ORDER_CANCELLED, BAZAAR_CANCELLED, BOOTH_LAYOUT_CREATED, BOOTH_LAYOUT_UPDATED, BOOTH_CREATED, BOOTH_UPDATED, BOOTH_DELETED, BOOTH_ASSIGNED, BOOTH_UNASSIGNED, SEARCH_REINDEX_REQUESTED, MAINTENANCE_EXPIRE_OVERDUE, OUTBOX_DRAIN_REQUESTED, OUTBOX_DELIVERY_REQUEUED, BARCODE_CREATED, BARCODE_APPROVED, BARCODE_REJECTED, BARCODE_ACTIVATED, BARCODE_DEACTIVATED, BARCODE_UPDATED, PAYMENT_EXCEPTION_RESOLVED` (plus `PRODUCT_APPROVED`/`PRODUCT_REJECTED` on historical rows only — nothing writes them since products lost their approval gate on 2026-09-27). Moderation decisions are recorded only when they change state (a repeated identical decision records nothing). Operational commands — `MAINTENANCE_EXPIRE_OVERDUE`, `OUTBOX_DRAIN_REQUESTED`, `SEARCH_REINDEX_REQUESTED` — are recorded on every accepted call, even when nothing changed (a drain refused with 409 `OUTBOX_DRAIN_IN_PROGRESS` records nothing). Booth-layout edits and search reindexes **are** audited.
 
 ### 6.4 Other admin routes (pre-existing)
 
@@ -313,6 +318,5 @@ Errors use stable codes: `VENDOR_NOT_FOUND`, `ORGANIZER_NOT_FOUND`, `PRODUCT_NOT
 - **Notifications** — no endpoints.
 - **Vendor analytics / sales summaries** — none. Aggregate on the client from `/vendors/me/orders` for now.
 - **Delivery address on orders** — no schema field yet; `user.phone` is the only contact channel.
-- **Server-side upload size limit** — client enforces 10 MB for now.
 - **Deleting uploaded images** — no endpoint; replaced images are orphaned in storage.
 - **Password reset / email verification** — none.
