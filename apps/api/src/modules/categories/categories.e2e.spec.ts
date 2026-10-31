@@ -19,8 +19,11 @@ describe('CategoriesModule (e2e)', () => {
     prisma = app.get(PrismaService);
 
     // Products reference categories; clear them first so the FK allows the wipe.
+    await prisma.$executeRawUnsafe('TRUNCATE "inventory_movements"'); // append-only ledger (commerce/25 S3) → variants, groups, users are RESTRICT
     await prisma.orderItem.deleteMany();
     await prisma.cartItem.deleteMany();
+    // Barcodes reference variants / vendors (RESTRICT) and refuse DELETE: reset them first.
+    await prisma.$executeRawUnsafe('TRUNCATE "barcode_events", "barcodes"');
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     await prisma.category.deleteMany();

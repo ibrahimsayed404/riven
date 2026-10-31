@@ -115,8 +115,8 @@ describe('HTTP stack smoke test (no external services)', () => {
   it('the Paymob webhook is reachable at its single route and refuses an unsigned body (PLAN-02, PAY-02)', async () => {
     const res = await http().post('/webhooks/paymob').send({ obj: { success: true, id: 1 } }).expect(401);
     expect(res.body.code).toBe('WEBHOOK_SIGNATURE_MISSING');
-    // @SkipThrottle: no rate-limit headers on this route.
-    expect(res.headers['x-ratelimit-limit']).toBeUndefined();
+    // Generous dedicated limit (600/min), not unthrottled: commerce/25 §10.
+    expect(res.headers['x-ratelimit-limit']).toBe('600');
   });
 
   it('admin routes are closed to anonymous callers', async () => {

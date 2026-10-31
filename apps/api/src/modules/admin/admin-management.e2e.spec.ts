@@ -43,9 +43,14 @@ describe('Admin management — pass 2 (e2e)', () => {
     await prisma.rating.deleteMany(); // Rating.orderId is RESTRICT: before orders
     await prisma.orderItem.deleteMany();
     await prisma.order.deleteMany();
+    // payment_exceptions → order_groups is RESTRICT and its rows are never deleted (trigger); TRUNCATE skips row triggers.
+    await prisma.$executeRawUnsafe('TRUNCATE "payment_exceptions", "inventory_movements"');
+    await prisma.idempotencyKey.deleteMany(); // key → order group is RESTRICT (keys left by smoke runs, commerce/25 S4)
     await prisma.orderGroup.deleteMany();
     await prisma.cartItem.deleteMany();
     await prisma.cart.deleteMany(); // Cart.userId is RESTRICT: before users
+    // Barcodes reference variants / vendors (RESTRICT) and refuse DELETE: reset them first.
+    await prisma.$executeRawUnsafe('TRUNCATE "barcode_events", "barcodes"');
     await prisma.productVariant.deleteMany();
     await prisma.product.deleteMany();
     // Only this suite's categories (A7 creates some); other suites upsert their own.

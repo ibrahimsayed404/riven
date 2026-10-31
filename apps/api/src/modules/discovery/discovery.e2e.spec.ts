@@ -86,10 +86,21 @@ describe('DiscoveryModule (e2e)', () => {
     prisma = app.get(PrismaService);
     jwtService = app.get(JwtService);
 
+    await prisma.$executeRawUnsafe('TRUNCATE "inventory_movements"'); // append-only ledger (commerce/25 S3) → variants, groups, users are RESTRICT
+    // Orders, carts and checkout keys (e.g. left by smoke runs) reference users / variants with RESTRICT: clear them before vendors and users.
+    await prisma.$executeRawUnsafe('TRUNCATE "payment_exceptions", "idempotency_keys"');
+    await prisma.rating.deleteMany();
+    await prisma.orderItem.deleteMany();
+    await prisma.order.deleteMany();
+    await prisma.orderGroup.deleteMany();
+    await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany();
     await prisma.favorite.deleteMany();
     await prisma.boothListing.deleteMany();
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
+    // Barcodes reference variants / vendors (RESTRICT) and refuse DELETE: reset them first.
+    await prisma.$executeRawUnsafe('TRUNCATE "barcode_events", "barcodes"');
     await prisma.vendor.deleteMany();
     await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
@@ -196,10 +207,21 @@ describe('DiscoveryModule (e2e)', () => {
   });
 
   afterAll(async () => {
+    await prisma.$executeRawUnsafe('TRUNCATE "inventory_movements"'); // append-only ledger (commerce/25 S3) → variants, groups, users are RESTRICT
+    // Orders, carts and checkout keys (e.g. left by smoke runs) reference users / variants with RESTRICT: clear them before vendors and users.
+    await prisma.$executeRawUnsafe('TRUNCATE "payment_exceptions", "idempotency_keys"');
+    await prisma.rating.deleteMany();
+    await prisma.orderItem.deleteMany();
+    await prisma.order.deleteMany();
+    await prisma.orderGroup.deleteMany();
+    await prisma.cartItem.deleteMany();
+    await prisma.cart.deleteMany();
     await prisma.favorite.deleteMany();
     await prisma.boothListing.deleteMany();
     await prisma.bazaar.deleteMany();
     await prisma.organizer.deleteMany();
+    // Barcodes reference variants / vendors (RESTRICT) and refuse DELETE: reset them first.
+    await prisma.$executeRawUnsafe('TRUNCATE "barcode_events", "barcodes"');
     await prisma.vendor.deleteMany();
     await prisma.adminAuditLog.deleteMany();
     await prisma.user.deleteMany();
