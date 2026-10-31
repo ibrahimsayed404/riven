@@ -2,6 +2,41 @@ import { Injectable } from '@nestjs/common';
 import { Order, OrderStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { MONEY_TX_LIMITS, withRetryableTx } from '../../infra/prisma/retryable-tx';
+import { MovementSource } from '../products/inventory-ledger';
+
+/** `wait` for shopper / admin cancels; `skipLocked` for expiry runs. */
+export type GroupLockMode = 'wait' | 'skipLocked';
+
+export interface CancelGroupResult {
+  /** released: ≥ 1 order cancelled and restocked · skipped: locked by someone else · notEligible: nothing to do */
+  outcome: 'released' | 'skipped' | 'notEligible';
+  cancelledOrderIds: string[];
+}
+
+// Bounds every cancel / expiry transaction (23 R0.4): a blocked lock or a slow
+// statement ends the transaction instead of holding a group indefinitely.
+const GROUP_LOCK_TIMEOUT = '5s';
+const GROUP_STATEMENT_TIMEOUT = '15s';
+
+/** The expiry eligibility rule, as a Prisma filter. One definition, used by the candidate query and the backlog. */
+const STALE_PENDING_GROUP_WHERE = (olderThan: Date): Prisma.OrderGroupWhereInput => ({
+  createdAt: { lt: olderThan },
+  paymobTransactionId: null,
+  orders: { some: { status: OrderStatus.PENDING }, none: { status: { not: OrderStatus.PENDING } } },
+});
+
+/** The same rule, re-checked in memory under the group lock (age never changes, so it is not re-checked). */
+function isExpiryEligible(group: { paymobTransactionId: string | null; orders: { status: OrderStatus }[] }): boolean {
+  return (
+    group.paymobTransactionId === null &&
+    group.orders.length > 0 &&
+    group.orders.every((order) => order.status === OrderStatus.PENDING)
+  );
+}
+
+/** Ascending key order — the same comparator checkout uses for its decrements, so both lock variants in one order. */
+const byKey = ([a]: [string, number], [b]: [string, number]) => (a < b ? -1 : a > b ? 1 : 0);
 
 // What a vendor gets to see about the shopper who placed an order: enough to
 // contact them about fulfilment, nothing else. Shopper-facing queries don't
@@ -128,51 +163,137 @@ export class OrdersRepository {
    * Stock lives on product_variants, which checkout also writes: reservation
    * (decrement at checkout) and release (here) are two halves of one operation
    * and deliberately share the same rows.
+   *
+   * Lock order (specs/commerce/01 §4, 23 §11.2): the order_groups row first —
+   * the payment webhook takes the same row first — then the group's orders by
+   * id, then the variants in ascending id (checkout decrements in the same
+   * order). Shopper and admin cancels wait for the group lock; expiry uses
+   * SKIP LOCKED and reports the group as skipped. Isolation stays Serializable
+   * (23 R0.2); serialization failures and deadlocks are retried.
    */
-  cancelPendingGroup(orderGroupId: string): Promise<{ cancelledOrderIds: string[] }> {
-    return this.prisma.$transaction(
-      async (tx) => {
-        const pending = await tx.order.findMany({
-          where: { orderGroupId, status: OrderStatus.PENDING },
-          include: { items: { select: { variantId: true, quantity: true } } },
-        });
+  cancelPendingGroup(
+    orderGroupId: string,
+    options: {
+      lockMode?: GroupLockMode;
+      requireExpiryEligibility?: boolean;
+      /** Recorded on the RELEASE ledger rows (commerce/25 S3): who gave the stock back. */
+      source: MovementSource;
+      actorUserId?: string | null;
+    },
+  ): Promise<CancelGroupResult> {
+    const lockMode = options.lockMode ?? 'wait';
 
-        const cancelledOrderIds: string[] = [];
-        for (const order of pending) {
-          const moved = await tx.order.updateMany({
-            where: { id: order.id, status: OrderStatus.PENDING },
-            data: { status: OrderStatus.CANCELLED },
+    return withRetryableTx(() =>
+      this.prisma.$transaction(
+        async (tx): Promise<CancelGroupResult> => {
+          await tx.$queryRaw`SELECT set_config('lock_timeout', ${GROUP_LOCK_TIMEOUT}, true)`;
+          await tx.$queryRaw`SELECT set_config('statement_timeout', ${GROUP_STATEMENT_TIMEOUT}, true)`;
+
+          const locked =
+            lockMode === 'skipLocked'
+              ? await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "order_groups" WHERE "id" = ${orderGroupId} FOR UPDATE SKIP LOCKED`
+              : await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "order_groups" WHERE "id" = ${orderGroupId} FOR UPDATE`;
+          if (locked.length === 0) {
+            // Locked by someone else (expiry), or the group does not exist.
+            return { outcome: lockMode === 'skipLocked' ? 'skipped' : 'notEligible', cancelledOrderIds: [] };
+          }
+
+          if (options.requireExpiryEligibility) {
+            // Same rule as the candidate query, re-checked under the lock: a
+            // payment may have been recorded or an order moved since selection.
+            const group = await tx.orderGroup.findUnique({
+              where: { id: orderGroupId },
+              select: { paymobTransactionId: true, orders: { select: { status: true } } },
+            });
+            if (!group || !isExpiryEligible(group)) {
+              return { outcome: 'notEligible', cancelledOrderIds: [] };
+            }
+          }
+
+          const pending = await tx.order.findMany({
+            where: { orderGroupId, status: OrderStatus.PENDING },
+            include: { items: { select: { variantId: true, quantity: true } } },
+            orderBy: { id: 'asc' },
           });
-          if (moved.count !== 1) continue; // raced with the webhook; leave it
 
-          cancelledOrderIds.push(order.id);
-          for (const item of order.items) {
-            await tx.productVariant.update({
-              where: { id: item.variantId },
-              data: { stockQuantity: { increment: item.quantity } },
+          const cancelledOrderIds: string[] = [];
+          const restock = new Map<string, number>();
+          for (const order of pending) {
+            const moved = await tx.order.updateMany({
+              where: { id: order.id, status: OrderStatus.PENDING },
+              data: { status: OrderStatus.CANCELLED },
+            });
+            if (moved.count !== 1) continue; // raced with the webhook; leave it
+
+            cancelledOrderIds.push(order.id);
+            for (const item of order.items) {
+              restock.set(item.variantId, (restock.get(item.variantId) ?? 0) + item.quantity);
+            }
+          }
+
+          // One RELEASE ledger row per variant, in the same transaction as the restock.
+          const movements: Prisma.InventoryMovementCreateManyInput[] = [];
+          for (const [variantId, quantity] of [...restock].sort(byKey)) {
+            const { stockQuantity } = await tx.productVariant.update({
+              where: { id: variantId },
+              data: { stockQuantity: { increment: quantity } },
+              select: { stockQuantity: true },
+            });
+            movements.push({
+              variantId,
+              type: 'RELEASE',
+              quantityDelta: quantity,
+              quantityBefore: stockQuantity - quantity,
+              quantityAfter: stockQuantity,
+              orderGroupId,
+              actorUserId: options.actorUserId ?? null,
+              source: options.source,
             });
           }
-        }
+          if (movements.length > 0) await tx.inventoryMovement.createMany({ data: movements });
 
-        return { cancelledOrderIds };
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          return { outcome: cancelledOrderIds.length > 0 ? 'released' : 'notEligible', cancelledOrderIds };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, ...MONEY_TX_LIMITS },
+      ),
+      // Serializable + concurrent restocks of the same variant fail with 40001
+      // under contention; a few more attempts keep cancels from surfacing them.
+      { attempts: 5 },
     );
   }
 
-  /** Groups created before `olderThan` whose orders are all still PENDING — abandoned checkouts. */
-  async findStalePendingGroupIds(olderThan: Date, take: number): Promise<string[]> {
-    const rows = await this.prisma.orderGroup.findMany({
+  /**
+   * Abandoned checkouts: groups created before `olderThan` whose orders are all
+   * still PENDING and that have no recorded Paymob transaction — the same
+   * filter as before R0 (application-clock cutoff, 23 §11.7), read in
+   * `(createdAt, id)` order after an in-memory keyset cursor.
+   */
+  findStalePendingGroups(
+    olderThan: Date,
+    take: number,
+    after?: { createdAt: Date; id: string },
+  ): Promise<{ id: string; createdAt: Date }[]> {
+    return this.prisma.orderGroup.findMany({
       where: {
-        createdAt: { lt: olderThan },
-        paymobTransactionId: null,
-        orders: { some: { status: OrderStatus.PENDING }, none: { status: { not: OrderStatus.PENDING } } },
+        AND: [
+          STALE_PENDING_GROUP_WHERE(olderThan),
+          after ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {},
+        ],
       },
-      select: { id: true },
-      orderBy: { createdAt: 'asc' },
+      select: { id: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take,
     });
-    return rows.map((row) => row.id);
+  }
+
+  /** Backlog snapshot for the run record: how many groups are eligible now, and the oldest one. */
+  async staleBacklog(olderThan: Date): Promise<{ count: number; oldestCreatedAt: Date | null }> {
+    const where = STALE_PENDING_GROUP_WHERE(olderThan);
+    const [count, oldest] = await this.prisma.$transaction([
+      this.prisma.orderGroup.count({ where }),
+      this.prisma.orderGroup.findFirst({ where, select: { createdAt: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+    ]);
+    return { count, oldestCreatedAt: oldest?.createdAt ?? null };
   }
 
   async hasDeliveredVendorOrder(userId: string, orderId: string, vendorId: string): Promise<boolean> {

@@ -6,11 +6,13 @@
     "build": "nest build",
     "start": "nest start",
     "start:dev": "nest start --watch",
+    "start:worker": "node dist/worker.js",
     "lint": "eslint .",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand --testPathIgnorePatterns e2e",
     "test:e2e": "jest --runInBand --testPathPatterns e2e",
     "check:env": "node scripts/check-env-example.mjs",
+    "check:drift": "node scripts/check-schema-drift.mjs",
     "smoke": "nest build && node scripts/smoke-live.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.seed.json",
     "prisma": "prisma"

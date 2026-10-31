@@ -1,8 +1,9 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { AdminAction, AdminTargetType, OrderStatus, RatingTargetType } from '@prisma/client';
 
 import { pageMeta } from '../../common/dto/pagination-query.dto';
 import { AuditService } from '../audit/audit.service';
+import { MOVEMENT_SOURCE } from '../products/inventory-ledger';
 import { AdminOrderDetail, OrdersRepository } from './orders.repository';
 
 // Valid forward transitions
@@ -26,8 +27,6 @@ const orderStateChanged = () =>
 
 @Injectable()
 export class OrdersService {
-  private readonly logger = new Logger(OrdersService.name);
-
   constructor(
     private readonly ordersRepository: OrdersRepository,
     private readonly auditService: AuditService,
@@ -73,7 +72,10 @@ export class OrdersService {
       });
     }
 
-    const { cancelledOrderIds } = await this.ordersRepository.cancelPendingGroup(order.orderGroupId);
+    const { cancelledOrderIds } = await this.ordersRepository.cancelPendingGroup(order.orderGroupId, {
+      source: MOVEMENT_SOURCE.SHOPPER_CANCEL,
+      actorUserId: userId,
+    });
     if (!cancelledOrderIds.includes(order.id)) {
       // Paid (or cancelled) between our read and the guarded write.
       throw orderStateChanged();
@@ -129,27 +131,6 @@ export class OrdersService {
     const updated = await this.ordersRepository.transitionOrderStatus(orderId, order.status, newStatus);
     if (!updated) throw orderStateChanged();
     return updated;
-  }
-
-  /**
-   * Abandoned checkouts: groups older than the TTL whose orders are all still
-   * PENDING and that no payment has touched. Cancelling them releases the
-   * stock they reserved (fix.js PAY-03). Called from the orders queue.
-   */
-  async expireStalePendingGroups(ttlMinutes: number, batchSize = 100): Promise<{ groups: number; orders: number }> {
-    const olderThan = new Date(Date.now() - ttlMinutes * 60_000);
-    const groupIds = await this.ordersRepository.findStalePendingGroupIds(olderThan, batchSize);
-
-    let orders = 0;
-    for (const groupId of groupIds) {
-      const { cancelledOrderIds } = await this.ordersRepository.cancelPendingGroup(groupId);
-      orders += cancelledOrderIds.length;
-    }
-
-    if (groupIds.length > 0) {
-      this.logger.log(`Expired ${groupIds.length} abandoned checkout group(s), ${orders} order(s); stock released.`);
-    }
-    return { groups: groupIds.length, orders };
   }
 
   async verifyDeliveredPurchase(
@@ -214,7 +195,10 @@ export class OrdersService {
       });
     }
 
-    const { cancelledOrderIds } = await this.ordersRepository.cancelPendingGroup(order.orderGroupId);
+    const { cancelledOrderIds } = await this.ordersRepository.cancelPendingGroup(order.orderGroupId, {
+      source: MOVEMENT_SOURCE.ADMIN_CANCEL,
+      actorUserId: adminId,
+    });
     if (!cancelledOrderIds.includes(order.id)) {
       throw orderStateChanged();
     }

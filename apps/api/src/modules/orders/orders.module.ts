@@ -1,20 +1,19 @@
-import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { AuditModule } from '../audit/audit.module';
 import { VendorsModule } from '../vendors/vendors.module';
+import { AdminMaintenanceController } from './admin-maintenance.controller';
 import { AdminOrdersController } from './admin-orders.controller';
-import { OrdersExpiryProcessor } from './jobs/orders-expiry.processor';
-import { ORDERS_QUEUE, OrdersJobsService } from './jobs/orders-jobs.service';
+import { OrdersJobsModule } from './jobs/orders-jobs.module';
 import { OrdersController } from './orders.controller';
 import { OrdersRepository } from './orders.repository';
 import { OrdersService } from './orders.service';
 import { VendorOrdersController } from './vendor-orders.controller';
 
 @Module({
-  imports: [VendorsModule, AuditModule, BullModule.registerQueue({ name: ORDERS_QUEUE })],
-  controllers: [AdminOrdersController, OrdersController, VendorOrdersController],
-  providers: [OrdersService, OrdersRepository, OrdersJobsService, OrdersExpiryProcessor],
+  imports: [VendorsModule, AuditModule, OrdersJobsModule],
+  controllers: [AdminMaintenanceController, AdminOrdersController, OrdersController, VendorOrdersController],
+  providers: [OrdersService, OrdersRepository],
   exports: [OrdersService],
 })
 export class OrdersModule {}

@@ -16,7 +16,6 @@ describe('OrdersService', () => {
       getVendorOrder: jest.fn(),
       transitionOrderStatus: jest.fn(),
       cancelPendingGroup: jest.fn(),
-      findStalePendingGroupIds: jest.fn(),
       findShopperOrders: jest.fn(),
       findVendorOrders: jest.fn(),
       hasDeliveredVendorOrder: jest.fn(),
@@ -45,18 +44,18 @@ describe('OrdersService', () => {
       repository.getShopperOrder
         .mockResolvedValueOnce({ id: '1', orderGroupId: 'g', status: OrderStatus.PENDING } as any)
         .mockResolvedValueOnce({ id: '1', orderGroupId: 'g', status: OrderStatus.CANCELLED } as any);
-      repository.cancelPendingGroup.mockResolvedValue({ cancelledOrderIds: ['1', '2'] });
+      repository.cancelPendingGroup.mockResolvedValue({ outcome: 'released', cancelledOrderIds: ['1', '2'] });
 
       const res = await service.cancelOrder('user-1', '1');
 
-      expect(repository.cancelPendingGroup).toHaveBeenCalledWith('g');
+      expect(repository.cancelPendingGroup).toHaveBeenCalledWith('g', { source: 'shopper_cancel', actorUserId: 'user-1' }); // ledger RELEASE source (commerce/25 S2)
       expect(res.status).toBe(OrderStatus.CANCELLED);
       expect(res.cancelledOrderIds).toEqual(['1', '2']);
     });
 
     it('409 ORDER_STATE_CHANGED when the webhook paid it between the read and the guarded write (PAY-05)', async () => {
       repository.getShopperOrder.mockResolvedValue({ id: '1', orderGroupId: 'g', status: OrderStatus.PENDING } as any);
-      repository.cancelPendingGroup.mockResolvedValue({ cancelledOrderIds: [] });
+      repository.cancelPendingGroup.mockResolvedValue({ outcome: 'notEligible', cancelledOrderIds: [] });
 
       await expect(service.cancelOrder('user-1', '1')).rejects.toBeInstanceOf(ConflictException);
     });
@@ -110,26 +109,6 @@ describe('OrdersService', () => {
       const res = await service.confirmDelivery('user-1', '1');
       expect(repository.transitionOrderStatus).toHaveBeenCalledWith('1', OrderStatus.SHIPPED, OrderStatus.DELIVERED);
       expect(res.status).toBe(OrderStatus.DELIVERED);
-    });
-  });
-
-  describe('expireStalePendingGroups (PAY-03)', () => {
-    it('cancels each stale group and reports counts', async () => {
-      repository.findStalePendingGroupIds.mockResolvedValue(['g1', 'g2']);
-      repository.cancelPendingGroup.mockResolvedValueOnce({ cancelledOrderIds: ['a', 'b'] }).mockResolvedValueOnce({ cancelledOrderIds: ['c'] });
-
-      const result = await service.expireStalePendingGroups(60);
-
-      const [olderThan, take] = repository.findStalePendingGroupIds.mock.calls[0];
-      expect(Date.now() - olderThan.getTime()).toBeGreaterThanOrEqual(60 * 60_000 - 1000);
-      expect(take).toBe(100);
-      expect(result).toEqual({ groups: 2, orders: 3 });
-    });
-
-    it('is a quiet no-op when nothing is stale', async () => {
-      repository.findStalePendingGroupIds.mockResolvedValue([]);
-      await expect(service.expireStalePendingGroups(60)).resolves.toEqual({ groups: 0, orders: 0 });
-      expect(repository.cancelPendingGroup).not.toHaveBeenCalled();
     });
   });
 
@@ -199,11 +178,11 @@ describe('OrdersService', () => {
       repository.findByIdForAdmin
         .mockResolvedValueOnce(pending as any)
         .mockResolvedValueOnce({ ...pending, status: OrderStatus.CANCELLED } as any);
-      repository.cancelPendingGroup.mockResolvedValue({ cancelledOrderIds: ['o1', 'o2'] });
+      repository.cancelPendingGroup.mockResolvedValue({ outcome: 'released', cancelledOrderIds: ['o1', 'o2'] });
 
       const result = await service.cancelOrderForAdmin('admin-1', 'o1');
 
-      expect(repository.cancelPendingGroup).toHaveBeenCalledWith('g1');
+      expect(repository.cancelPendingGroup).toHaveBeenCalledWith('g1', { source: 'admin_cancel', actorUserId: 'admin-1' });
       expect(result).toMatchObject({ id: 'o1', status: OrderStatus.CANCELLED, cancelledOrderIds: ['o1', 'o2'] });
       expect(auditService.record.mock.calls.map((c) => c[0])).toEqual([
         { actorId: 'admin-1', action: 'ORDER_CANCELLED', targetType: 'ORDER', targetId: 'o1' },
@@ -236,7 +215,7 @@ describe('OrdersService', () => {
 
     it('409 ORDER_STATE_CHANGED when payment lands first (order not in the cancelled set); nothing audited', async () => {
       repository.findByIdForAdmin.mockResolvedValue(pending as any);
-      repository.cancelPendingGroup.mockResolvedValue({ cancelledOrderIds: [] });
+      repository.cancelPendingGroup.mockResolvedValue({ outcome: 'notEligible', cancelledOrderIds: [] });
 
       await expect(service.cancelOrderForAdmin('admin-1', 'o1')).rejects.toMatchObject({
         status: 409,
