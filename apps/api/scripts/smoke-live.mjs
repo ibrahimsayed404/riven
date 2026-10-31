@@ -54,6 +54,7 @@ const testDbUrl = (() => {
 if (!/_test$/.test(testDbUrl.pathname)) fail(`refusing to run against "${testDbUrl.pathname.slice(1)}": the database name must end in _test`);
 
 const PORT = Number(process.env.SMOKE_PORT || 3100);
+const SMOKE_HEALTH_TOKEN = 'smoke-health-token-0123456789';
 const BASE = `http://localhost:${PORT}/`;
 const redisUrl = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
 redisUrl.pathname = `/${process.env.SMOKE_REDIS_DB || 1}`;
@@ -82,6 +83,11 @@ async function startServer() {
     PAYMOB_API_KEY: '',
     PAYMOB_INTEGRATION_ID: '',
     PAYMOB_HMAC_SECRET: '',
+    // Monitor endpoints /health/dependencies and /health/maintenance (specs/commerce/22 §4.3).
+    HEALTH_CHECK_TOKEN: SMOKE_HEALTH_TOKEN,
+    // The production default; a shorter local value in .env would expire the
+    // run's own checkouts mid-way and break the stock checks.
+    CHECKOUT_PENDING_TTL_MINUTES: '60',
   };
 
   const migrate = spawnSync('npx prisma migrate deploy', { cwd: apiDir, env, shell: true, encoding: 'utf8' });
@@ -138,11 +144,11 @@ const results = [];
 const covered = new Set();
 const future = (days) => new Date(Date.now() + days * 86_400_000).toISOString();
 
-async function call(name, method, tpl, { token, body, params = {}, query, expect }) {
+async function call(name, method, tpl, { token, body, params = {}, query, expect, headers: extraHeaders = {} }) {
   covered.add(`${method} /${tpl}`);
   let path = tpl.replace(/:(\w+)/g, (_, k) => encodeURIComponent(params[k] ?? `missing-${k}`));
   if (query) path += '?' + new URLSearchParams(query).toString();
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders };
   if (token) headers.Authorization = `Bearer ${token}`;
   let status = 0;
   let text = '';
@@ -312,7 +318,17 @@ async function scenario(prisma) {
   const v3 = await mkVariant(p3, 3, 5);
   const v4 = await mkVariant(p4, 4, 5);
   await call('duplicate sku -> 409 SKU_TAKEN', 'POST', 'vendors/me/products/:id/variants', { token: vendorToken, params: { id: p1 }, body: { sku: `SKU-${run}-1` }, expect: 409 });
-  await call('update variant stock', 'PATCH', 'vendors/me/products/:id/variants/:variantId', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { stockQuantity: 12 }, expect: 200 });
+  // stock is a signed delta with a reason, never an absolute write (TD-08, specs/commerce/25 S3)
+  await call('absolute stock write refused -> 400', 'PATCH', 'vendors/me/products/:id/variants/:variantId', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { stockQuantity: 12 }, expect: 400 });
+  await call('update variant (no stock)', 'PATCH', 'vendors/me/products/:id/variants/:variantId', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { color: 'Off-white' }, expect: 200 });
+  const adj = await call('vendor stock +2', 'POST', 'vendors/me/products/:id/variants/:variantId/stock-adjustments', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { change: 2, reason: 'smoke restock' }, expect: 201 });
+  check('stock adjusted 10 -> 12 with a ledger row', adj.body?.stockQuantity === 12 && adj.body?.movement?.quantityBefore === 10 && adj.body?.movement?.type === 'VENDOR_ADJUSTMENT', JSON.stringify(adj.body).slice(0, 300));
+  await call('vendor stock below zero -> 409', 'POST', 'vendors/me/products/:id/variants/:variantId/stock-adjustments', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { change: -999, reason: 'too much' }, expect: 409 });
+  await call('vendor stock change 0 -> 400', 'POST', 'vendors/me/products/:id/variants/:variantId/stock-adjustments', { token: vendorToken, params: { id: p1, variantId: v1 }, body: { change: 0, reason: 'nothing' }, expect: 400 });
+  const hist = await call('vendor stock history', 'GET', 'vendors/me/products/:id/variants/:variantId/stock-movements', { token: vendorToken, params: { id: p1, variantId: v1 }, expect: 200 });
+  check('history: initial stock + the adjustment, newest first', hist.body?.data?.length === 2 && hist.body.data[0].reason === 'smoke restock', JSON.stringify(hist.body?.data?.map((m) => m.reason)));
+  await call('admin stock ledger', 'GET', 'admin/inventory-movements', { token: adminToken, query: { variantId: v1 }, expect: 200 });
+  await call('admin stock ledger as vendor -> 403', 'GET', 'admin/inventory-movements', { token: vendorToken, expect: 403 });
   await call('admin products list', 'GET', 'admin/products', { token: adminToken, query: { vendorId }, expect: 200 });
   await call('admin product detail', 'GET', 'admin/products/:id', { token: adminToken, params: { id: p1 }, expect: 200 });
   const pub = await call('public product list', 'GET', 'products', { query: { vendorId }, expect: 200 });
@@ -372,7 +388,13 @@ async function scenario(prisma) {
   check('admin order detail has the payment record', aod.body?.orderGroup && 'paymobIntentId' in aod.body.orderGroup, JSON.stringify(aod.body?.orderGroup));
   await call('admin cancel delivered -> 400', 'PATCH', 'admin/orders/:id/cancel', { token: adminToken, params: { id: order1 }, expect: 400 });
 
-  const g2 = await checkout('order 2', [[p1, v1, 1]]);
+  // Idempotency-Key (TD-07, specs/commerce/25 S4): a retry with the same key is the same order
+  await call('order 2: add', 'POST', 'cart/items', { token: shopperToken, body: { productId: p1, variantId: v1, quantity: 1 }, expect: 201 });
+  const idemKey = `smoke-${run}-order-2`;
+  const g2 = (await call('order 2: checkout with Idempotency-Key', 'POST', 'checkout', { token: shopperToken, headers: { 'Idempotency-Key': idemKey }, expect: 201 })).body || {};
+  const g2again = await call('order 2: same key again (replay)', 'POST', 'checkout', { token: shopperToken, headers: { 'Idempotency-Key': idemKey }, expect: 201 });
+  check('same Idempotency-Key returns the same order group', g2again.body?.id === g2.id, `${g2.id} vs ${g2again.body?.id}`);
+  await call('Idempotency-Key with a space -> 400', 'POST', 'checkout', { token: shopperToken, headers: { 'Idempotency-Key': 'bad key' }, expect: 400 });
   const c2 = await call('shopper cancel pending', 'PATCH', 'orders/:id/cancel', { token: shopperToken, params: { id: g2.orders?.[0]?.id }, expect: 200 });
   check('shopper cancel returns cancelledOrderIds', Array.isArray(c2.body?.cancelledOrderIds), JSON.stringify(c2.body));
   const g3 = await checkout('order 3', [[p1, v1, 1]]);
@@ -380,6 +402,94 @@ async function scenario(prisma) {
   await call('admin cancel again (no-op)', 'PATCH', 'admin/orders/:id/cancel', { token: adminToken, params: { id: g3.orders?.[0]?.id }, expect: 200 });
   const stockEnd = await prisma.productVariant.findUnique({ where: { id: v1 } });
   check('stock restored after both cancels (still 10)', stockEnd?.stockQuantity === 10, stockEnd?.stockQuantity);
+
+  // reservation maintenance (specs/commerce/23 R0.8): an abandoned checkout past the TTL is
+  // released by the manual expire-overdue command, which records a run and an audit row.
+  const g4 = await checkout('order 4 (abandoned)', [[p1, v1, 2]]);
+  await prisma.$executeRawUnsafe(`UPDATE "order_groups" SET "createdAt" = NOW() - INTERVAL '3 hours' WHERE "id" = $1`, g4.id);
+  await call('expire-overdue without reason -> 400', 'POST', 'admin/maintenance/expire-overdue', { token: adminToken, body: {}, expect: 400 });
+  await call('expire-overdue as shopper -> 403', 'POST', 'admin/maintenance/expire-overdue', { token: shopperToken, body: { reason: 'x' }, expect: 403 });
+  const exp = await call('admin expire-overdue', 'POST', 'admin/maintenance/expire-overdue', { token: adminToken, body: { reason: `smoke ${run}` }, expect: 200 });
+  check('expire-overdue released the abandoned checkout', (exp.body?.released ?? 0) >= 1, JSON.stringify(exp.body));
+  const g4Orders = await prisma.order.findMany({ where: { orderGroupId: g4.id }, select: { status: true } });
+  check('abandoned checkout orders CANCELLED', g4Orders.length > 0 && g4Orders.every((o) => o.status === 'CANCELLED'), JSON.stringify(g4Orders));
+  const stockAfterExpiry = await prisma.productVariant.findUnique({ where: { id: v1 } });
+  check('stock restored by expiry (still 10)', stockAfterExpiry?.stockQuantity === 10, stockAfterExpiry?.stockQuantity);
+  const ledger = await prisma.inventoryMovement.aggregate({ where: { variantId: v1 }, _sum: { quantityDelta: true } });
+  check('stock ledger reconciles with the counter after checkouts, cancels, expiry and adjustments', ledger._sum.quantityDelta === stockAfterExpiry?.stockQuantity, `${ledger._sum.quantityDelta} vs ${stockAfterExpiry?.stockQuantity}`);
+  const runRow = exp.body?.runId ? await prisma.maintenanceRun.findUnique({ where: { id: exp.body.runId } }) : null;
+  check('maintenance run recorded', runRow?.status === 'SUCCEEDED' && runRow?.triggeredBy === adminId, JSON.stringify(runRow));
+  const expAudit = await prisma.adminAuditLog.findFirst({ where: { targetId: exp.body?.runId, action: 'MAINTENANCE_EXPIRE_OVERDUE' } });
+  check('expire-overdue audited with its reason', expAudit?.reason === `smoke ${run}`, JSON.stringify(expAudit));
+
+  // payment exceptions (specs/commerce/25 S1). Paymob is off here, so the row a late
+  // webhook would write for the expired g4 is inserted directly; the admin flow is HTTP.
+  const smokeTx = `smoke-${run}`;
+  await prisma.paymentException.create({
+    data: { type: 'LATE_PAYMENT', orderGroupId: g4.id, provider: 'PAYMOB', providerTransactionId: smokeTx, amountCents: 1000, currency: 'EGP', expectedAmountCents: 0, detail: 'smoke: late payment' },
+  });
+  await call('payment exceptions as shopper -> 403', 'GET', 'admin/payment-exceptions', { token: shopperToken, expect: 403 });
+  await call('payment exceptions bad type -> 400', 'GET', 'admin/payment-exceptions', { token: adminToken, query: { type: 'NOPE' }, expect: 400 });
+  const pel = await call('payment exceptions (open, this group)', 'GET', 'admin/payment-exceptions', { token: adminToken, query: { status: 'OPEN', orderGroupId: g4.id }, expect: 200 });
+  const pe = pel.body?.data?.find((x) => x.providerTransactionId === smokeTx);
+  check('late payment listed as an OPEN exception', pe?.type === 'LATE_PAYMENT' && pe?.status === 'OPEN', JSON.stringify(pel.body).slice(0, 300));
+  await call('payment exception detail', 'GET', 'admin/payment-exceptions/:id', { token: adminToken, params: { id: pe?.id }, expect: 200 });
+  await call('payment exception unknown -> 404', 'GET', 'admin/payment-exceptions/:id', { token: adminToken, params: { id: '00000000-0000-0000-0000-000000000000' }, expect: 404 });
+  await call('payment exception not a uuid -> 400', 'GET', 'admin/payment-exceptions/:id', { token: adminToken, params: { id: 'nope' }, expect: 400 });
+  const peHealth = await call('health maintenance with an open payment exception', 'GET', 'health/maintenance', { headers: { 'x-health-token': SMOKE_HEALTH_TOKEN }, expect: 503 });
+  check('PAY-EXC condition raised', (peHealth.body?.details?.conditions ?? []).some((c) => c.code === 'PAY-EXC'), JSON.stringify(peHealth.body).slice(0, 300));
+  await call('resolve with a short note -> 400', 'PATCH', 'admin/payment-exceptions/:id/resolve', { token: adminToken, params: { id: pe?.id }, body: { note: 'short' }, expect: 400 });
+  const res = await call('resolve payment exception', 'PATCH', 'admin/payment-exceptions/:id/resolve', { token: adminToken, params: { id: pe?.id }, body: { note: `Refunded manually (smoke ${run})` }, expect: 200 });
+  check('exception RESOLVED with who and the note', res.body?.status === 'RESOLVED' && res.body?.resolvedBy?.id === adminId && res.body?.resolutionNote === `Refunded manually (smoke ${run})`, JSON.stringify(res.body).slice(0, 300));
+  await call('resolve again -> 409', 'PATCH', 'admin/payment-exceptions/:id/resolve', { token: adminToken, params: { id: pe?.id }, body: { note: 'second attempt here' }, expect: 409 });
+  const peAudit = await prisma.adminAuditLog.findFirst({ where: { targetId: pe?.id, action: 'PAYMENT_EXCEPTION_RESOLVED' } });
+  check('resolution audited with the note', peAudit?.reason === `Refunded manually (smoke ${run})`, JSON.stringify(peAudit));
+
+  // monitor endpoints (specs/commerce/22 §4.3, M4 / M5): token required; 200 healthy, 503 coded when a condition is open
+  const healthHeaders = { 'x-health-token': SMOKE_HEALTH_TOKEN };
+  await call('health dependencies without token -> 401', 'GET', 'health/dependencies', { expect: 401 });
+  const deps = await call('health dependencies', 'GET', 'health/dependencies', { headers: healthHeaders, expect: 200 });
+  check('postgres and redis up', deps.body?.postgres === 'up' && deps.body?.redis === 'up', JSON.stringify(deps.body));
+  const mh = await call('health maintenance', 'GET', 'health/maintenance', { headers: healthHeaders, expect: [200, 503] });
+  check('maintenance health has conditions', Array.isArray(mh.body?.conditions ?? mh.body?.details?.conditions), JSON.stringify(mh.body).slice(0, 300));
+
+  // transactional outbox admin (specs/commerce/01 §7.9): no consumers are registered yet, so the outbox is empty
+  await call('outbox list', 'GET', 'admin/outbox', { token: adminToken, expect: 200 });
+  await call('outbox metrics', 'GET', 'admin/outbox/metrics', { token: adminToken, expect: 200 });
+  await call('outbox delivery unknown -> 404', 'GET', 'admin/outbox/deliveries/:id', { token: adminToken, params: { id: '00000000-0000-0000-0000-000000000000' }, expect: 404 });
+  await call('outbox drain as shopper -> 403', 'POST', 'admin/outbox/drain', { token: shopperToken, body: {}, expect: 403 });
+  await call('outbox drain', 'POST', 'admin/outbox/drain', { token: adminToken, body: { max: 10 }, expect: [200, 409] });
+  await call('outbox requeue short reason -> 400', 'PATCH', 'admin/outbox/deliveries/:id/requeue', { token: adminToken, params: { id: '00000000-0000-0000-0000-000000000000' }, body: { reason: 'short' }, expect: 400 });
+  await call('outbox requeue unknown -> 404', 'PATCH', 'admin/outbox/deliveries/:id/requeue', { token: adminToken, params: { id: '00000000-0000-0000-0000-000000000000' }, body: { reason: 'smoke requeue check' }, expect: 404 });
+
+  // barcode registry (riven-barcode-inventory-plan B1): vendors propose, admins decide
+  const bcValue = `SMK${run}`.toUpperCase().replace(/^RVN/, 'X');
+  const prop = await call('vendor propose barcode', 'POST', 'vendors/me/barcodes', { token: vendorToken, body: { variantId: v1, value: `${bcValue}\r\n`, packagingType: 'UNIT' }, expect: 201 });
+  check('proposal is pending, value normalized', prop.body?.status === 'PENDING_APPROVAL' && prop.body?.value === bcValue, JSON.stringify(prop.body));
+  await call('propose same value again -> 409', 'POST', 'vendors/me/barcodes', { token: vendorToken, body: { variantId: v1, value: bcValue, packagingType: 'UNIT' }, expect: 409 });
+  await call('propose RVN value -> 400', 'POST', 'vendors/me/barcodes', { token: vendorToken, body: { variantId: v1, value: `RVN${run}`, packagingType: 'UNIT' }, expect: 400 });
+  await call('vendor list barcodes', 'GET', 'vendors/me/barcodes', { token: vendorToken, expect: 200 });
+  const lookupPending = await call('admin lookup pending barcode', 'POST', 'admin/barcodes/lookup', { token: adminToken, body: { value: bcValue, vendorId }, expect: 200 });
+  check('pending barcode does not resolve', lookupPending.body?.outcome === 'BARCODE_NOT_APPROVED', JSON.stringify(lookupPending.body));
+  await call('admin approve barcode', 'POST', 'admin/barcodes/:id/approve', { token: adminToken, params: { id: prop.body?.id }, expect: 200 });
+  const lookupActive = await call('admin lookup active barcode', 'POST', 'admin/barcodes/lookup', { token: adminToken, body: { value: bcValue, vendorId }, expect: 200 });
+  check('approved barcode resolves to the variant', lookupActive.body?.outcome === 'RESOLVED' && lookupActive.body?.variant?.id === v1, JSON.stringify(lookupActive.body));
+  await call('admin barcode detail', 'GET', 'admin/barcodes/:id', { token: adminToken, params: { id: prop.body?.id }, expect: 200 });
+  await call('admin list barcodes', 'GET', 'admin/barcodes', { token: adminToken, query: { vendorId }, expect: 200 });
+  await call('admin deactivate barcode', 'POST', 'admin/barcodes/:id/deactivate', { token: adminToken, params: { id: prop.body?.id }, body: { reason: 'smoke' }, expect: 200 });
+  await call('admin activate barcode', 'POST', 'admin/barcodes/:id/activate', { token: adminToken, params: { id: prop.body?.id }, body: { reason: 'smoke' }, expect: 200 });
+  const packProp = await call('vendor propose case barcode', 'POST', 'vendors/me/barcodes', { token: vendorToken, body: { variantId: v1, value: `${bcValue}C`, packagingType: 'CASE', unitsPerPackage: 12 }, expect: 201 });
+  await call('admin approve case barcode', 'POST', 'admin/barcodes/:id/approve', { token: adminToken, params: { id: packProp.body?.id }, expect: 200 });
+  const conv = await call('admin change case conversion', 'PATCH', 'admin/barcodes/:id', { token: adminToken, params: { id: packProp.body?.id }, body: { unitsPerPackage: 10, reason: 'smoke repack' }, expect: 200 });
+  check('conversion change bumps configVersion', conv.body?.configVersion === 2 && conv.body?.unitsPerPackage === 10, JSON.stringify(conv.body));
+  const rejProp = await call('vendor propose to reject', 'POST', 'vendors/me/barcodes', { token: vendorToken, body: { variantId: v1, value: `${bcValue}R`, packagingType: 'UNIT' }, expect: 201 });
+  await call('admin reject barcode', 'POST', 'admin/barcodes/:id/reject', { token: adminToken, params: { id: rejProp.body?.id }, body: { reason: 'smoke reject' }, expect: 200 });
+  const wdProp = await call('vendor propose to withdraw', 'POST', 'vendors/me/barcodes', { token: vendorToken, body: { variantId: v1, value: `${bcValue}W`, packagingType: 'UNIT' }, expect: 201 });
+  await call('vendor withdraw proposal', 'DELETE', 'vendors/me/barcodes/:id', { token: vendorToken, params: { id: wdProp.body?.id }, expect: 200 });
+  const internal = await call('admin create internal barcode', 'POST', 'admin/barcodes/internal', { token: adminToken, body: { variantId: v1, packagingType: 'UNIT' }, expect: 201 });
+  check('internal barcode is RVN and active', /^RVN/.test(internal.body?.value ?? '') && internal.body?.status === 'ACTIVE', JSON.stringify(internal.body));
+  await call('admin register vendor barcode', 'POST', 'admin/barcodes/vendor', { token: adminToken, body: { vendorId, variantId: v1, value: `${bcValue}A`, packagingType: 'UNIT', reason: 'smoke unknown scan' }, expect: 201 });
+  await call('admin barcodes as vendor -> 403', 'GET', 'admin/barcodes', { token: vendorToken, expect: 403 });
 
   // social
   await call('favorite product', 'POST', 'social/favorites', { token: shopperToken, body: { favorableType: 'PRODUCT', favorableId: p1 }, expect: 200 });
@@ -497,11 +607,20 @@ async function scenario(prisma) {
   });
   check('federated search finds the product, vendor and bazaar', all, 'not indexed within 20 s');
   await call('search all', 'GET', 'search', { query: { q: WORD }, expect: 200 });
-  const sp = await call('search products', 'GET', 'search/products', { query: { q: WORD }, expect: 200 });
-  check('deleted products are not searchable (3, 4)', sp.body?.hits && !sp.body.hits.some((h) => h.id === p3 || h.id === p4), JSON.stringify(sp.body?.hits?.map((h) => h.id)));
+  await call('search products', 'GET', 'search/products', { query: { q: WORD }, expect: 200 });
+  // Removals are separate index jobs: poll for absence too, never check once.
+  const spGone = await eventually(async () => {
+    const body = await searchQuiet('search/products', WORD);
+    return body?.hits && !body.hits.some((h) => h.id === p3 || h.id === p4) ? body : null;
+  });
+  check('deleted products are not searchable (3, 4)', spGone, 'still indexed after 20 s');
   await call('search vendors', 'GET', 'search/vendors', { query: { q: WORD }, expect: 200 });
-  const sb = await call('search bazaars', 'GET', 'search/bazaars', { query: { q: WORD }, expect: 200 });
-  check('cancelled bazaars are not searchable (2, 3)', sb.body?.hits && !sb.body.hits.some((h) => h.id === b2 || h.id === b3), JSON.stringify(sb.body?.hits?.map((h) => h.id)));
+  await call('search bazaars', 'GET', 'search/bazaars', { query: { q: WORD }, expect: 200 });
+  const sbGone = await eventually(async () => {
+    const body = await searchQuiet('search/bazaars', WORD);
+    return body?.hits && !body.hits.some((h) => h.id === b2 || h.id === b3) ? body : null;
+  });
+  check('cancelled bazaars are not searchable (2, 3)', sbGone, 'still indexed after 20 s');
   await call('search without q -> 400', 'GET', 'search/products', { expect: 400 });
 
   // a vendor's own rename must reach the product documents (vendorName)
@@ -515,10 +634,11 @@ async function scenario(prisma) {
   await call('reindex as vendor -> 403', 'POST', 'admin/search/reindex', { token: vendorToken, body: {}, expect: 403 });
 
   // media / dashboard / webhook
-  const upload = { purpose: 'PRODUCT_IMAGE', contentType: 'image/jpeg' };
+  const upload = { purpose: 'PRODUCT_IMAGE', contentType: 'image/jpeg', contentLength: 2048 };
   await call('upload url', 'POST', 'media/upload-url', { token: vendorToken, body: upload, expect: 200 });
   await call('upload url as shopper -> 403', 'POST', 'media/upload-url', { token: shopperToken, body: upload, expect: 403 });
   await call('upload url bad type -> 400', 'POST', 'media/upload-url', { token: vendorToken, body: { ...upload, contentType: 'application/pdf' }, expect: 400 });
+  await call('upload url over 10 MB -> 400', 'POST', 'media/upload-url', { token: vendorToken, body: { ...upload, contentLength: 10 * 1024 * 1024 + 1 }, expect: 400 });
   await call('admin overview', 'GET', 'admin/overview', { token: adminToken, expect: 200 });
   const al = await call('audit log', 'GET', 'admin/audit-log', { token: adminToken, query: { actorId: adminId, limit: '100' }, expect: 200 });
   const rows = al.body?.data ?? [];
